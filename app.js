@@ -2,13 +2,20 @@ const DATA_URL = "data/market.json";
 const ISTANBUL_TIMEZONE = "Europe/Istanbul";
 
 const elements = {
+  metaDescription: document.querySelector('meta[name="description"]'),
+  wordmarkPair: document.querySelector("#wordmark-pair"),
+  marketButtons: document.querySelectorAll(".market-options [data-market]"),
+  marketCounts: document.querySelectorAll("[data-market-count]"),
+  heroMarketLabel: document.querySelector("#hero-market-label"),
   dataState: document.querySelector("#data-state"),
   refreshButton: document.querySelector("#refresh-button"),
   spotValue: document.querySelector("#spot-value"),
   spotChange: document.querySelector("#spot-change"),
   spotLow: document.querySelector("#spot-low"),
   spotHigh: document.querySelector("#spot-high"),
+  spotUnit: document.querySelector("#spot-unit"),
   marketDate: document.querySelector("#market-date"),
+  curveUnit: document.querySelector("#curve-unit"),
   curveSummary: document.querySelector("#curve-summary"),
   contractCount: document.querySelector("#contract-count"),
   frontContract: document.querySelector("#front-contract"),
@@ -23,12 +30,17 @@ const elements = {
   yieldPeriodButtons: document.querySelectorAll("[data-yield-period]"),
   updatedAt: document.querySelector("#updated-at"),
   rows: document.querySelector("#contract-rows"),
+  contractsCaption: document.querySelector("#contracts-caption"),
   canvas: document.querySelector("#curve-chart"),
   tooltip: document.querySelector("#chart-tooltip"),
+  footerMarketMark: document.querySelector("#footer-market-mark"),
+  footerMarketCopy: document.querySelector("#footer-market-copy"),
 };
 
 const state = {
+  snapshot: null,
   data: null,
+  marketKey: null,
   chartPoints: [],
   yieldChartPoints: [],
   yieldPeriod: "daily",
@@ -60,20 +72,9 @@ const YIELD_PERIODS = {
   },
 };
 
-const priceFormat = new Intl.NumberFormat("en-US", {
-  minimumFractionDigits: 4,
-  maximumFractionDigits: 4,
-});
-
 const percentFormat = new Intl.NumberFormat("en-US", {
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,
-  signDisplay: "always",
-});
-
-const signedPriceFormat = new Intl.NumberFormat("en-US", {
-  minimumFractionDigits: 4,
-  maximumFractionDigits: 4,
   signDisplay: "always",
 });
 
@@ -107,8 +108,21 @@ function signedClass(value) {
   return value > 0 ? "positive" : "negative";
 }
 
+function priceFormatter(signed = false) {
+  const digits = state.data?.price_digits ?? 4;
+  return new Intl.NumberFormat("en-US", {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+    ...(signed ? { signDisplay: "always" } : {}),
+  });
+}
+
 function formatPrice(value) {
-  return hasNumber(value) ? priceFormat.format(value) : "—";
+  return hasNumber(value) ? priceFormatter().format(value) : "—";
+}
+
+function formatSignedPrice(value) {
+  return hasNumber(value) ? priceFormatter(true).format(value) : "—";
 }
 
 function formatPercent(value) {
@@ -165,6 +179,44 @@ function updateStatus(generatedAt) {
   }
 }
 
+function renderMarketRail(snapshot) {
+  elements.marketCounts.forEach((count) => {
+    const market = snapshot.markets[count.dataset.marketCount];
+    const total = market?.contracts?.length ?? 0;
+    count.textContent = `${total} ${total === 1 ? "maturity" : "maturities"}`;
+  });
+
+  elements.marketButtons.forEach((button) => {
+    button.disabled = !snapshot.markets[button.dataset.market];
+  });
+}
+
+function renderMarketIdentity(market) {
+  const marketIndex = state.snapshot.market_order.indexOf(market.key) + 1;
+  const marketNumber = String(Math.max(marketIndex, 1)).padStart(2, "0");
+  const spacedPair = market.pair.replace("/", " · ");
+
+  document.body.dataset.market = market.key;
+  document.title = `Vade — ${market.pair} Futures Curve`;
+  elements.metaDescription.content =
+    `The latest ${market.pair} spot reference and VİOP futures curve, ` +
+    "refreshed every 15 minutes.";
+  elements.wordmarkPair.textContent = spacedPair;
+  elements.heroMarketLabel.textContent = `${market.pair},`;
+  elements.spotUnit.textContent = market.spot_unit;
+  elements.curveUnit.textContent = market.curve_unit;
+  elements.contractsCaption.textContent =
+    `Latest VİOP ${market.pair} futures prices, maturity dates, days remaining, ` +
+    "and compounded implied yields";
+  elements.footerMarketMark.textContent = `VADE / ${marketNumber}`;
+  elements.footerMarketCopy.textContent =
+    `Built as a clear window into the ${market.pair} term structure.`;
+
+  elements.marketButtons.forEach((button) => {
+    button.setAttribute("aria-pressed", String(button.dataset.market === market.key));
+  });
+}
+
 function renderSpot(spot) {
   elements.spotValue.textContent = formatPrice(spot.last);
   elements.spotValue.classList.remove("loading-value");
@@ -172,7 +224,7 @@ function renderSpot(spot) {
   elements.spotHigh.textContent = formatPrice(spot.high);
 
   elements.spotChange.className = `change-value ${signedClass(spot.change_percent)}`;
-  const absolute = hasNumber(spot.change) ? signedPriceFormat.format(spot.change) : "—";
+  const absolute = formatSignedPrice(spot.change);
   elements.spotChange.textContent = `${absolute} · ${formatPercent(spot.change_percent)}`;
 }
 
@@ -191,7 +243,7 @@ function renderStats(data) {
     const direction = final.last >= front.last ? "rises" : "falls";
     elements.curveSummary.textContent =
       `${data.contracts.length} listed maturities. The curve ${direction} from ` +
-      `${formatPrice(front.last)} to ${formatPrice(final.last)} TRY per USD.`;
+      `${formatPrice(front.last)} to ${formatPrice(final.last)} ${data.spot_unit}.`;
   }
 }
 
@@ -288,7 +340,11 @@ function renderChart() {
     context.stroke();
     context.fillStyle = "rgba(241, 239, 230, 0.48)";
     context.textAlign = "right";
-    context.fillText(value.toFixed(2), margin.left - 10, y);
+    context.fillText(
+      value.toFixed(Math.min(state.data.price_digits, 2)),
+      margin.left - 10,
+      y,
+    );
   }
 
   const spotY = yAt(state.data.spot.last);
@@ -350,6 +406,12 @@ function renderChart() {
     }
     return { x, y, contract };
   });
+  canvas.setAttribute(
+    "aria-label",
+    `${state.data.pair} futures price curve across ${contracts.length} maturities, ` +
+    `from ${formatPrice(contracts[0].last)} to ` +
+    `${formatPrice(contracts.at(-1).last)} ${state.data.spot_unit}.`,
+  );
 }
 
 function renderYieldChart() {
@@ -528,23 +590,57 @@ function renderYieldChart() {
     `${formatYield(Math.min(...values))} to ${formatYield(Math.max(...values))}.`;
   canvas.setAttribute(
     "aria-label",
-    `${settings.label} compounded USD/TRY futures net yield by maturity. ` +
+    `${settings.label} compounded ${state.data.pair} futures net yield by maturity. ` +
     `Highest ${settings.label.toLowerCase()} yield is ${formatYield(peak.value)} at ` +
     `${peak.contract.label}.`,
   );
 }
 
-function render(data) {
-  state.data = data;
-  renderSpot(data.spot);
-  renderStats(data);
-  renderRows(data.contracts);
+function selectMarket(marketKey, updateUrl = false) {
+  const market = state.snapshot?.markets?.[marketKey];
+  if (!market) return;
+
+  state.marketKey = marketKey;
+  state.data = market;
+  state.chartPoints = [];
+  state.yieldChartPoints = [];
+  elements.tooltip.hidden = true;
+  elements.yieldTooltip.hidden = true;
+
+  renderMarketIdentity(market);
+  renderSpot(market.spot);
+  renderStats(market);
+  renderRows(market.contracts);
   renderChart();
   renderYieldChart();
 
-  elements.marketDate.textContent = dateFormat.format(parseMarketDate(data.market_date));
-  elements.updatedAt.textContent = `${dateTimeFormat.format(new Date(data.generated_at))} TRT`;
-  updateStatus(data.generated_at);
+  if (updateUrl) {
+    const url = new URL(window.location.href);
+    url.searchParams.set("market", marketKey);
+    window.history.replaceState({}, "", url);
+  }
+}
+
+function renderSnapshot(snapshot) {
+  state.snapshot = snapshot;
+  renderMarketRail(snapshot);
+
+  const queryMarket = new URLSearchParams(window.location.search)
+    .get("market")
+    ?.toUpperCase();
+  const selectedMarket = snapshot.markets[state.marketKey]
+    ? state.marketKey
+    : snapshot.markets[queryMarket]
+      ? queryMarket
+      : snapshot.default_market;
+  selectMarket(selectedMarket);
+
+  elements.marketDate.textContent = dateFormat.format(
+    parseMarketDate(snapshot.market_date),
+  );
+  elements.updatedAt.textContent =
+    `${dateTimeFormat.format(new Date(snapshot.generated_at))} TRT`;
+  updateStatus(snapshot.generated_at);
 }
 
 async function loadData() {
@@ -554,14 +650,20 @@ async function loadData() {
     const response = await fetch(`${DATA_URL}?v=${Date.now()}`, { cache: "no-store" });
     if (!response.ok) throw new Error(`Market snapshot returned ${response.status}`);
     const data = await response.json();
-    if (!data.spot || !Array.isArray(data.contracts)) throw new Error("Invalid market snapshot");
-    render(data);
+    const marketsAreValid =
+      data.markets &&
+      Array.isArray(data.market_order) &&
+      data.market_order.every((key) =>
+        data.markets[key]?.spot && Array.isArray(data.markets[key]?.contracts)
+      );
+    if (!marketsAreValid) throw new Error("Invalid multi-market snapshot");
+    renderSnapshot(data);
   } catch (error) {
     console.error(error);
     elements.dataState.classList.remove("is-fresh", "is-delayed");
     elements.dataState.classList.add("is-error");
     elements.dataState.lastChild.textContent = " Data unavailable";
-    if (!state.data) {
+    if (!state.snapshot) {
       elements.rows.innerHTML = '<tr class="empty-row"><td colspan="11">The market snapshot could not be loaded. Try refreshing shortly.</td></tr>';
     }
   } finally {
@@ -571,6 +673,12 @@ async function loadData() {
 }
 
 elements.refreshButton.addEventListener("click", loadData);
+
+elements.marketButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    selectMarket(button.dataset.market, true);
+  });
+});
 
 window.addEventListener("resize", () => {
   window.clearTimeout(state.resizeTimer);
@@ -607,7 +715,10 @@ elements.canvas.addEventListener("pointermove", (event) => {
     return;
   }
 
-  elements.tooltip.innerHTML = `<strong>${nearest.contract.label}</strong>${formatPrice(nearest.contract.last)} TRY<br>${nearest.contract.days_to_maturity} days left`;
+  elements.tooltip.innerHTML =
+    `<strong>${nearest.contract.label}</strong>` +
+    `${formatPrice(nearest.contract.last)} · ${state.data.spot_unit}<br>` +
+    `${nearest.contract.days_to_maturity} days left`;
   const tooltipX = Math.min(Math.max(nearest.x + 12, 45), bounds.width - 155);
   const tooltipY = Math.max(nearest.y - 72, 8);
   elements.tooltip.style.left = `${tooltipX}px`;

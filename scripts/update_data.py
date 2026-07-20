@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the static USD/TRY VIOP market snapshot used by the dashboard."""
+"""Build the static TRY-denominated VIOP market snapshot used by the dashboard."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import math
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from importlib.metadata import version
@@ -23,9 +24,63 @@ from holidays.constants import HALF_DAY, PUBLIC
 
 
 ISTANBUL = ZoneInfo("Europe/Istanbul")
-BASE_SYMBOL = "USDTRY"
-CONTRACT_PATTERN = re.compile(r"^USDTRY([FGHJKMNQUVXZ])(\d{4})$")
-TABLE_CODE_PATTERN = re.compile(r"^F_USDTRY(\d{2})(\d{2})$")
+TROY_OUNCE_GRAMS = 31.1034768
+
+
+@dataclass(frozen=True)
+class MarketConfig:
+    """Describe one spot/futures market and its upstream symbol conventions."""
+
+    key: str
+    pair: str
+    futures_symbol: str
+    table_symbol: str
+    spot_asset: str
+    base_asset: str
+    spot_unit: str
+    curve_unit: str
+    price_digits: int
+    intraday_spot: bool = True
+
+
+MARKET_CONFIGS = (
+    MarketConfig(
+        key="USDTRY",
+        pair="USD/TRY",
+        futures_symbol="USDTRY",
+        table_symbol="USDTRY",
+        spot_asset="USD",
+        base_asset="USD",
+        spot_unit="TRY per USD",
+        curve_unit="TRY / USD",
+        price_digits=4,
+    ),
+    MarketConfig(
+        key="EURTRY",
+        pair="EUR/TRY",
+        futures_symbol="EURTRY",
+        table_symbol="EURTRY",
+        spot_asset="EUR",
+        base_asset="EUR",
+        spot_unit="TRY per EUR",
+        curve_unit="TRY / EUR",
+        price_digits=4,
+    ),
+    MarketConfig(
+        key="XAUTRY",
+        pair="XAU/TRY",
+        futures_symbol="XAUTRY",
+        table_symbol="XAUTRYM",
+        spot_asset="gram-altin",
+        base_asset="XAU",
+        spot_unit="TRY per gram",
+        curve_unit="TRY / GR XAU",
+        price_digits=2,
+        intraday_spot=False,
+    ),
+)
+MARKETS = {market.key: market for market in MARKET_CONFIGS}
+DEFAULT_MARKET = MARKETS["USDTRY"]
 MONTH_CODES = {
     "F": 1,
     "G": 2,
@@ -41,6 +96,16 @@ MONTH_CODES = {
     "Z": 12,
 }
 MONTH_TO_CODE = {month: code for code, month in MONTH_CODES.items()}
+
+
+@lru_cache(maxsize=None)
+def contract_pattern(futures_symbol: str) -> re.Pattern[str]:
+    return re.compile(rf"^{re.escape(futures_symbol)}([FGHJKMNQUVXZ])(\d{{4}})$")
+
+
+@lru_cache(maxsize=None)
+def table_code_pattern(table_symbol: str) -> re.Pattern[str]:
+    return re.compile(rf"^F_{re.escape(table_symbol)}(\d{{2}})(\d{{2}})$")
 
 
 def finite_number(value: Any) -> float | None:
@@ -96,23 +161,29 @@ def maturity_date(year: int, month: int) -> date:
     return candidate
 
 
-def parse_contract_symbol(symbol: str) -> tuple[int, int]:
-    match = CONTRACT_PATTERN.fullmatch(symbol.upper())
+def parse_contract_symbol(
+    symbol: str,
+    market: MarketConfig = DEFAULT_MARKET,
+) -> tuple[int, int]:
+    match = contract_pattern(market.futures_symbol).fullmatch(symbol.upper())
     if not match:
-        raise ValueError(f"Unsupported USD/TRY contract symbol: {symbol}")
+        raise ValueError(f"Unsupported {market.pair} contract symbol: {symbol}")
     month_code, year_text = match.groups()
     return int(year_text), MONTH_CODES[month_code]
 
 
-def symbol_from_table_code(code: str) -> str:
-    match = TABLE_CODE_PATTERN.fullmatch(code.upper())
+def symbol_from_table_code(
+    code: str,
+    market: MarketConfig = DEFAULT_MARKET,
+) -> str:
+    match = table_code_pattern(market.table_symbol).fullmatch(code.upper())
     if not match:
-        raise ValueError(f"Unsupported VİOP table code: {code}")
+        raise ValueError(f"Unsupported {market.pair} VİOP table code: {code}")
     month_text, short_year = match.groups()
     month = int(month_text)
     if month not in MONTH_TO_CODE:
         raise ValueError(f"Invalid month in VİOP table code: {code}")
-    return f"USDTRY{MONTH_TO_CODE[month]}20{short_year}"
+    return f"{market.futures_symbol}{MONTH_TO_CODE[month]}20{short_year}"
 
 
 def daily_yield_factor(
@@ -133,43 +204,117 @@ def compounded_yield_percent(factor: float | None, period_days: int) -> float | 
     return (factor**period_days - 1) * 100
 
 
-def fetch_spot() -> dict[str, Any]:
-    fx = bp.FX("USD")
-    try:
-        frame = fx.history(period="1g", interval="15m")
-        if not frame.empty:
-            latest_at = frame.index[-1]
-            latest_day = latest_at.date()
-            day_frame = frame[frame.index.date == latest_day]
-            last = finite_number(day_frame.iloc[-1]["Close"])
-            open_price = finite_number(day_frame.iloc[0]["Open"])
-            high = finite_number(day_frame["High"].max())
-            low = finite_number(day_frame["Low"].min())
-            if last is not None:
-                change = last - open_price if open_price is not None else None
-                change_percent = (
-                    change / open_price * 100
-                    if change is not None and open_price
-                    else None
-                )
-                return {
-                    "symbol": "USD/TRY",
-                    "last": last,
-                    "open": open_price,
-                    "high": high,
-                    "low": low,
-                    "change": change,
-                    "change_percent": change_percent,
-                    "updated_at": iso_timestamp(latest_at),
-                    "source": "TradingView intraday via borsapy FX",
-                }
-    except Exception as exc:
-        print(f"Warning: intraday USD/TRY spot unavailable: {exc}")
+def gold_try_per_gram(
+    gold_usd_per_ounce: float | None,
+    usd_try: float | None,
+) -> float | None:
+    """Convert ounce gold in USD to gram gold in TRY."""
+    gold = finite_number(gold_usd_per_ounce)
+    currency = finite_number(usd_try)
+    if gold is None or currency is None or gold <= 0 or currency <= 0:
+        return None
+    return gold * currency / TROY_OUNCE_GRAMS
+
+
+def fetch_gold_try_intraday(
+    market: MarketConfig,
+    usd_spot: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a fresh TRY-per-gram gold reference from XAUUSD and USDTRY."""
+    frame = bp.FX("XAU").history(period="1g", interval="15m")
+    if frame.empty:
+        raise RuntimeError("borsapy returned no XAUUSD history")
+
+    latest_at = frame.index[-1]
+    latest_day = latest_at.date()
+    day_frame = frame[frame.index.date == latest_day]
+    latest = day_frame.iloc[-1]
+    first = day_frame.iloc[0]
+    usd_last = finite_number(usd_spot.get("last"))
+    usd_open = finite_number(usd_spot.get("open")) or usd_last
+    usd_high = finite_number(usd_spot.get("high")) or usd_last
+    usd_low = finite_number(usd_spot.get("low")) or usd_last
+    last = gold_try_per_gram(latest["Close"], usd_last)
+    open_price = gold_try_per_gram(first["Open"], usd_open)
+    high = finite_number(
+        day_frame["High"].max() * usd_high / TROY_OUNCE_GRAMS
+    )
+    low = finite_number(
+        day_frame["Low"].min() * usd_low / TROY_OUNCE_GRAMS
+    )
+    if last is None:
+        raise RuntimeError("borsapy returned no usable intraday gold reference")
+
+    change = last - open_price if open_price is not None else None
+    change_percent = (
+        change / open_price * 100 if change is not None and open_price else None
+    )
+    updated_candidates = [
+        value
+        for value in (iso_timestamp(latest_at), usd_spot.get("updated_at"))
+        if value
+    ]
+    return {
+        "symbol": market.pair,
+        "last": last,
+        "open": open_price,
+        "high": high,
+        "low": low,
+        "change": change,
+        "change_percent": change_percent,
+        "updated_at": min(updated_candidates) if updated_candidates else None,
+        "source": "Synthetic XAUUSD × USDTRY via borsapy FX",
+    }
+
+
+def fetch_spot(
+    market: MarketConfig = DEFAULT_MARKET,
+    usd_spot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Fetch the spot reference that matches one futures underlying."""
+    if market.key == "XAUTRY" and usd_spot:
+        try:
+            return fetch_gold_try_intraday(market, usd_spot)
+        except Exception as exc:
+            print(f"Warning: intraday {market.pair} spot unavailable: {exc}")
+
+    fx = bp.FX(market.spot_asset)
+    if market.intraday_spot:
+        try:
+            frame = fx.history(period="1g", interval="15m")
+            if not frame.empty:
+                latest_at = frame.index[-1]
+                latest_day = latest_at.date()
+                day_frame = frame[frame.index.date == latest_day]
+                last = finite_number(day_frame.iloc[-1]["Close"])
+                open_price = finite_number(day_frame.iloc[0]["Open"])
+                high = finite_number(day_frame["High"].max())
+                low = finite_number(day_frame["Low"].min())
+                if last is not None:
+                    change = last - open_price if open_price is not None else None
+                    change_percent = (
+                        change / open_price * 100
+                        if change is not None and open_price
+                        else None
+                    )
+                    return {
+                        "symbol": market.pair,
+                        "last": last,
+                        "open": open_price,
+                        "high": high,
+                        "low": low,
+                        "change": change,
+                        "change_percent": change_percent,
+                        "updated_at": iso_timestamp(latest_at),
+                        "source": "TradingView intraday via borsapy FX",
+                    }
+        except Exception as exc:
+            print(f"Warning: intraday {market.pair} spot unavailable: {exc}")
 
     raw = fx.current
     last = finite_number(raw.get("last"))
     if last is None:
-        raise RuntimeError("borsapy returned no USD/TRY spot price")
+        raise RuntimeError(f"borsapy returned no {market.pair} spot price")
 
     open_price = finite_number(raw.get("open"))
     change = last - open_price if open_price is not None else None
@@ -177,7 +322,7 @@ def fetch_spot() -> dict[str, Any]:
         change / open_price * 100 if change is not None and open_price else None
     )
     return {
-        "symbol": "USD/TRY",
+        "symbol": market.pair,
         "last": last,
         "open": open_price,
         "high": finite_number(raw.get("high")),
@@ -189,11 +334,11 @@ def fetch_spot() -> dict[str, Any]:
     }
 
 
-def fetch_viop_table() -> dict[str, dict[str, Any]]:
-    """Fetch the borsapy VİOP table and key USD/TRY rows by stream symbol."""
-    rows: dict[str, dict[str, Any]] = {}
+def fetch_viop_tables() -> dict[str, dict[str, dict[str, Any]]]:
+    """Fetch VİOP table fallbacks keyed by market and stream symbol."""
+    rows = {market.key: {} for market in MARKET_CONFIGS}
     try:
-        frame = bp.VIOP().currency_futures
+        frame = bp.VIOP().futures
     except Exception as exc:  # Streaming remains the primary data path.
         print(f"Warning: VİOP table fallback unavailable: {exc}")
         return rows
@@ -203,39 +348,47 @@ def fetch_viop_table() -> dict[str, dict[str, Any]]:
 
     for raw in frame.to_dict(orient="records"):
         code = str(raw.get("code") or "").upper()
-        if not TABLE_CODE_PATTERN.fullmatch(code):
-            continue
-        try:
-            symbol = symbol_from_table_code(code)
-        except ValueError:
-            continue
+        for market in MARKET_CONFIGS:
+            if not table_code_pattern(market.table_symbol).fullmatch(code):
+                continue
+            try:
+                symbol = symbol_from_table_code(code, market)
+            except ValueError:
+                continue
 
-        # In borsapy 0.10.2 these normalized names map to the live table as:
-        # volume_tl -> absolute price change, volume_qty -> TRY turnover.
-        rows[symbol] = {
-            "symbol": symbol,
-            "code": code,
-            "description": str(raw.get("contract") or ""),
-            "last": finite_number(raw.get("price")),
-            "change": finite_number(raw.get("volume_tl")),
-            "change_percent": finite_number(raw.get("change")),
-            "turnover_try": finite_number(raw.get("volume_qty")),
-        }
+            # In borsapy 0.10.2 these normalized names map to the live table as:
+            # volume_tl -> absolute price change, volume_qty -> TRY turnover.
+            rows[market.key][symbol] = {
+                "symbol": symbol,
+                "code": code,
+                "description": str(raw.get("contract") or ""),
+                "last": finite_number(raw.get("price")),
+                "change": finite_number(raw.get("volume_tl")),
+                "change_percent": finite_number(raw.get("change")),
+                "turnover_try": finite_number(raw.get("volume_qty")),
+            }
+            break
     return rows
 
 
-def discover_contracts(table_rows: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+def discover_contracts(
+    market: MarketConfig,
+    table_rows: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
     """Union TradingView contract discovery with the published VİOP table."""
     discovered: dict[str, dict[str, Any]] = {}
     try:
-        raw_contracts = bp.viop_contracts(BASE_SYMBOL, full_info=True)
+        raw_contracts = bp.viop_contracts(market.futures_symbol, full_info=True)
     except Exception as exc:
-        print(f"Warning: TradingView contract discovery unavailable: {exc}")
+        print(f"Warning: {market.pair} contract discovery unavailable: {exc}")
         raw_contracts = []
 
     for raw in raw_contracts:
         symbol = str(raw.get("symbol") or "").upper()
-        if raw.get("is_continuous") or not CONTRACT_PATTERN.fullmatch(symbol):
+        if (
+            raw.get("is_continuous")
+            or not contract_pattern(market.futures_symbol).fullmatch(symbol)
+        ):
             continue
         discovered[symbol] = {
             "symbol": symbol,
@@ -249,9 +402,12 @@ def discover_contracts(table_rows: dict[str, dict[str, Any]]) -> list[dict[str, 
         )
 
     if not discovered:
-        raise RuntimeError("borsapy returned no dated USD/TRY futures contracts")
+        raise RuntimeError(f"borsapy returned no dated {market.pair} futures contracts")
 
-    return sorted(discovered.values(), key=lambda item: parse_contract_symbol(item["symbol"]))
+    return sorted(
+        discovered.values(),
+        key=lambda item: parse_contract_symbol(item["symbol"], market),
+    )
 
 
 def fetch_stream_quotes(symbols: list[str], timeout: float = 10.0) -> dict[str, dict[str, Any]]:
@@ -304,9 +460,10 @@ def normalize_contract(
     spot_last: float,
     today: date,
     generated_at: datetime,
+    market: MarketConfig = DEFAULT_MARKET,
 ) -> dict[str, Any]:
     symbol = metadata["symbol"]
-    year, month = parse_contract_symbol(symbol)
+    year, month = parse_contract_symbol(symbol, market)
     expiry = maturity_date(year, month)
     quote = quote or {}
     table_row = table_row or {}
@@ -335,7 +492,8 @@ def normalize_contract(
 
     return {
         "symbol": symbol,
-        "code": table_row.get("code") or f"F_USDTRY{month:02d}{str(year)[2:]}",
+        "code": table_row.get("code")
+        or f"F_{market.table_symbol}{month:02d}{str(year)[2:]}",
         "label": f"{calendar.month_abbr[month]} {year}",
         "maturity_date": expiry.isoformat(),
         "days_to_maturity": days_left,
@@ -365,38 +523,84 @@ def normalize_contract(
 def build_snapshot(now: datetime | None = None) -> dict[str, Any]:
     generated_at = (now or datetime.now(ISTANBUL)).astimezone(ISTANBUL)
     today = generated_at.date()
-    spot = fetch_spot()
-    table_rows = fetch_viop_table()
-    metadata = discover_contracts(table_rows)
-    quotes = fetch_stream_quotes([item["symbol"] for item in metadata])
+    spots: dict[str, dict[str, Any]] = {}
+    currency_markets = tuple(
+        market for market in MARKET_CONFIGS if market.key != "XAUTRY"
+    )
+    with ThreadPoolExecutor(max_workers=len(currency_markets)) as executor:
+        futures = {
+            executor.submit(fetch_spot, market): market
+            for market in currency_markets
+        }
+        for future in as_completed(futures):
+            market = futures[future]
+            try:
+                spots[market.key] = future.result()
+            except Exception as exc:
+                raise RuntimeError(f"Could not fetch {market.pair} spot: {exc}") from exc
+    try:
+        spots["XAUTRY"] = fetch_spot(MARKETS["XAUTRY"], spots["USDTRY"])
+    except Exception as exc:
+        raise RuntimeError(f"Could not fetch XAU/TRY spot: {exc}") from exc
 
-    contracts = [
-        normalize_contract(
-            item,
-            quotes.get(item["symbol"]),
-            table_rows.get(item["symbol"]),
-            spot["last"],
-            today,
-            generated_at,
-        )
-        for item in metadata
+    table_rows = fetch_viop_tables()
+    metadata_by_market = {
+        market.key: discover_contracts(market, table_rows[market.key])
+        for market in MARKET_CONFIGS
+    }
+    symbols = [
+        item["symbol"]
+        for market in MARKET_CONFIGS
+        for item in metadata_by_market[market.key]
     ]
-    contracts = [item for item in contracts if item["days_to_maturity"] >= 0]
-    if not contracts or not any(item["last"] is not None for item in contracts):
-        raise RuntimeError("borsapy returned no usable USD/TRY futures prices")
+    quotes = fetch_stream_quotes(symbols)
+
+    market_snapshots: dict[str, dict[str, Any]] = {}
+    for market in MARKET_CONFIGS:
+        spot = spots[market.key]
+        contracts = [
+            normalize_contract(
+                item,
+                quotes.get(item["symbol"]),
+                table_rows[market.key].get(item["symbol"]),
+                spot["last"],
+                today,
+                generated_at,
+                market,
+            )
+            for item in metadata_by_market[market.key]
+        ]
+        contracts = [item for item in contracts if item["days_to_maturity"] >= 0]
+        if not contracts or not any(item["last"] is not None for item in contracts):
+            raise RuntimeError(
+                f"borsapy returned no usable {market.pair} futures prices"
+            )
+
+        market_snapshots[market.key] = {
+            "key": market.key,
+            "pair": market.pair,
+            "base_asset": market.base_asset,
+            "quote_asset": "TRY",
+            "spot_unit": market.spot_unit,
+            "curve_unit": market.curve_unit,
+            "price_digits": market.price_digits,
+            "spot": spot,
+            "contracts": contracts,
+        }
 
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "generated_at": generated_at.isoformat(timespec="seconds"),
         "market_date": today.isoformat(),
         "timezone": "Europe/Istanbul",
         "refresh_interval_minutes": 15,
-        "spot": spot,
-        "contracts": contracts,
+        "default_market": DEFAULT_MARKET.key,
+        "market_order": [market.key for market in MARKET_CONFIGS],
+        "markets": market_snapshots,
         "sources": {
             "library": f"borsapy {version('borsapy')}",
             "futures": "Borsa İstanbul / TradingView and İş Yatırım via borsapy",
-            "spot": "borsapy FX",
+            "spot": "borsapy FX currencies and gram gold",
             "maturity_rule": "Last full Turkish business day of the contract month",
         },
     }
@@ -434,10 +638,15 @@ def main() -> None:
         try:
             snapshot = build_snapshot()
             write_snapshot(snapshot, args.output)
-            available = sum(c["status"] == "available" for c in snapshot["contracts"])
+            availability = ", ".join(
+                f"{key} "
+                f"{sum(c['status'] == 'available' for c in market['contracts'])}/"
+                f"{len(market['contracts'])}"
+                for key, market in snapshot["markets"].items()
+            )
             print(
-                f"Wrote {args.output}: {available}/{len(snapshot['contracts'])} "
-                f"contracts with prices at {snapshot['generated_at']}"
+                f"Wrote {args.output}: {availability} contracts with prices "
+                f"at {snapshot['generated_at']}"
             )
             return
         except Exception as exc:

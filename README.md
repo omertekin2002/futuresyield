@@ -1,14 +1,15 @@
-# Vade — USD/TRY VİOP Futures
+# Vade — TRY VİOP Futures Curves
 
-A zero-backend GitHub Pages dashboard for the USD/TRY spot rate and every listed
-USD/TRY futures contract on Borsa İstanbul's VİOP market. Market data is pulled
-with [borsapy](https://github.com/saidsurucu/borsapy) and redeployed every 15
-minutes by GitHub Actions.
+A zero-backend GitHub Pages dashboard for USD/TRY, EUR/TRY, and XAU/TRY spot
+references and every listed futures contract on Borsa İstanbul's VİOP market.
+Market data is pulled with [borsapy](https://github.com/saidsurucu/borsapy) and
+redeployed every 15 minutes by GitHub Actions.
 
 ## What it shows
 
-- Current USD/TRY spot, daily range, and daily change
-- Automatic discovery of new dated USD/TRY VİOP contracts
+- A top-level switch for USD/TRY, EUR/TRY, and XAU/TRY
+- Current spot reference, daily range, and daily change for each market
+- Automatic discovery of new dated contracts across all three VİOP families
 - Last price, daily change, bid/ask, volume, and premium to spot
 - Official contract maturity date and calendar days remaining
 - Responsive price and implied-yield curves plus the full contract board
@@ -17,7 +18,10 @@ minutes by GitHub Actions.
 
 Maturity is calculated as the final **full** Turkish business day of each
 contract month. Weekends, public holidays, and half-day official holidays are
-excluded in line with [Borsa İstanbul's FX futures specification](https://www.borsaistanbul.com/en/markets/viop/futures/fx-futures).
+excluded in line with Borsa İstanbul's
+[FX](https://www.borsaistanbul.com/en/markets/viop/futures/fx-futures) and
+[precious-metals](https://www.borsaistanbul.com/en/markets/viop/futures/precious-metals-futures)
+futures specifications.
 
 ## How it works
 
@@ -66,11 +70,13 @@ Then open <http://localhost:8000>.
 
 ## Data notes
 
-- Futures discovery uses `borsapy.viop_contracts("USDTRY", full_info=True)`.
+- Futures discovery uses `borsapy.viop_contracts(..., full_info=True)` for
+  `USDTRY`, `EURTRY`, and `XAUTRY`.
 - Quotes use `borsapy.TradingViewStream`; the borsapy VİOP table provides a
   fallback and supplementary turnover data.
-- Spot uses borsapy's 15-minute `FX("USD")` intraday history, with
-  `FX("USD").current` as a fallback.
+- USD/TRY and EUR/TRY spot use borsapy's 15-minute FX history with `.current`
+  as a fallback. XAU/TRY combines 15-minute XAU/USD and USD/TRY data into a
+  TRY-per-gram reference, with `FX("gram-altin").current` as a fallback.
 - The dashboard polls its deployed JSON every minute, while the published
   snapshot is rebuilt on the 15-minute GitHub Actions schedule.
 - VİOP and TradingView market data may be delayed by approximately 15 minutes.

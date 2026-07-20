@@ -6,9 +6,9 @@
     <meta name="theme-color" content="#151712" />
     <meta
       name="description"
-      content="The latest USD/TRY spot rate and VİOP USD/TRY futures curve, refreshed every 15 minutes."
+      content="Live USD/TRY, EUR/TRY, and XAU/TRY VİOP futures curves, refreshed every 15 minutes."
     />
-    <title>Vade — USD/TRY Futures Curve</title>
+    <title>Vade — TRY Futures Curves</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -25,7 +25,7 @@
       <a class="wordmark" href="./" aria-label="Vade home">
         <span class="wordmark-mark" aria-hidden="true"></span>
         <span>VADE</span>
-        <span class="wordmark-sub">USD · TRY</span>
+        <span class="wordmark-sub" id="wordmark-pair">USD · TRY</span>
       </a>
       <div class="header-meta">
         <span class="data-state" id="data-state" role="status" aria-live="polite">
@@ -38,11 +38,38 @@
       </div>
     </header>
 
-    <main>
+    <nav class="market-rail" aria-label="Select futures market">
+      <div class="market-rail-label" aria-hidden="true">
+        <span>Market rail</span>
+        <strong>TRY-quoted futures</strong>
+      </div>
+      <div class="market-options">
+        <button type="button" data-market="USDTRY" aria-pressed="true">
+          <span class="market-number">01</span>
+          <span class="market-code">USD/TRY</span>
+          <small data-market-count="USDTRY">Loading</small>
+        </button>
+        <button type="button" data-market="EURTRY" aria-pressed="false">
+          <span class="market-number">02</span>
+          <span class="market-code">EUR/TRY</span>
+          <small data-market-count="EURTRY">Loading</small>
+        </button>
+        <button type="button" data-market="XAUTRY" aria-pressed="false">
+          <span class="market-number">03</span>
+          <span class="market-code">XAU/TRY</span>
+          <small data-market-count="XAUTRY">Loading</small>
+        </button>
+      </div>
+    </nav>
+
+    <main id="dashboard-content">
       <section class="hero" aria-labelledby="page-title">
         <div class="hero-copy">
           <p class="eyebrow">Borsa İstanbul · VİOP</p>
-          <h1 id="page-title">USD/TRY,<br /><span>across time.</span></h1>
+          <h1 id="page-title">
+            <span class="hero-market" id="hero-market-label">USD/TRY,</span><br />
+            <span class="hero-outline">across time.</span>
+          </h1>
           <p class="hero-intro">
             The live shape of the Turkish lira futures curve—from today’s spot
             rate to every listed maturity.
@@ -57,7 +84,7 @@
           <div class="spot-value loading-value" id="spot-value">—</div>
           <div class="spot-meta">
             <span class="change-value" id="spot-change">Waiting for data</span>
-            <span>TRY per USD</span>
+            <span id="spot-unit">TRY per USD</span>
           </div>
           <div class="spot-range" aria-label="Spot daily range">
             <div>
@@ -90,11 +117,11 @@
         </div>
 
         <div class="curve-frame">
-          <div class="curve-y-label">TRY / USD</div>
+          <div class="curve-y-label" id="curve-unit">TRY / USD</div>
           <canvas
             id="curve-chart"
             role="img"
-            aria-label="USD/TRY futures price curve by maturity"
+            aria-label="Selected VİOP futures price curve by maturity"
           ></canvas>
           <div class="chart-tooltip" id="chart-tooltip" hidden></div>
         </div>
@@ -153,7 +180,7 @@
           <canvas
             id="yield-chart"
             role="img"
-            aria-label="Daily compounded USD/TRY futures yield by maturity"
+            aria-label="Selected VİOP futures yield by maturity"
           ></canvas>
           <div class="chart-tooltip yield-tooltip" id="yield-tooltip" hidden></div>
         </div>
@@ -192,7 +219,7 @@
 
         <div class="table-shell">
           <table>
-            <caption class="sr-only">
+            <caption class="sr-only" id="contracts-caption">
               Latest VİOP USD/TRY futures prices, maturity dates, days remaining,
               and compounded implied yields
             </caption>
@@ -234,13 +261,13 @@
 
     <footer>
       <div>
-        <span class="footer-mark">VADE / 01</span>
-        <p>Built as a clear window into the USD/TRY term structure.</p>
+        <span class="footer-mark" id="footer-market-mark">VADE / 01</span>
+        <p id="footer-market-copy">Built as a clear window into the USD/TRY term structure.</p>
       </div>
       <div class="footer-links">
         <a href="https://github.com/saidsurucu/borsapy">Data via borsapy</a>
-        <a href="https://www.borsaistanbul.com/en/markets/viop/futures/fx-futures">
-          Contract specifications
+        <a href="https://www.borsaistanbul.com/en/markets/viop">
+          VİOP market overview
         </a>
       </div>
       <p class="disclaimer">

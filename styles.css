@@ -177,6 +177,117 @@ a {
   to { transform: rotate(360deg); }
 }
 
+.market-rail {
+  display: grid;
+  grid-template-columns: minmax(190px, 0.32fr) minmax(0, 1.68fr);
+  min-height: 88px;
+  border-bottom: 1px solid var(--ink);
+  background: var(--paper-deep);
+}
+
+.market-rail-label {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.25rem;
+  padding: 1rem 2.5rem;
+  border-right: 1px solid var(--ink);
+  color: var(--ink-soft);
+  text-transform: uppercase;
+}
+
+.market-rail-label span {
+  font-size: 0.54rem;
+  letter-spacing: 0.12em;
+}
+
+.market-rail-label strong {
+  color: var(--ink);
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+}
+
+.market-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.market-options button {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-content: center;
+  align-items: baseline;
+  gap: 0.15rem 0.8rem;
+  min-width: 0;
+  padding: 1rem 1.5rem;
+  border: 0;
+  border-right: 1px solid var(--ink);
+  color: var(--ink);
+  background: transparent;
+  font-family: var(--mono);
+  text-align: left;
+  cursor: pointer;
+  transition: color 150ms ease, background 150ms ease;
+}
+
+.market-options button:last-child {
+  border-right: 0;
+}
+
+.market-options button:hover,
+.market-options button:focus-visible {
+  background: rgba(255, 75, 47, 0.1);
+  outline: none;
+}
+
+.market-options button:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--signal);
+}
+
+.market-options button[aria-pressed="true"] {
+  color: var(--paper);
+  background: var(--ink);
+}
+
+.market-options button:disabled,
+.market-options button:disabled:hover {
+  color: var(--ink-soft);
+  background: transparent;
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.market-number {
+  color: var(--signal-dark);
+  font-size: 0.58rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+
+.market-code {
+  overflow: hidden;
+  font: 1.15rem var(--display);
+  text-overflow: ellipsis;
+  letter-spacing: -0.04em;
+  white-space: nowrap;
+}
+
+.market-options small {
+  grid-column: 2;
+  color: var(--ink-soft);
+  font-size: 0.55rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.market-options button[aria-pressed="true"] .market-number {
+  color: var(--signal);
+}
+
+.market-options button[aria-pressed="true"] small {
+  color: var(--lime);
+}
+
 .hero {
   position: relative;
   min-height: 660px;
@@ -195,6 +306,14 @@ a {
   font: 25rem/0.8 var(--display);
   letter-spacing: -0.12em;
   pointer-events: none;
+}
+
+body[data-market="EURTRY"] .hero::before {
+  content: "02";
+}
+
+body[data-market="XAUTRY"] .hero::before {
+  content: "03";
 }
 
 .hero-copy {
@@ -238,9 +357,13 @@ h1 {
   line-height: 0.84;
 }
 
-h1 span {
+h1 .hero-outline {
   color: transparent;
   -webkit-text-stroke: 2px var(--ink);
+}
+
+h1 .hero-market {
+  color: var(--ink);
 }
 
 .hero-intro {
@@ -959,6 +1082,29 @@ footer p {
     min-width: 105px;
   }
 
+  .market-rail {
+    grid-template-columns: 1fr;
+    min-height: 76px;
+  }
+
+  .market-rail-label {
+    display: none;
+  }
+
+  .market-options button {
+    gap: 0.12rem 0.4rem;
+    padding: 0.8rem 0.65rem;
+  }
+
+  .market-code {
+    font-size: 0.86rem;
+  }
+
+  .market-options small {
+    font-size: 0.48rem;
+    letter-spacing: 0.04em;
+  }
+
   .hero-copy {
     min-height: 490px;
     padding: 5rem 1.25rem 6rem;
@@ -968,7 +1114,7 @@ footer p {
     font-size: clamp(3.6rem, 18vw, 5.8rem);
   }
 
-  h1 span {
+  h1 .hero-outline {
     -webkit-text-stroke-width: 1px;
   }
 
