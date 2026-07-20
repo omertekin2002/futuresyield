@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#151712" />
+    <meta
+      name="description"
+      content="The latest USD/TRY spot rate and VİOP USD/TRY futures curve, refreshed every 15 minutes."
+    />
+    <title>Vade — USD/TRY Futures Curve</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#contracts">Skip to contracts</a>
+
+    <header class="site-header">
+      <a class="wordmark" href="./" aria-label="Vade home">
+        <span class="wordmark-mark" aria-hidden="true"></span>
+        <span>VADE</span>
+        <span class="wordmark-sub">USD · TRY</span>
+      </a>
+      <div class="header-meta">
+        <span class="data-state" id="data-state" role="status" aria-live="polite">
+          <span class="status-dot" aria-hidden="true"></span>
+          Loading market data
+        </span>
+        <button class="refresh-button" id="refresh-button" type="button">
+          <span aria-hidden="true">↻</span> Refresh
+        </button>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero" aria-labelledby="page-title">
+        <div class="hero-copy">
+          <p class="eyebrow">Borsa İstanbul · VİOP</p>
+          <h1 id="page-title">USD/TRY,<br /><span>across time.</span></h1>
+          <p class="hero-intro">
+            The live shape of the Turkish lira futures curve—from today’s spot
+            rate to every listed maturity.
+          </p>
+        </div>
+
+        <aside class="spot-panel" aria-labelledby="spot-title">
+          <div class="panel-kicker">
+            <span id="spot-title">Spot rate</span>
+            <span class="delay-tag">≈ 15 min delay</span>
+          </div>
+          <div class="spot-value loading-value" id="spot-value">—</div>
+          <div class="spot-meta">
+            <span class="change-value" id="spot-change">Waiting for data</span>
+            <span>TRY per USD</span>
+          </div>
+          <div class="spot-range" aria-label="Spot daily range">
+            <div>
+              <span>Day low</span>
+              <strong id="spot-low">—</strong>
+            </div>
+            <div>
+              <span>Day high</span>
+              <strong id="spot-high">—</strong>
+            </div>
+          </div>
+        </aside>
+
+        <div class="date-stamp" aria-label="Market date">
+          <span>Market date</span>
+          <strong id="market-date">—</strong>
+          <small>Europe / Istanbul</small>
+        </div>
+      </section>
+
+      <section class="curve-section" aria-labelledby="curve-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Forward view</p>
+            <h2 id="curve-title">The futures curve</h2>
+          </div>
+          <p class="section-note" id="curve-summary">
+            Plotting every available dated USD/TRY contract.
+          </p>
+        </div>
+
+        <div class="curve-frame">
+          <div class="curve-y-label">TRY / USD</div>
+          <canvas
+            id="curve-chart"
+            role="img"
+            aria-label="USD/TRY futures price curve by maturity"
+          ></canvas>
+          <div class="chart-tooltip" id="chart-tooltip" hidden></div>
+        </div>
+
+        <div class="stat-strip">
+          <div class="stat-item">
+            <span>Listed contracts</span>
+            <strong id="contract-count">—</strong>
+          </div>
+          <div class="stat-item">
+            <span>Front contract</span>
+            <strong id="front-contract">—</strong>
+          </div>
+          <div class="stat-item">
+            <span>Front premium</span>
+            <strong id="front-premium">—</strong>
+          </div>
+          <div class="stat-item">
+            <span>Curve horizon</span>
+            <strong id="curve-horizon">—</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="contracts-section" id="contracts" aria-labelledby="contracts-title">
+        <div class="section-heading contracts-heading">
+          <div>
+            <p class="eyebrow">Contract board</p>
+            <h2 id="contracts-title">Every maturity</h2>
+          </div>
+          <div class="updated-block">
+            <span>Snapshot updated</span>
+            <strong id="updated-at">—</strong>
+          </div>
+        </div>
+
+        <div class="table-shell">
+          <table>
+            <caption class="sr-only">
+              Latest VİOP USD/TRY futures prices, maturity dates, and days remaining
+            </caption>
+            <thead>
+              <tr>
+                <th scope="col">Contract</th>
+                <th scope="col" class="numeric">Last</th>
+                <th scope="col" class="numeric">Change</th>
+                <th scope="col" class="numeric">Bid / Ask</th>
+                <th scope="col">Maturity</th>
+                <th scope="col" class="numeric">Days left</th>
+                <th scope="col" class="numeric">vs. spot</th>
+                <th scope="col" class="numeric">Volume</th>
+              </tr>
+            </thead>
+            <tbody id="contract-rows">
+              <tr class="loading-row">
+                <td colspan="8">Pulling the latest curve…</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="table-footnote">
+          “Days left” uses calendar days. Maturity is the final full Turkish
+          business day of the contract month, following Borsa İstanbul rules.
+        </p>
+      </section>
+    </main>
+
+    <footer>
+      <div>
+        <span class="footer-mark">VADE / 01</span>
+        <p>Built as a clear window into the USD/TRY term structure.</p>
+      </div>
+      <div class="footer-links">
+        <a href="https://github.com/saidsurucu/borsapy">Data via borsapy</a>
+        <a href="https://www.borsaistanbul.com/en/markets/viop/futures/fx-futures">
+          Contract specifications
+        </a>
+      </div>
+      <p class="disclaimer">
+        Personal and educational use only. Delayed market data; not investment advice.
+      </p>
+    </footer>
+
+    <noscript>
+      <div class="noscript-message">JavaScript is required to display the market snapshot.</div>
+    </noscript>
+  </body>
+</html>
