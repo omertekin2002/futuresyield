@@ -434,19 +434,48 @@ function renderYieldChart() {
   context.lineWidth = 2.5;
   context.stroke();
 
+  const peak = contracts.reduce((highest, point, index) => {
+    const dailyValue = yieldValue(point.contract, "daily");
+    if (!hasNumber(dailyValue)) return highest;
+    return dailyValue > highest.dailyValue
+      ? { ...point, dailyValue, index }
+      : highest;
+  }, { dailyValue: -Infinity, index: -1 });
+  const peakX = xAt(peak.index);
+  const peakY = yAt(peak.value);
+
+  context.save();
+  context.setLineDash([4, 5]);
+  context.strokeStyle = "rgba(255, 75, 47, 0.72)";
+  context.lineWidth = 1;
+  context.beginPath();
+  context.moveTo(peakX, margin.top);
+  context.lineTo(peakX, height - margin.bottom);
+  context.stroke();
+  context.restore();
+
   const labelEvery = width < 620
     ? Math.ceil(contracts.length / 4)
     : Math.ceil(contracts.length / 8);
   state.yieldChartPoints = contracts.map((point, index) => {
     const x = xAt(index);
     const y = yAt(point.value);
+    const isPeak = index === peak.index;
     context.beginPath();
-    context.arc(x, y, index === 0 ? 5 : 3.5, 0, Math.PI * 2);
-    context.fillStyle = index === 0 ? "#171914" : "#e5e1d4";
+    context.arc(x, y, isPeak ? 7 : index === 0 ? 5 : 3.5, 0, Math.PI * 2);
+    context.fillStyle = isPeak ? "#ff4b2f" : index === 0 ? "#171914" : "#e5e1d4";
     context.fill();
-    context.strokeStyle = index === 0 ? "#171914" : "#ff4b2f";
-    context.lineWidth = 2;
+    context.strokeStyle = isPeak || index === 0 ? "#171914" : "#ff4b2f";
+    context.lineWidth = isPeak ? 3 : 2;
     context.stroke();
+
+    if (isPeak) {
+      context.beginPath();
+      context.arc(x, y, 11, 0, Math.PI * 2);
+      context.strokeStyle = "rgba(255, 75, 47, 0.38)";
+      context.lineWidth = 2;
+      context.stroke();
+    }
 
     if (index % labelEvery === 0 || index === contracts.length - 1) {
       context.fillStyle = "rgba(23, 25, 20, 0.62)";
@@ -459,8 +488,22 @@ function renderYieldChart() {
         height - 20,
       );
     }
-    return { x, y, ...point };
+    return { x, y, isPeak, ...point };
   });
+
+  const peakTag = `HIGHEST DAILY · ${formatYield(peak.dailyValue, "daily")}`;
+  context.font = '600 10px "IBM Plex Mono", monospace';
+  const peakTagWidth = context.measureText(peakTag).width + 18;
+  const peakTagX = Math.min(
+    Math.max(peakX - peakTagWidth / 2, margin.left),
+    width - margin.right - peakTagWidth,
+  );
+  const peakTagY = peakY < margin.top + 42 ? peakY + 17 : peakY - 34;
+  context.fillStyle = "#171914";
+  context.fillRect(peakTagX, peakTagY, peakTagWidth, 22);
+  context.fillStyle = "#b8ff45";
+  context.textAlign = "center";
+  context.fillText(peakTag, peakTagX + peakTagWidth / 2, peakTagY + 11);
 
   const front = contracts[0];
   const average = values.reduce((sum, value) => sum + value, 0) / values.length;
@@ -470,11 +513,14 @@ function renderYieldChart() {
   elements.yieldAverageValue.textContent = formatYield(average);
   elements.yieldAverageValue.className = signedClass(average);
   elements.yieldSummary.textContent =
-    `${settings.label} net yield ranges from ${formatYield(Math.min(...values))} ` +
-    `to ${formatYield(Math.max(...values))} across ${contracts.length} maturities.`;
+    `Highest daily yield is ${formatYield(peak.dailyValue, "daily")} at ` +
+    `${peak.contract.label}. ${settings.label} net yield ranges from ` +
+    `${formatYield(Math.min(...values))} to ${formatYield(Math.max(...values))}.`;
   canvas.setAttribute(
     "aria-label",
-    `${settings.label} compounded USD/TRY futures net yield by maturity`,
+    `${settings.label} compounded USD/TRY futures net yield by maturity. ` +
+    `Highest daily yield is ${formatYield(peak.dailyValue, "daily")} at ` +
+    `${peak.contract.label}.`,
   );
 }
 
@@ -580,7 +626,8 @@ elements.yieldCanvas.addEventListener("pointermove", (event) => {
   elements.yieldTooltip.innerHTML =
     `<strong>${nearest.contract.label}</strong>` +
     `${formatYield(nearest.value)} ${settings.shortLabel}<br>` +
-    `${nearest.contract.days_to_maturity} days left`;
+    `${nearest.contract.days_to_maturity} days left` +
+    `${nearest.isPeak ? "<br>Highest daily yield" : ""}`;
   const tooltipX = Math.min(Math.max(nearest.x + 12, 60), bounds.width - 165);
   const tooltipY = Math.max(nearest.y - 72, 8);
   elements.yieldTooltip.style.left = `${tooltipX}px`;
