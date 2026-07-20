@@ -197,13 +197,16 @@ function renderStats(data) {
 
 function renderRows(contracts) {
   if (!contracts.length) {
-    elements.rows.innerHTML = '<tr class="empty-row"><td colspan="8">No active contracts found.</td></tr>';
+    elements.rows.innerHTML = '<tr class="empty-row"><td colspan="11">No active contracts found.</td></tr>';
     return;
   }
 
   elements.rows.innerHTML = contracts.map((contract, index) => {
     const changeClass = signedClass(contract.change_percent);
     const premiumClass = signedClass(contract.premium_percent);
+    const dailyYield = yieldValue(contract, "daily");
+    const monthlyYield = yieldValue(contract, "monthly");
+    const annualizedYield = yieldValue(contract, "annualized");
     const maturity = dateFormat.format(parseMarketDate(contract.maturity_date));
     const volume = hasNumber(contract.volume) ? compactFormat.format(contract.volume) : "—";
     const spread = hasNumber(contract.bid) || hasNumber(contract.ask)
@@ -230,6 +233,15 @@ function renderRows(contracts) {
           <span class="days-badge ${nearClass}">${contract.days_to_maturity}</span>
         </td>
         <td class="numeric ${premiumClass}" data-label="vs. spot">${formatPercent(contract.premium_percent)}</td>
+        <td class="numeric yield-table-value ${signedClass(dailyYield)}" data-label="Daily yield · 1D">
+          ${formatYield(dailyYield, "daily")}
+        </td>
+        <td class="numeric yield-table-value ${signedClass(monthlyYield)}" data-label="Monthly yield · 30D">
+          ${formatYield(monthlyYield, "monthly")}
+        </td>
+        <td class="numeric yield-table-value ${signedClass(annualizedYield)}" data-label="Annualized · 365D">
+          ${formatYield(annualizedYield, "annualized")}
+        </td>
         <td class="numeric" data-label="Volume">${volume}</td>
       </tr>`;
   }).join("");
@@ -550,7 +562,7 @@ async function loadData() {
     elements.dataState.classList.add("is-error");
     elements.dataState.lastChild.textContent = " Data unavailable";
     if (!state.data) {
-      elements.rows.innerHTML = '<tr class="empty-row"><td colspan="8">The market snapshot could not be loaded. Try refreshing shortly.</td></tr>';
+      elements.rows.innerHTML = '<tr class="empty-row"><td colspan="11">The market snapshot could not be loaded. Try refreshing shortly.</td></tr>';
     }
   } finally {
     elements.refreshButton.classList.remove("is-loading");

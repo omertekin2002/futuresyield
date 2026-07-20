@@ -193,7 +193,8 @@
         <div class="table-shell">
           <table>
             <caption class="sr-only">
-              Latest VİOP USD/TRY futures prices, maturity dates, and days remaining
+              Latest VİOP USD/TRY futures prices, maturity dates, days remaining,
+              and compounded implied yields
             </caption>
             <thead>
               <tr>
@@ -204,12 +205,21 @@
                 <th scope="col">Maturity</th>
                 <th scope="col" class="numeric">Days left</th>
                 <th scope="col" class="numeric">vs. spot</th>
+                <th scope="col" class="numeric yield-column-heading">
+                  Daily yield <small>1D</small>
+                </th>
+                <th scope="col" class="numeric yield-column-heading">
+                  Monthly yield <small>30D</small>
+                </th>
+                <th scope="col" class="numeric yield-column-heading">
+                  Annualized <small>365D</small>
+                </th>
                 <th scope="col" class="numeric">Volume</th>
               </tr>
             </thead>
             <tbody id="contract-rows">
               <tr class="loading-row">
-                <td colspan="8">Pulling the latest curve…</td>
+                <td colspan="11">Pulling the latest curve…</td>
               </tr>
             </tbody>
           </table>
@@ -217,6 +227,7 @@
         <p class="table-footnote">
           “Days left” uses calendar days. Maturity is the final full Turkish
           business day of the contract month, following Borsa İstanbul rules.
+          Yield columns show net compounded returns over 1, 30, and 365 days.
         </p>
       </section>
     </main>

@@ -12,7 +12,7 @@ minutes by GitHub Actions.
 - Last price, daily change, bid/ask, volume, and premium to spot
 - Official contract maturity date and calendar days remaining
 - Responsive price and implied-yield curves plus the full contract board
-- Daily, 30-day monthly, and 365-day annualized yield toggles
+- Daily, 30-day monthly, and 365-day annualized yields in the chart and contract table
 - Snapshot age, delayed-data state, and one-click refresh
 
 Maturity is calculated as the final **full** Turkish business day of each

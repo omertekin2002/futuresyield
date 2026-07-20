@@ -729,6 +729,7 @@ h2 {
 
 table {
   width: 100%;
+  min-width: 1280px;
   border-collapse: collapse;
   font-variant-numeric: tabular-nums;
 }
@@ -758,6 +759,14 @@ td:last-child {
 th.numeric,
 td.numeric {
   text-align: right;
+}
+
+.yield-column-heading small {
+  display: block;
+  margin-top: 0.18rem;
+  color: var(--signal);
+  font-size: 0.55rem;
+  letter-spacing: 0.05em;
 }
 
 td {
@@ -794,6 +803,10 @@ tbody tr:hover {
 
 .last-price {
   font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.yield-table-value {
   font-weight: 600;
 }
 
@@ -1057,6 +1070,10 @@ footer p {
   table,
   tbody {
     display: block;
+  }
+
+  table {
+    min-width: 0;
   }
 
   thead {
