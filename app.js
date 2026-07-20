@@ -14,6 +14,13 @@ const elements = {
   frontContract: document.querySelector("#front-contract"),
   frontPremium: document.querySelector("#front-premium"),
   curveHorizon: document.querySelector("#curve-horizon"),
+  yieldSummary: document.querySelector("#yield-summary"),
+  yieldCanvas: document.querySelector("#yield-chart"),
+  yieldTooltip: document.querySelector("#yield-tooltip"),
+  yieldPeriodLabel: document.querySelector("#yield-period-label"),
+  yieldFrontValue: document.querySelector("#yield-front-value"),
+  yieldAverageValue: document.querySelector("#yield-average-value"),
+  yieldPeriodButtons: document.querySelectorAll("[data-yield-period]"),
   updatedAt: document.querySelector("#updated-at"),
   rows: document.querySelector("#contract-rows"),
   canvas: document.querySelector("#curve-chart"),
@@ -23,8 +30,34 @@ const elements = {
 const state = {
   data: null,
   chartPoints: [],
+  yieldChartPoints: [],
+  yieldPeriod: "daily",
   refreshTimer: null,
   resizeTimer: null,
+};
+
+const YIELD_PERIODS = {
+  daily: {
+    label: "Daily",
+    shortLabel: "1D",
+    days: 1,
+    field: "daily_yield_percent",
+    digits: 4,
+  },
+  monthly: {
+    label: "Monthly",
+    shortLabel: "30D",
+    days: 30,
+    field: "monthly_yield_percent",
+    digits: 2,
+  },
+  annualized: {
+    label: "Annualized",
+    shortLabel: "365D",
+    days: 365,
+    field: "annualized_yield_percent",
+    digits: 2,
+  },
 };
 
 const priceFormat = new Intl.NumberFormat("en-US", {
@@ -80,6 +113,40 @@ function formatPrice(value) {
 
 function formatPercent(value) {
   return hasNumber(value) ? `${percentFormat.format(value)}%` : "—";
+}
+
+function yieldValue(contract, period = state.yieldPeriod) {
+  const settings = YIELD_PERIODS[period];
+  if (hasNumber(contract[settings.field])) return contract[settings.field];
+
+  let factor = contract.daily_yield_factor;
+  if (
+    !hasNumber(factor) &&
+    hasNumber(contract.last) &&
+    hasNumber(state.data?.spot?.last) &&
+    contract.last > 0 &&
+    state.data.spot.last > 0 &&
+    contract.days_to_maturity > 0
+  ) {
+    factor = Math.pow(
+      contract.last / state.data.spot.last,
+      1 / contract.days_to_maturity,
+    );
+  }
+
+  return hasNumber(factor)
+    ? (Math.pow(factor, settings.days) - 1) * 100
+    : null;
+}
+
+function formatYield(value, period = state.yieldPeriod) {
+  if (!hasNumber(value)) return "—";
+  const digits = YIELD_PERIODS[period].digits;
+  return `${new Intl.NumberFormat("en-US", {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+    signDisplay: "always",
+  }).format(value)}%`;
 }
 
 function parseMarketDate(value) {
@@ -273,12 +340,151 @@ function renderChart() {
   });
 }
 
+function renderYieldChart() {
+  if (!state.data) return;
+  const settings = YIELD_PERIODS[state.yieldPeriod];
+  const contracts = state.data.contracts
+    .map((contract) => ({ contract, value: yieldValue(contract) }))
+    .filter((point) => hasNumber(point.value));
+  const canvas = elements.yieldCanvas;
+  const bounds = canvas.getBoundingClientRect();
+  if (!bounds.width || !bounds.height || contracts.length < 1) {
+    state.yieldChartPoints = [];
+    return;
+  }
+
+  const ratio = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.round(bounds.width * ratio);
+  canvas.height = Math.round(bounds.height * ratio);
+  const context = canvas.getContext("2d");
+  context.scale(ratio, ratio);
+
+  const width = bounds.width;
+  const height = bounds.height;
+  const margin = { top: 24, right: 20, bottom: 48, left: 62 };
+  const chartWidth = width - margin.left - margin.right;
+  const chartHeight = height - margin.top - margin.bottom;
+  const values = contracts.map((point) => point.value);
+  const rawMin = Math.min(0, ...values);
+  const rawMax = Math.max(0, ...values);
+  const range = rawMax - rawMin;
+  const padding = Math.max(range * 0.12, state.yieldPeriod === "daily" ? 0.001 : 0.05);
+  const min = rawMin - padding;
+  const max = rawMax + padding;
+
+  const xAt = (index) => margin.left + (
+    contracts.length === 1
+      ? chartWidth / 2
+      : index * chartWidth / (contracts.length - 1)
+  );
+  const yAt = (value) => margin.top + (max - value) / (max - min) * chartHeight;
+
+  context.font = '10px "IBM Plex Mono", monospace';
+  context.textBaseline = "middle";
+  context.lineWidth = 1;
+  for (let i = 0; i <= 4; i += 1) {
+    const value = max - ((max - min) * i / 4);
+    const y = margin.top + chartHeight * i / 4;
+    context.strokeStyle = "rgba(23, 25, 20, 0.13)";
+    context.beginPath();
+    context.moveTo(margin.left, y);
+    context.lineTo(width - margin.right, y);
+    context.stroke();
+    context.fillStyle = "rgba(23, 25, 20, 0.58)";
+    context.textAlign = "right";
+    context.fillText(
+      `${value.toFixed(state.yieldPeriod === "daily" ? 3 : 1)}%`,
+      margin.left - 10,
+      y,
+    );
+  }
+
+  const zeroY = yAt(0);
+  context.strokeStyle = "rgba(23, 25, 20, 0.72)";
+  context.lineWidth = 1.5;
+  context.beginPath();
+  context.moveTo(margin.left, zeroY);
+  context.lineTo(width - margin.right, zeroY);
+  context.stroke();
+
+  const gradient = context.createLinearGradient(0, margin.top, 0, zeroY);
+  gradient.addColorStop(0, "rgba(255, 75, 47, 0.28)");
+  gradient.addColorStop(1, "rgba(255, 75, 47, 0.02)");
+  context.beginPath();
+  contracts.forEach((point, index) => {
+    const x = xAt(index);
+    const y = yAt(point.value);
+    if (index === 0) context.moveTo(x, y);
+    else context.lineTo(x, y);
+  });
+  context.lineTo(xAt(contracts.length - 1), zeroY);
+  context.lineTo(xAt(0), zeroY);
+  context.closePath();
+  context.fillStyle = gradient;
+  context.fill();
+
+  context.beginPath();
+  contracts.forEach((point, index) => {
+    const x = xAt(index);
+    const y = yAt(point.value);
+    if (index === 0) context.moveTo(x, y);
+    else context.lineTo(x, y);
+  });
+  context.strokeStyle = "#ff4b2f";
+  context.lineWidth = 2.5;
+  context.stroke();
+
+  const labelEvery = width < 620
+    ? Math.ceil(contracts.length / 4)
+    : Math.ceil(contracts.length / 8);
+  state.yieldChartPoints = contracts.map((point, index) => {
+    const x = xAt(index);
+    const y = yAt(point.value);
+    context.beginPath();
+    context.arc(x, y, index === 0 ? 5 : 3.5, 0, Math.PI * 2);
+    context.fillStyle = index === 0 ? "#171914" : "#e5e1d4";
+    context.fill();
+    context.strokeStyle = index === 0 ? "#171914" : "#ff4b2f";
+    context.lineWidth = 2;
+    context.stroke();
+
+    if (index % labelEvery === 0 || index === contracts.length - 1) {
+      context.fillStyle = "rgba(23, 25, 20, 0.62)";
+      context.textAlign = index === contracts.length - 1
+        ? "right"
+        : index === 0 ? "left" : "center";
+      context.fillText(
+        point.contract.label.replace(" 20", " ’"),
+        x,
+        height - 20,
+      );
+    }
+    return { x, y, ...point };
+  });
+
+  const front = contracts[0];
+  const average = values.reduce((sum, value) => sum + value, 0) / values.length;
+  elements.yieldPeriodLabel.textContent = `${settings.label} · ${settings.shortLabel}`;
+  elements.yieldFrontValue.textContent = formatYield(front.value);
+  elements.yieldFrontValue.className = signedClass(front.value);
+  elements.yieldAverageValue.textContent = formatYield(average);
+  elements.yieldAverageValue.className = signedClass(average);
+  elements.yieldSummary.textContent =
+    `${settings.label} net yield ranges from ${formatYield(Math.min(...values))} ` +
+    `to ${formatYield(Math.max(...values))} across ${contracts.length} maturities.`;
+  canvas.setAttribute(
+    "aria-label",
+    `${settings.label} compounded USD/TRY futures net yield by maturity`,
+  );
+}
+
 function render(data) {
   state.data = data;
   renderSpot(data.spot);
   renderStats(data);
   renderRows(data.contracts);
   renderChart();
+  renderYieldChart();
 
   elements.marketDate.textContent = dateFormat.format(parseMarketDate(data.market_date));
   elements.updatedAt.textContent = `${dateTimeFormat.format(new Date(data.generated_at))} TRT`;
@@ -312,7 +518,24 @@ elements.refreshButton.addEventListener("click", loadData);
 
 window.addEventListener("resize", () => {
   window.clearTimeout(state.resizeTimer);
-  state.resizeTimer = window.setTimeout(renderChart, 120);
+  state.resizeTimer = window.setTimeout(() => {
+    renderChart();
+    renderYieldChart();
+  }, 120);
+});
+
+elements.yieldPeriodButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    state.yieldPeriod = button.dataset.yieldPeriod;
+    elements.yieldPeriodButtons.forEach((candidate) => {
+      candidate.setAttribute(
+        "aria-pressed",
+        String(candidate === button),
+      );
+    });
+    elements.yieldTooltip.hidden = true;
+    renderYieldChart();
+  });
 });
 
 elements.canvas.addEventListener("pointermove", (event) => {
@@ -338,6 +561,35 @@ elements.canvas.addEventListener("pointermove", (event) => {
 
 elements.canvas.addEventListener("pointerleave", () => {
   elements.tooltip.hidden = true;
+});
+
+elements.yieldCanvas.addEventListener("pointermove", (event) => {
+  if (!state.yieldChartPoints.length) return;
+  const bounds = elements.yieldCanvas.getBoundingClientRect();
+  const x = event.clientX - bounds.left;
+  const nearest = state.yieldChartPoints.reduce((best, point) =>
+    Math.abs(point.x - x) < Math.abs(best.x - x) ? point : best
+  );
+
+  if (Math.abs(nearest.x - x) > 35) {
+    elements.yieldTooltip.hidden = true;
+    return;
+  }
+
+  const settings = YIELD_PERIODS[state.yieldPeriod];
+  elements.yieldTooltip.innerHTML =
+    `<strong>${nearest.contract.label}</strong>` +
+    `${formatYield(nearest.value)} ${settings.shortLabel}<br>` +
+    `${nearest.contract.days_to_maturity} days left`;
+  const tooltipX = Math.min(Math.max(nearest.x + 12, 60), bounds.width - 165);
+  const tooltipY = Math.max(nearest.y - 72, 8);
+  elements.yieldTooltip.style.left = `${tooltipX}px`;
+  elements.yieldTooltip.style.top = `${tooltipY}px`;
+  elements.yieldTooltip.hidden = false;
+});
+
+elements.yieldCanvas.addEventListener("pointerleave", () => {
+  elements.yieldTooltip.hidden = true;
 });
 
 loadData();

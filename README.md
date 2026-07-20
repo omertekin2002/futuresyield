@@ -11,7 +11,8 @@ minutes by GitHub Actions.
 - Automatic discovery of new dated USD/TRY VİOP contracts
 - Last price, daily change, bid/ask, volume, and premium to spot
 - Official contract maturity date and calendar days remaining
-- A responsive futures-curve chart and contract board
+- Responsive price and implied-yield curves plus the full contract board
+- Daily, 30-day monthly, and 365-day annualized yield toggles
 - Snapshot age, delayed-data state, and one-click refresh
 
 Maturity is calculated as the final **full** Turkish business day of each
@@ -31,6 +32,11 @@ flowchart LR
 The scheduled job only replaces the live site after a complete, valid snapshot
 is produced. If upstream market data is temporarily unavailable, the job fails
 and the previous successful Pages deployment stays online.
+
+The yield curve starts with the gross daily factor
+`(contract price / spot rate)^(1 / days left)`. The chart converts the selected
+1-, 30-, or 365-day compounded factor to net percentage yield by subtracting
+one and multiplying by 100.
 
 ## Publish on GitHub Pages
 

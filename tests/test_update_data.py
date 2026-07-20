@@ -3,6 +3,8 @@ import unittest
 from zoneinfo import ZoneInfo
 
 from scripts.update_data import (
+    compounded_yield_percent,
+    daily_yield_factor,
     maturity_date,
     normalize_contract,
     parse_contract_symbol,
@@ -34,6 +36,27 @@ class MaturityDateTests(unittest.TestCase):
         self.assertEqual(maturity_date(2027, 10), date(2027, 10, 27))
 
 
+class YieldCalculationTests(unittest.TestCase):
+    def test_compounds_requested_daily_factor(self):
+        factor = daily_yield_factor(48.0, 47.0, 42)
+        expected = (48.0 / 47.0) ** (1 / 42)
+
+        self.assertAlmostEqual(factor, expected, places=12)
+        self.assertAlmostEqual(
+            compounded_yield_percent(factor, 30),
+            (expected**30 - 1) * 100,
+            places=12,
+        )
+        self.assertAlmostEqual(
+            compounded_yield_percent(factor, 365),
+            (expected**365 - 1) * 100,
+            places=12,
+        )
+
+    def test_mature_contract_has_no_daily_yield(self):
+        self.assertIsNone(daily_yield_factor(48.0, 47.0, 0))
+
+
 class NormalizationTests(unittest.TestCase):
     def test_computes_days_and_spot_premium(self):
         now = datetime(2026, 7, 20, 12, tzinfo=ZoneInfo("Europe/Istanbul"))
@@ -55,6 +78,13 @@ class NormalizationTests(unittest.TestCase):
         self.assertEqual(result["maturity_date"], "2026-08-31")
         self.assertEqual(result["days_to_maturity"], 42)
         self.assertAlmostEqual(result["premium_percent"], 2.127659574, places=6)
+        expected_factor = (48.0 / 47.0) ** (1 / 42)
+        self.assertAlmostEqual(result["daily_yield_factor"], expected_factor, places=12)
+        self.assertAlmostEqual(
+            result["monthly_yield_percent"],
+            (expected_factor**30 - 1) * 100,
+            places=12,
+        )
         self.assertEqual(result["status"], "available")
 
 

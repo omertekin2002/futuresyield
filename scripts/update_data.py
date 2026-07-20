@@ -115,6 +115,24 @@ def symbol_from_table_code(code: str) -> str:
     return f"USDTRY{MONTH_TO_CODE[month]}20{short_year}"
 
 
+def daily_yield_factor(
+    contract_price: float | None,
+    spot_price: float,
+    days_left: int,
+) -> float | None:
+    """Return the gross daily factor: (contract / spot) ** (1 / days)."""
+    if contract_price is None or contract_price <= 0 or spot_price <= 0 or days_left <= 0:
+        return None
+    return (contract_price / spot_price) ** (1 / days_left)
+
+
+def compounded_yield_percent(factor: float | None, period_days: int) -> float | None:
+    """Compound a gross daily factor and express the net result as a percentage."""
+    if factor is None or factor <= 0 or period_days <= 0:
+        return None
+    return (factor**period_days - 1) * 100
+
+
 def fetch_spot() -> dict[str, Any]:
     fx = bp.FX("USD")
     try:
@@ -237,35 +255,45 @@ def discover_contracts(table_rows: dict[str, dict[str, Any]]) -> list[dict[str, 
 
 
 def fetch_stream_quotes(symbols: list[str], timeout: float = 10.0) -> dict[str, dict[str, Any]]:
-    """Subscribe once, then wait for every contract quote concurrently."""
+    """Fetch every contract concurrently, reconnecting once for missing quotes."""
     quotes: dict[str, dict[str, Any]] = {}
-    stream = bp.TradingViewStream()
-    try:
-        stream.connect(timeout=timeout)
-        for symbol in symbols:
-            stream.subscribe(symbol)
+    for pass_number in range(1, 3):
+        pending = [symbol for symbol in symbols if symbol not in quotes]
+        if not pending:
+            break
 
-        with ThreadPoolExecutor(max_workers=min(16, len(symbols))) as executor:
-            futures = {
-                executor.submit(stream.wait_for_quote, symbol, timeout): symbol
-                for symbol in symbols
-            }
-            for future in as_completed(futures):
-                symbol = futures[future]
-                try:
-                    quotes[symbol] = future.result()
-                except Exception as exc:
-                    print(f"Warning: no streaming quote for {symbol}: {exc}")
-    except Exception as exc:
-        print(f"Warning: TradingView stream unavailable: {exc}")
-    finally:
-        for symbol in symbols:
-            if symbol in quotes:
-                continue
-            late_quote = stream.get_quote(symbol)
-            if late_quote and finite_number(late_quote.get("last")) is not None:
-                quotes[symbol] = late_quote
-        stream.disconnect()
+        stream = bp.TradingViewStream()
+        try:
+            stream.connect(timeout=timeout)
+            for symbol in pending:
+                stream.subscribe(symbol)
+
+            with ThreadPoolExecutor(max_workers=min(16, len(pending))) as executor:
+                futures = {
+                    executor.submit(stream.wait_for_quote, symbol, timeout): symbol
+                    for symbol in pending
+                }
+                for future in as_completed(futures):
+                    symbol = futures[future]
+                    try:
+                        quote = future.result()
+                        if finite_number(quote.get("last")) is not None:
+                            quotes[symbol] = quote
+                    except Exception as exc:
+                        print(
+                            f"Warning: no streaming quote for {symbol} "
+                            f"(pass {pass_number}): {exc}"
+                        )
+        except Exception as exc:
+            print(f"Warning: TradingView stream unavailable (pass {pass_number}): {exc}")
+        finally:
+            for symbol in pending:
+                if symbol in quotes:
+                    continue
+                late_quote = stream.get_quote(symbol)
+                if late_quote and finite_number(late_quote.get("last")) is not None:
+                    quotes[symbol] = late_quote
+            stream.disconnect()
     return quotes
 
 
@@ -303,6 +331,7 @@ def normalize_contract(
         if premium_percent is not None and days_left > 0
         else None
     )
+    yield_factor = daily_yield_factor(last, spot_last, days_left)
 
     return {
         "symbol": symbol,
@@ -322,6 +351,10 @@ def normalize_contract(
         "turnover_try": finite_number(table_row.get("turnover_try")),
         "premium_percent": premium_percent,
         "annualized_premium_percent": annualized_premium,
+        "daily_yield_factor": yield_factor,
+        "daily_yield_percent": compounded_yield_percent(yield_factor, 1),
+        "monthly_yield_percent": compounded_yield_percent(yield_factor, 30),
+        "annualized_yield_percent": compounded_yield_percent(yield_factor, 365),
         "updated_at": iso_timestamp(quote.get("timestamp"))
         or generated_at.isoformat(timespec="seconds"),
         "status": "available" if last is not None else "unavailable",
@@ -353,7 +386,7 @@ def build_snapshot(now: datetime | None = None) -> dict[str, Any]:
         raise RuntimeError("borsapy returned no usable USD/TRY futures prices")
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at": generated_at.isoformat(timespec="seconds"),
         "market_date": today.isoformat(),
         "timezone": "Europe/Istanbul",

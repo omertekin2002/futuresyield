@@ -379,6 +379,7 @@ h1 span {
 }
 
 .curve-section,
+.yield-section,
 .contracts-section {
   padding: 6rem 5vw;
 }
@@ -504,6 +505,194 @@ h2 {
   color: var(--lime);
   font: 1.2rem var(--display);
   text-transform: uppercase;
+}
+
+.yield-section {
+  position: relative;
+  color: var(--ink);
+  background:
+    linear-gradient(118deg, transparent 62%, rgba(255, 75, 47, 0.06) 62%),
+    repeating-linear-gradient(0deg, transparent 0, transparent 49px, rgba(23, 25, 20, 0.035) 50px),
+    var(--paper-deep);
+  border-bottom: 1px solid var(--ink);
+  overflow: hidden;
+}
+
+.yield-section::after {
+  content: "YIELD";
+  position: absolute;
+  top: 1rem;
+  right: -0.08em;
+  color: rgba(23, 25, 20, 0.035);
+  font: 11rem var(--display);
+  letter-spacing: -0.08em;
+  pointer-events: none;
+}
+
+.yield-heading .eyebrow {
+  color: var(--signal-dark);
+}
+
+.yield-section .section-note {
+  color: var(--ink-soft);
+}
+
+.yield-toolbar {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: 2rem;
+  margin-bottom: 1.5rem;
+  border-top: 1px solid var(--ink);
+  border-bottom: 1px solid var(--ink);
+}
+
+.formula-block {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  min-width: 0;
+  padding: 1rem 0;
+}
+
+.formula-block span {
+  color: var(--ink-soft);
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.formula-block code {
+  font: 600 0.78rem var(--mono);
+  white-space: nowrap;
+}
+
+.formula-block sup {
+  color: var(--signal-dark);
+  font-size: 0.62rem;
+}
+
+.period-toggle {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  min-width: 410px;
+  border-left: 1px solid var(--ink);
+}
+
+.period-toggle button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.85rem 1rem;
+  border: 0;
+  border-right: 1px solid var(--ink);
+  color: var(--ink);
+  background: transparent;
+  font: 600 0.65rem var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: color 150ms ease, background 150ms ease;
+}
+
+.period-toggle button:last-child {
+  border-right: 0;
+}
+
+.period-toggle button:hover,
+.period-toggle button:focus-visible {
+  background: rgba(255, 75, 47, 0.12);
+  outline: none;
+}
+
+.period-toggle button[aria-pressed="true"] {
+  color: var(--paper);
+  background: var(--ink);
+}
+
+.period-toggle button[aria-pressed="true"] small {
+  color: var(--lime);
+}
+
+.period-toggle small {
+  color: var(--signal-dark);
+  font-size: 0.55rem;
+}
+
+.yield-frame {
+  position: relative;
+  z-index: 1;
+  height: 410px;
+  padding: 1.5rem 0 0 2.5rem;
+  border-bottom: 1px solid var(--ink);
+}
+
+#yield-chart {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.yield-y-label {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  color: var(--ink-soft);
+  font-size: 0.6rem;
+  letter-spacing: 0.1em;
+  transform: rotate(-90deg) translateX(-50%);
+  transform-origin: left top;
+}
+
+.yield-tooltip {
+  min-width: 155px;
+  color: var(--paper);
+  background: var(--ink);
+  box-shadow: 8px 8px 0 rgba(255, 75, 47, 0.55);
+}
+
+.yield-readouts {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  margin-top: 1.5rem;
+  border: 1px solid var(--ink);
+}
+
+.yield-readouts > div {
+  padding: 1.35rem 1.5rem;
+  border-right: 1px solid var(--ink);
+}
+
+.yield-readouts > div:last-child {
+  border-right: 0;
+}
+
+.yield-readouts span {
+  display: block;
+  margin-bottom: 0.5rem;
+  color: var(--ink-soft);
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.yield-readouts strong {
+  font: 1.15rem var(--display);
+  text-transform: uppercase;
+}
+
+.yield-footnote {
+  position: relative;
+  z-index: 1;
+  max-width: 780px;
+  margin: 1rem 0 0;
+  color: var(--ink-soft);
+  font-size: 0.64rem;
 }
 
 .contracts-section {
@@ -722,6 +911,18 @@ footer p {
     border-bottom: 1px solid rgba(241, 239, 230, 0.22);
   }
 
+  .yield-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .period-toggle {
+    min-width: 0;
+    border-top: 1px solid var(--ink);
+    border-left: 0;
+  }
+
   footer {
     grid-template-columns: 1fr 1fr;
   }
@@ -775,6 +976,7 @@ footer p {
   }
 
   .curve-section,
+  .yield-section,
   .contracts-section {
     padding: 4.5rem 1.25rem;
   }
@@ -793,6 +995,45 @@ footer p {
   .curve-frame {
     height: 330px;
     padding-left: 1.5rem;
+  }
+
+  .yield-frame {
+    height: 330px;
+    padding-left: 1.5rem;
+  }
+
+  .formula-block {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+
+  .period-toggle {
+    grid-template-columns: 1fr;
+  }
+
+  .period-toggle button,
+  .period-toggle button:last-child {
+    border-right: 0;
+    border-bottom: 1px solid var(--ink);
+  }
+
+  .period-toggle button:last-child {
+    border-bottom: 0;
+  }
+
+  .yield-readouts {
+    grid-template-columns: 1fr;
+  }
+
+  .yield-readouts > div,
+  .yield-readouts > div:last-child {
+    border-right: 0;
+    border-bottom: 1px solid var(--ink);
+  }
+
+  .yield-readouts > div:last-child {
+    border-bottom: 0;
   }
 
   .stat-strip {

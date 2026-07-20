@@ -119,6 +119,65 @@
         </div>
       </section>
 
+      <section class="yield-section" aria-labelledby="yield-title">
+        <div class="section-heading yield-heading">
+          <div>
+            <p class="eyebrow">Compounded carry</p>
+            <h2 id="yield-title">Daily yield</h2>
+          </div>
+          <p class="section-note" id="yield-summary">
+            Implied yield for each maturity, compounded from its daily factor.
+          </p>
+        </div>
+
+        <div class="yield-toolbar">
+          <div class="formula-block">
+            <span>Gross daily factor</span>
+            <code>(Contract ÷ Spot)<sup>1 ÷ days left</sup></code>
+          </div>
+          <div class="period-toggle" role="group" aria-label="Yield compounding period">
+            <button type="button" data-yield-period="daily" aria-pressed="true">
+              Daily <small>1D</small>
+            </button>
+            <button type="button" data-yield-period="monthly" aria-pressed="false">
+              Monthly <small>30D</small>
+            </button>
+            <button type="button" data-yield-period="annualized" aria-pressed="false">
+              Annualized <small>365D</small>
+            </button>
+          </div>
+        </div>
+
+        <div class="yield-frame">
+          <div class="yield-y-label">NET YIELD (%)</div>
+          <canvas
+            id="yield-chart"
+            role="img"
+            aria-label="Daily compounded USD/TRY futures yield by maturity"
+          ></canvas>
+          <div class="chart-tooltip yield-tooltip" id="yield-tooltip" hidden></div>
+        </div>
+
+        <div class="yield-readouts" aria-live="polite">
+          <div>
+            <span>Selected period</span>
+            <strong id="yield-period-label">Daily · 1D</strong>
+          </div>
+          <div>
+            <span>Front yield</span>
+            <strong id="yield-front-value">—</strong>
+          </div>
+          <div>
+            <span>Curve average</span>
+            <strong id="yield-average-value">—</strong>
+          </div>
+        </div>
+        <p class="yield-footnote">
+          The gross factor follows the displayed formula. The chart shows net
+          compounded yield: (factor<sup>period</sup> − 1) × 100.
+        </p>
+      </section>
+
       <section class="contracts-section" id="contracts" aria-labelledby="contracts-title">
         <div class="section-heading contracts-heading">
           <div>
