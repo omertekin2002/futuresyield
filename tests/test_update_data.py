@@ -8,6 +8,7 @@ from scripts.update_data import (
     build_snapshot,
     compounded_yield_percent,
     daily_yield_factor,
+    fetch_stream_quotes,
     gold_try_per_gram,
     maturity_date,
     normalize_contract,
@@ -131,6 +132,40 @@ class NormalizationTests(unittest.TestCase):
         self.assertEqual(result["code"], "F_XAUTRYM0826")
         self.assertEqual(result["maturity_date"], "2026-08-31")
         self.assertAlmostEqual(result["premium_percent"], 4.0983606557, places=6)
+
+
+class StreamQuoteTests(unittest.TestCase):
+    def test_cleanup_failure_does_not_discard_received_quotes(self):
+        class CleanupFailureStream:
+            def connect(self, timeout):
+                pass
+
+            def subscribe(self, symbol):
+                pass
+
+            def wait_for_quote(self, symbol, timeout):
+                return {"last": 48.25}
+
+            def get_quote(self, symbol):
+                return None
+
+            def disconnect(self):
+                raise AttributeError("'NoneType' object has no attribute 'close_frame'")
+
+        with (
+            patch(
+                "scripts.update_data.bp.TradingViewStream",
+                return_value=CleanupFailureStream(),
+            ),
+            patch("builtins.print") as mock_print,
+        ):
+            quotes = fetch_stream_quotes(["USDTRYQ2026"], timeout=0.01)
+
+        self.assertEqual(quotes["USDTRYQ2026"]["last"], 48.25)
+        mock_print.assert_called_once_with(
+            "Warning: TradingView stream cleanup failed (pass 1): "
+            "'NoneType' object has no attribute 'close_frame'"
+        )
 
 
 class SnapshotTests(unittest.TestCase):

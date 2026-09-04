@@ -449,7 +449,13 @@ def fetch_stream_quotes(symbols: list[str], timeout: float = 10.0) -> dict[str, 
                 late_quote = stream.get_quote(symbol)
                 if late_quote and finite_number(late_quote.get("last")) is not None:
                     quotes[symbol] = late_quote
-            stream.disconnect()
+            try:
+                stream.disconnect()
+            except Exception as exc:
+                print(
+                    f"Warning: TradingView stream cleanup failed "
+                    f"(pass {pass_number}): {exc}"
+                )
     return quotes
 
 
