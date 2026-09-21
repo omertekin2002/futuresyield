@@ -327,18 +327,18 @@ function renderChart() {
   const xAt = (index) => margin.left + (contracts.length === 1 ? chartWidth / 2 : index * chartWidth / (contracts.length - 1));
   const yAt = (value) => margin.top + (max - value) / (max - min) * chartHeight;
 
-  context.font = '10px "IBM Plex Mono", monospace';
+  context.font = '11px Helvetica, Arial, sans-serif';
   context.textBaseline = "middle";
   context.lineWidth = 1;
   for (let i = 0; i <= 4; i += 1) {
     const value = max - ((max - min) * i / 4);
     const y = margin.top + chartHeight * i / 4;
-    context.strokeStyle = "rgba(241, 239, 230, 0.11)";
+    context.strokeStyle = "#a5b8c0";
     context.beginPath();
     context.moveTo(margin.left, y);
     context.lineTo(width - margin.right, y);
     context.stroke();
-    context.fillStyle = "rgba(241, 239, 230, 0.48)";
+    context.fillStyle = "#000000";
     context.textAlign = "right";
     context.fillText(
       value.toFixed(Math.min(state.data.price_digits, 2)),
@@ -347,22 +347,6 @@ function renderChart() {
     );
   }
 
-  const spotY = yAt(state.data.spot.last);
-  context.save();
-  context.setLineDash([6, 5]);
-  context.strokeStyle = "rgba(255, 75, 47, 0.8)";
-  context.beginPath();
-  context.moveTo(margin.left, spotY);
-  context.lineTo(width - margin.right, spotY);
-  context.stroke();
-  context.restore();
-  context.fillStyle = "#ff715b";
-  context.textAlign = "left";
-  context.fillText("SPOT", margin.left + 7, spotY - 10);
-
-  const gradient = context.createLinearGradient(0, margin.top, 0, height - margin.bottom);
-  gradient.addColorStop(0, "rgba(184, 255, 69, 0.22)");
-  gradient.addColorStop(1, "rgba(184, 255, 69, 0)");
   context.beginPath();
   contracts.forEach((contract, index) => {
     const x = xAt(index);
@@ -373,8 +357,22 @@ function renderChart() {
   context.lineTo(xAt(contracts.length - 1), height - margin.bottom);
   context.lineTo(xAt(0), height - margin.bottom);
   context.closePath();
-  context.fillStyle = gradient;
+  context.fillStyle = "#c0d4a7";
   context.fill();
+
+  const spotY = yAt(state.data.spot.last);
+  context.save();
+  context.setLineDash([6, 5]);
+  context.strokeStyle = "#000000";
+  context.beginPath();
+  context.moveTo(margin.left, spotY);
+  context.lineTo(width - margin.right, spotY);
+  context.stroke();
+  context.restore();
+  context.fillStyle = "#000000";
+  context.textAlign = "left";
+  context.fillText("SPOT", margin.left + 7, spotY - 10);
+
 
   context.beginPath();
   contracts.forEach((contract, index) => {
@@ -383,7 +381,7 @@ function renderChart() {
     if (index === 0) context.moveTo(x, y);
     else context.lineTo(x, y);
   });
-  context.strokeStyle = "#b8ff45";
+  context.strokeStyle = "#000000";
   context.lineWidth = 2;
   context.stroke();
 
@@ -393,14 +391,14 @@ function renderChart() {
     const y = yAt(contract.last);
     context.beginPath();
     context.arc(x, y, index === 0 ? 5 : 3.5, 0, Math.PI * 2);
-    context.fillStyle = index === 0 ? "#ff4b2f" : "#24271f";
+    context.fillStyle = index === 0 ? "#000000" : "#ffffff";
     context.fill();
-    context.strokeStyle = index === 0 ? "#ff715b" : "#b8ff45";
+    context.strokeStyle = "#000000";
     context.lineWidth = 2;
     context.stroke();
 
-    if (index % labelEvery === 0 || index === contracts.length - 1) {
-      context.fillStyle = "rgba(241, 239, 230, 0.58)";
+    if (index === contracts.length - 1 || (index % labelEvery === 0 && xAt(contracts.length - 1) - x > 58)) {
+      context.fillStyle = "#000000";
       context.textAlign = index === contracts.length - 1 ? "right" : index === 0 ? "left" : "center";
       context.fillText(contract.label.replace(" 20", " ’"), x, height - 20);
     }
@@ -453,18 +451,18 @@ function renderYieldChart() {
   );
   const yAt = (value) => margin.top + (max - value) / (max - min) * chartHeight;
 
-  context.font = '10px "IBM Plex Mono", monospace';
+  context.font = '11px Helvetica, Arial, sans-serif';
   context.textBaseline = "middle";
   context.lineWidth = 1;
   for (let i = 0; i <= 4; i += 1) {
     const value = max - ((max - min) * i / 4);
     const y = margin.top + chartHeight * i / 4;
-    context.strokeStyle = "rgba(23, 25, 20, 0.13)";
+    context.strokeStyle = "#a5b8c0";
     context.beginPath();
     context.moveTo(margin.left, y);
     context.lineTo(width - margin.right, y);
     context.stroke();
-    context.fillStyle = "rgba(23, 25, 20, 0.58)";
+    context.fillStyle = "#000000";
     context.textAlign = "right";
     context.fillText(
       `${value.toFixed(state.yieldPeriod === "daily" ? 3 : 1)}%`,
@@ -474,16 +472,13 @@ function renderYieldChart() {
   }
 
   const zeroY = yAt(0);
-  context.strokeStyle = "rgba(23, 25, 20, 0.72)";
+  context.strokeStyle = "#000000";
   context.lineWidth = 1.5;
   context.beginPath();
   context.moveTo(margin.left, zeroY);
   context.lineTo(width - margin.right, zeroY);
   context.stroke();
 
-  const gradient = context.createLinearGradient(0, margin.top, 0, zeroY);
-  gradient.addColorStop(0, "rgba(255, 75, 47, 0.28)");
-  gradient.addColorStop(1, "rgba(255, 75, 47, 0.02)");
   context.beginPath();
   contracts.forEach((point, index) => {
     const x = xAt(index);
@@ -494,7 +489,7 @@ function renderYieldChart() {
   context.lineTo(xAt(contracts.length - 1), zeroY);
   context.lineTo(xAt(0), zeroY);
   context.closePath();
-  context.fillStyle = gradient;
+  context.fillStyle = "#a5b8c0";
   context.fill();
 
   context.beginPath();
@@ -504,7 +499,7 @@ function renderYieldChart() {
     if (index === 0) context.moveTo(x, y);
     else context.lineTo(x, y);
   });
-  context.strokeStyle = "#ff4b2f";
+  context.strokeStyle = "#000000";
   context.lineWidth = 2.5;
   context.stroke();
 
@@ -518,7 +513,7 @@ function renderYieldChart() {
 
   context.save();
   context.setLineDash([4, 5]);
-  context.strokeStyle = "rgba(255, 75, 47, 0.72)";
+  context.strokeStyle = "#000000";
   context.lineWidth = 1;
   context.beginPath();
   context.moveTo(peakX, margin.top);
@@ -535,22 +530,22 @@ function renderYieldChart() {
     const isPeak = index === peak.index;
     context.beginPath();
     context.arc(x, y, isPeak ? 7 : index === 0 ? 5 : 3.5, 0, Math.PI * 2);
-    context.fillStyle = isPeak ? "#ff4b2f" : index === 0 ? "#171914" : "#e5e1d4";
+    context.fillStyle = isPeak || index === 0 ? "#000000" : "#ffffff";
     context.fill();
-    context.strokeStyle = isPeak || index === 0 ? "#171914" : "#ff4b2f";
+    context.strokeStyle = "#000000";
     context.lineWidth = isPeak ? 3 : 2;
     context.stroke();
 
     if (isPeak) {
       context.beginPath();
       context.arc(x, y, 11, 0, Math.PI * 2);
-      context.strokeStyle = "rgba(255, 75, 47, 0.38)";
+      context.strokeStyle = "#000000";
       context.lineWidth = 2;
       context.stroke();
     }
 
-    if (index % labelEvery === 0 || index === contracts.length - 1) {
-      context.fillStyle = "rgba(23, 25, 20, 0.62)";
+    if (index === contracts.length - 1 || (index % labelEvery === 0 && xAt(contracts.length - 1) - x > 58)) {
+      context.fillStyle = "#000000";
       context.textAlign = index === contracts.length - 1
         ? "right"
         : index === 0 ? "left" : "center";
@@ -564,16 +559,16 @@ function renderYieldChart() {
   });
 
   const peakTag = `HIGHEST ${settings.label.toUpperCase()} · ${formatYield(peak.value)}`;
-  context.font = '600 10px "IBM Plex Mono", monospace';
+  context.font = '700 11px Helvetica, Arial, sans-serif';
   const peakTagWidth = context.measureText(peakTag).width + 18;
   const peakTagX = Math.min(
     Math.max(peakX - peakTagWidth / 2, margin.left),
     width - margin.right - peakTagWidth,
   );
   const peakTagY = peakY < margin.top + 42 ? peakY + 17 : peakY - 34;
-  context.fillStyle = "#171914";
+  context.fillStyle = "#000000";
   context.fillRect(peakTagX, peakTagY, peakTagWidth, 22);
-  context.fillStyle = "#b8ff45";
+  context.fillStyle = "#ffffff";
   context.textAlign = "center";
   context.fillText(peakTag, peakTagX + peakTagWidth / 2, peakTagY + 11);
 

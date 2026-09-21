@@ -3,20 +3,18 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#151712" />
+    <meta name="theme-color" content="#000000" />
     <meta
       name="description"
       content="Live USD/TRY, EUR/TRY, and XAU/TRY VİOP futures curves, refreshed every 15 minutes."
     />
     <title>Vade — TRY Futures Curves</title>
-    <link rel="icon" href="favicon.ico?v=1" sizes="any">
-    <link rel="icon" type="image/svg+xml" href="favicon.svg?v=1">
-    <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png?v=1">
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="icon" href="favicon.ico?v=1" sizes="any" />
+    <link rel="icon" type="image/svg+xml" href="favicon.svg?v=1" />
     <link
-      href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
-      rel="stylesheet"
+      rel="apple-touch-icon"
+      sizes="180x180"
+      href="assets/apple-touch-icon.png?v=1"
     />
     <link rel="stylesheet" href="styles.css" />
     <script src="app.js" defer></script>
@@ -24,262 +22,333 @@
   <body>
     <a class="skip-link" href="#contracts">Skip to contracts</a>
 
-    <header class="site-header">
-      <a class="wordmark" href="./" aria-label="Vade home">
-        <span class="wordmark-mark" aria-hidden="true"></span>
-        <span>VADE</span>
-        <span class="wordmark-sub" id="wordmark-pair">USD · TRY</span>
-      </a>
-      <div class="header-meta">
-        <span class="data-state" id="data-state" role="status" aria-live="polite">
+    <div class="page-frame">
+      <header class="site-header">
+        <a class="wordmark" href="./" aria-label="Vade home">
+          <span>VADE</span>
+          <span class="wordmark-sub" id="wordmark-pair">USD · TRY</span>
+        </a>
+        <div class="masthead-copy">
+          <strong>THE FUTURES MARKET. ONLINE.</strong
+          ><span>Your window into the Turkish lira.</span>
+        </div>
+        <div class="header-meta">
+          <button class="refresh-button" id="refresh-button" type="button">
+            <span aria-hidden="true">↻</span> Refresh
+          </button>
+        </div>
+      </header>
+      <div class="service-band">
+        <span>BORSA İSTANBUL / VİOP MARKET MONITOR</span>
+        <span
+          class="data-state"
+          id="data-state"
+          role="status"
+          aria-live="polite"
+        >
           <span class="status-dot" aria-hidden="true"></span>
           Loading market data
         </span>
-        <button class="refresh-button" id="refresh-button" type="button">
-          <span aria-hidden="true">↻</span> Refresh
-        </button>
       </div>
-    </header>
 
-    <nav class="market-rail" aria-label="Select futures market">
-      <div class="market-rail-label" aria-hidden="true">
-        <span>Market rail</span>
-        <strong>TRY-quoted futures</strong>
-      </div>
-      <div class="market-options">
-        <button type="button" data-market="USDTRY" aria-pressed="true">
-          <span class="market-number">01</span>
-          <span class="market-code">USD/TRY</span>
-          <small data-market-count="USDTRY">Loading</small>
-        </button>
-        <button type="button" data-market="EURTRY" aria-pressed="false">
-          <span class="market-number">02</span>
-          <span class="market-code">EUR/TRY</span>
-          <small data-market-count="EURTRY">Loading</small>
-        </button>
-        <button type="button" data-market="XAUTRY" aria-pressed="false">
-          <span class="market-number">03</span>
-          <span class="market-code">XAU/TRY</span>
-          <small data-market-count="XAUTRY">Loading</small>
-        </button>
-      </div>
-    </nav>
+      <main id="dashboard-content">
+        <div class="catalog-layout">
+          <div class="catalog-sidebar">
+            <nav class="market-rail" aria-label="Select futures market">
+              <div class="market-rail-label" aria-hidden="true">
+                <span>SELECT A MARKET</span>
+                <strong>TRY-quoted futures</strong>
+              </div>
+              <div class="market-options">
+                <button type="button" data-market="USDTRY" aria-pressed="true">
+                  <span class="market-number">01</span>
+                  <span class="market-code">USD/TRY</span
+                  ><span class="market-description">U.S. Dollar</span>
+                  <small data-market-count="USDTRY">Loading</small>
+                </button>
+                <button type="button" data-market="EURTRY" aria-pressed="false">
+                  <span class="market-number">02</span>
+                  <span class="market-code">EUR/TRY</span
+                  ><span class="market-description">Euro</span>
+                  <small data-market-count="EURTRY">Loading</small>
+                </button>
+                <button type="button" data-market="XAUTRY" aria-pressed="false">
+                  <span class="market-number">03</span>
+                  <span class="market-code">XAU/TRY</span
+                  ><span class="market-description">Gold · per gram</span>
+                  <small data-market-count="XAUTRY">Loading</small>
+                </button>
+              </div>
+            </nav>
+            <aside class="spot-panel" aria-labelledby="spot-title">
+              <div class="panel-kicker">
+                <span id="spot-title">Spot rate</span>
+                <span class="delay-tag">≈ 15 min delay</span>
+              </div>
+              <div class="spot-value loading-value" id="spot-value">—</div>
+              <div class="spot-meta">
+                <span class="change-value" id="spot-change"
+                  >Waiting for data</span
+                >
+                <span id="spot-unit">TRY per USD</span>
+              </div>
+              <div class="spot-range" aria-label="Spot daily range">
+                <div>
+                  <span>Day low</span>
+                  <strong id="spot-low">—</strong>
+                </div>
+                <div>
+                  <span>Day high</span>
+                  <strong id="spot-high">—</strong>
+                </div>
+              </div>
+            </aside>
 
-    <main id="dashboard-content">
-      <section class="hero" aria-labelledby="page-title">
-        <div class="hero-copy">
-          <p class="eyebrow">Borsa İstanbul · VİOP</p>
-          <h1 id="page-title">
-            <span class="hero-market" id="hero-market-label">USD/TRY,</span><br />
-            <span class="hero-outline">across time.</span>
-          </h1>
-          <p class="hero-intro">
-            The live shape of the Turkish lira futures curve—from today’s spot
-            rate to every listed maturity.
-          </p>
-        </div>
-
-        <aside class="spot-panel" aria-labelledby="spot-title">
-          <div class="panel-kicker">
-            <span id="spot-title">Spot rate</span>
-            <span class="delay-tag">≈ 15 min delay</span>
-          </div>
-          <div class="spot-value loading-value" id="spot-value">—</div>
-          <div class="spot-meta">
-            <span class="change-value" id="spot-change">Waiting for data</span>
-            <span id="spot-unit">TRY per USD</span>
-          </div>
-          <div class="spot-range" aria-label="Spot daily range">
-            <div>
-              <span>Day low</span>
-              <strong id="spot-low">—</strong>
+            <div class="date-stamp" aria-label="Market date">
+              <span>Market date</span>
+              <strong id="market-date">—</strong>
+              <small>Europe / Istanbul</small>
             </div>
-            <div>
-              <span>Day high</span>
-              <strong id="spot-high">—</strong>
+
+            <div class="catalog-note">
+              <strong>ABOUT THIS MONITOR</strong>
+              <p>
+                Three markets. Every listed maturity. Compare the futures curve
+                with today’s spot reference.
+              </p>
+              <p>
+                Market snapshots refresh every 15 minutes. Quotes may be
+                delayed.
+              </p>
             </div>
           </div>
-        </aside>
+          <div class="catalog-main">
+            <section class="hero" aria-labelledby="page-title">
+              <div class="hero-copy">
+                <p class="eyebrow">Borsa İstanbul · VİOP</p>
+                <h1 id="page-title">
+                  <span class="hero-market" id="hero-market-label"
+                    >USD/TRY,</span
+                  ><br />
+                  <span class="hero-outline">across time.</span>
+                </h1>
+                <p class="hero-intro">
+                  The live shape of the Turkish lira futures curve—from today’s
+                  spot rate to every listed maturity.
+                </p>
+              </div>
+            </section>
 
-        <div class="date-stamp" aria-label="Market date">
-          <span>Market date</span>
-          <strong id="market-date">—</strong>
-          <small>Europe / Istanbul</small>
-        </div>
-      </section>
+            <section class="curve-section" aria-labelledby="curve-title">
+              <div class="section-heading">
+                <div>
+                  <p class="eyebrow">Forward view</p>
+                  <h2 id="curve-title">The futures curve</h2>
+                </div>
+                <p class="section-note" id="curve-summary">
+                  Plotting every available dated USD/TRY contract.
+                </p>
+              </div>
 
-      <section class="curve-section" aria-labelledby="curve-title">
-        <div class="section-heading">
-          <div>
-            <p class="eyebrow">Forward view</p>
-            <h2 id="curve-title">The futures curve</h2>
+              <div class="curve-frame">
+                <div class="curve-y-label" id="curve-unit">TRY / USD</div>
+                <canvas
+                  id="curve-chart"
+                  role="img"
+                  aria-label="Selected VİOP futures price curve by maturity"
+                ></canvas>
+                <div class="chart-tooltip" id="chart-tooltip" hidden></div>
+              </div>
+
+              <div class="stat-strip">
+                <div class="stat-item">
+                  <span>Listed contracts</span>
+                  <strong id="contract-count">—</strong>
+                </div>
+                <div class="stat-item">
+                  <span>Front contract</span>
+                  <strong id="front-contract">—</strong>
+                </div>
+                <div class="stat-item">
+                  <span>Front premium</span>
+                  <strong id="front-premium">—</strong>
+                </div>
+                <div class="stat-item">
+                  <span>Curve horizon</span>
+                  <strong id="curve-horizon">—</strong>
+                </div>
+              </div>
+            </section>
+
+            <section class="yield-section" aria-labelledby="yield-title">
+              <div class="section-heading yield-heading">
+                <div>
+                  <p class="eyebrow">Compounded carry</p>
+                  <h2 id="yield-title">Daily yield</h2>
+                </div>
+                <p class="section-note" id="yield-summary">
+                  Implied yield for each maturity, compounded from its daily
+                  factor.
+                </p>
+              </div>
+
+              <div class="yield-toolbar">
+                <div class="formula-block">
+                  <span>Gross daily factor</span>
+                  <code>(Contract ÷ Spot)<sup>1 ÷ days left</sup></code>
+                </div>
+                <div
+                  class="period-toggle"
+                  role="group"
+                  aria-label="Yield compounding period"
+                >
+                  <button
+                    type="button"
+                    data-yield-period="daily"
+                    aria-pressed="true"
+                  >
+                    Daily <small>1D</small>
+                  </button>
+                  <button
+                    type="button"
+                    data-yield-period="monthly"
+                    aria-pressed="false"
+                  >
+                    Monthly <small>30D</small>
+                  </button>
+                  <button
+                    type="button"
+                    data-yield-period="annualized"
+                    aria-pressed="false"
+                  >
+                    Annualized <small>365D</small>
+                  </button>
+                </div>
+              </div>
+
+              <div class="yield-frame">
+                <div class="yield-y-label">NET YIELD (%)</div>
+                <canvas
+                  id="yield-chart"
+                  role="img"
+                  aria-label="Selected VİOP futures yield by maturity"
+                ></canvas>
+                <div
+                  class="chart-tooltip yield-tooltip"
+                  id="yield-tooltip"
+                  hidden
+                ></div>
+              </div>
+
+              <div class="yield-readouts" aria-live="polite">
+                <div>
+                  <span>Selected period</span>
+                  <strong id="yield-period-label">Daily · 1D</strong>
+                </div>
+                <div>
+                  <span>Front yield</span>
+                  <strong id="yield-front-value">—</strong>
+                </div>
+                <div>
+                  <span>Curve average</span>
+                  <strong id="yield-average-value">—</strong>
+                </div>
+              </div>
+              <p class="yield-footnote">
+                The gross factor follows the displayed formula. The chart shows
+                net compounded yield: (factor<sup>period</sup> − 1) × 100.
+              </p>
+            </section>
           </div>
-          <p class="section-note" id="curve-summary">
-            Plotting every available dated USD/TRY contract.
+        </div>
+
+        <section
+          class="contracts-section"
+          id="contracts"
+          aria-labelledby="contracts-title"
+        >
+          <div class="section-heading contracts-heading">
+            <div>
+              <p class="eyebrow">Contract board</p>
+              <h2 id="contracts-title">Every maturity</h2>
+            </div>
+            <div class="updated-block">
+              <span>Snapshot updated</span>
+              <strong id="updated-at">—</strong>
+            </div>
+          </div>
+
+          <div
+            class="table-shell"
+            role="region"
+            aria-label="Futures contract prices and yields"
+            tabindex="0"
+          >
+            <table>
+              <caption class="sr-only" id="contracts-caption">
+                Latest VİOP USD/TRY futures prices, maturity dates, days
+                remaining, and compounded implied yields
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col">Contract</th>
+                  <th scope="col" class="numeric">Last</th>
+                  <th scope="col" class="numeric">Change</th>
+                  <th scope="col" class="numeric">Bid / Ask</th>
+                  <th scope="col">Maturity</th>
+                  <th scope="col" class="numeric">Days left</th>
+                  <th scope="col" class="numeric">vs. spot</th>
+                  <th scope="col" class="numeric yield-column-heading">
+                    Daily yield <small>1D</small>
+                  </th>
+                  <th scope="col" class="numeric yield-column-heading">
+                    Monthly yield <small>30D</small>
+                  </th>
+                  <th scope="col" class="numeric yield-column-heading">
+                    Annualized <small>365D</small>
+                  </th>
+                  <th scope="col" class="numeric">Volume</th>
+                </tr>
+              </thead>
+              <tbody id="contract-rows">
+                <tr class="loading-row">
+                  <td colspan="11">Pulling the latest curve…</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="table-footnote">
+            “Days left” uses calendar days. Maturity is the final full Turkish
+            business day of the contract month, following Borsa İstanbul rules.
+            Yield columns show net compounded returns over 1, 30, and 365 days.
+          </p>
+        </section>
+      </main>
+
+      <footer>
+        <div>
+          <span class="footer-mark" id="footer-market-mark">VADE / 01</span>
+          <p id="footer-market-copy">
+            Built as a clear window into the USD/TRY term structure.
           </p>
         </div>
-
-        <div class="curve-frame">
-          <div class="curve-y-label" id="curve-unit">TRY / USD</div>
-          <canvas
-            id="curve-chart"
-            role="img"
-            aria-label="Selected VİOP futures price curve by maturity"
-          ></canvas>
-          <div class="chart-tooltip" id="chart-tooltip" hidden></div>
+        <div class="footer-links">
+          <a href="https://github.com/saidsurucu/borsapy">Data via borsapy</a>
+          <a href="https://www.borsaistanbul.com/en/markets/viop">
+            VİOP market overview
+          </a>
         </div>
-
-        <div class="stat-strip">
-          <div class="stat-item">
-            <span>Listed contracts</span>
-            <strong id="contract-count">—</strong>
-          </div>
-          <div class="stat-item">
-            <span>Front contract</span>
-            <strong id="front-contract">—</strong>
-          </div>
-          <div class="stat-item">
-            <span>Front premium</span>
-            <strong id="front-premium">—</strong>
-          </div>
-          <div class="stat-item">
-            <span>Curve horizon</span>
-            <strong id="curve-horizon">—</strong>
-          </div>
-        </div>
-      </section>
-
-      <section class="yield-section" aria-labelledby="yield-title">
-        <div class="section-heading yield-heading">
-          <div>
-            <p class="eyebrow">Compounded carry</p>
-            <h2 id="yield-title">Daily yield</h2>
-          </div>
-          <p class="section-note" id="yield-summary">
-            Implied yield for each maturity, compounded from its daily factor.
-          </p>
-        </div>
-
-        <div class="yield-toolbar">
-          <div class="formula-block">
-            <span>Gross daily factor</span>
-            <code>(Contract ÷ Spot)<sup>1 ÷ days left</sup></code>
-          </div>
-          <div class="period-toggle" role="group" aria-label="Yield compounding period">
-            <button type="button" data-yield-period="daily" aria-pressed="true">
-              Daily <small>1D</small>
-            </button>
-            <button type="button" data-yield-period="monthly" aria-pressed="false">
-              Monthly <small>30D</small>
-            </button>
-            <button type="button" data-yield-period="annualized" aria-pressed="false">
-              Annualized <small>365D</small>
-            </button>
-          </div>
-        </div>
-
-        <div class="yield-frame">
-          <div class="yield-y-label">NET YIELD (%)</div>
-          <canvas
-            id="yield-chart"
-            role="img"
-            aria-label="Selected VİOP futures yield by maturity"
-          ></canvas>
-          <div class="chart-tooltip yield-tooltip" id="yield-tooltip" hidden></div>
-        </div>
-
-        <div class="yield-readouts" aria-live="polite">
-          <div>
-            <span>Selected period</span>
-            <strong id="yield-period-label">Daily · 1D</strong>
-          </div>
-          <div>
-            <span>Front yield</span>
-            <strong id="yield-front-value">—</strong>
-          </div>
-          <div>
-            <span>Curve average</span>
-            <strong id="yield-average-value">—</strong>
-          </div>
-        </div>
-        <p class="yield-footnote">
-          The gross factor follows the displayed formula. The chart shows net
-          compounded yield: (factor<sup>period</sup> − 1) × 100.
+        <p class="disclaimer">
+          Personal and educational use only. Delayed market data; not investment
+          advice.
         </p>
-      </section>
-
-      <section class="contracts-section" id="contracts" aria-labelledby="contracts-title">
-        <div class="section-heading contracts-heading">
-          <div>
-            <p class="eyebrow">Contract board</p>
-            <h2 id="contracts-title">Every maturity</h2>
-          </div>
-          <div class="updated-block">
-            <span>Snapshot updated</span>
-            <strong id="updated-at">—</strong>
-          </div>
-        </div>
-
-        <div class="table-shell">
-          <table>
-            <caption class="sr-only" id="contracts-caption">
-              Latest VİOP USD/TRY futures prices, maturity dates, days remaining,
-              and compounded implied yields
-            </caption>
-            <thead>
-              <tr>
-                <th scope="col">Contract</th>
-                <th scope="col" class="numeric">Last</th>
-                <th scope="col" class="numeric">Change</th>
-                <th scope="col" class="numeric">Bid / Ask</th>
-                <th scope="col">Maturity</th>
-                <th scope="col" class="numeric">Days left</th>
-                <th scope="col" class="numeric">vs. spot</th>
-                <th scope="col" class="numeric yield-column-heading">
-                  Daily yield <small>1D</small>
-                </th>
-                <th scope="col" class="numeric yield-column-heading">
-                  Monthly yield <small>30D</small>
-                </th>
-                <th scope="col" class="numeric yield-column-heading">
-                  Annualized <small>365D</small>
-                </th>
-                <th scope="col" class="numeric">Volume</th>
-              </tr>
-            </thead>
-            <tbody id="contract-rows">
-              <tr class="loading-row">
-                <td colspan="11">Pulling the latest curve…</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <p class="table-footnote">
-          “Days left” uses calendar days. Maturity is the final full Turkish
-          business day of the contract month, following Borsa İstanbul rules.
-          Yield columns show net compounded returns over 1, 30, and 365 days.
-        </p>
-      </section>
-    </main>
-
-    <footer>
-      <div>
-        <span class="footer-mark" id="footer-market-mark">VADE / 01</span>
-        <p id="footer-market-copy">Built as a clear window into the USD/TRY term structure.</p>
-      </div>
-      <div class="footer-links">
-        <a href="https://github.com/saidsurucu/borsapy">Data via borsapy</a>
-        <a href="https://www.borsaistanbul.com/en/markets/viop">
-          VİOP market overview
-        </a>
-      </div>
-      <p class="disclaimer">
-        Personal and educational use only. Delayed market data; not investment advice.
-      </p>
-    </footer>
+      </footer>
+    </div>
 
     <noscript>
-      <div class="noscript-message">JavaScript is required to display the market snapshot.</div>
+      <div class="noscript-message">
+        JavaScript is required to display the market snapshot.
+      </div>
     </noscript>
   </body>
 </html>
