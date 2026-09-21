@@ -38,8 +38,9 @@ jobs:
 
       - name: Prepare static site
         run: |
-          mkdir -p _site/data
-          cp index.html styles.css app.js .nojekyll _site/
+          mkdir -p _site/data _site/assets
+          cp index.html styles.css app.js .nojekyll favicon.ico favicon.svg _site/
+          cp assets/apple-touch-icon.png _site/assets/
           cp data/market.json _site/data/
 
       - name: Configure GitHub Pages
