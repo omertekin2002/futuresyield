@@ -33,7 +33,6 @@ const elements = {
   contractsCaption: document.querySelector("#contracts-caption"),
   canvas: document.querySelector("#curve-chart"),
   tooltip: document.querySelector("#chart-tooltip"),
-  footerMarketMark: document.querySelector("#footer-market-mark"),
   footerMarketCopy: document.querySelector("#footer-market-copy"),
 };
 
@@ -192,8 +191,6 @@ function renderMarketRail(snapshot) {
 }
 
 function renderMarketIdentity(market) {
-  const marketIndex = state.snapshot.market_order.indexOf(market.key) + 1;
-  const marketNumber = String(Math.max(marketIndex, 1)).padStart(2, "0");
   const spacedPair = market.pair.replace("/", " · ");
 
   document.body.dataset.market = market.key;
@@ -208,7 +205,6 @@ function renderMarketIdentity(market) {
   elements.contractsCaption.textContent =
     `Latest VİOP ${market.pair} futures prices, maturity dates, days remaining, ` +
     "and compounded implied yields";
-  elements.footerMarketMark.textContent = `VADE / ${marketNumber}`;
   elements.footerMarketCopy.textContent =
     `Built as a clear window into the ${market.pair} term structure.`;
 
