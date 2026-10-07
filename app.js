@@ -30,6 +30,19 @@ const elements = {
   yieldPeriodButtons: document.querySelectorAll("[data-yield-period]"),
   updatedAt: document.querySelector("#updated-at"),
   rows: document.querySelector("#contract-rows"),
+  carrySection: document.querySelector("#carry"),
+  carrySummary: document.querySelector("#carry-summary"),
+  carryRows: document.querySelector("#carry-rows"),
+  carryFootnote: document.querySelector("#carry-footnote"),
+  carryContractSize: document.querySelector("#carry-contract-size"),
+  trendWindow: document.querySelector("#trend-window"),
+  trendDaily: document.querySelector("#trend-daily"),
+  trendAnnualized: document.querySelector("#trend-annualized"),
+  trendStartLabel: document.querySelector("#trend-start-label"),
+  trendStartSpot: document.querySelector("#trend-start-spot"),
+  trendEndLabel: document.querySelector("#trend-end-label"),
+  trendEndSpot: document.querySelector("#trend-end-spot"),
+  trendLookback: document.querySelector("#trend-lookback"),
   contractsCaption: document.querySelector("#contracts-caption"),
   canvas: document.querySelector("#curve-chart"),
   tooltip: document.querySelector("#chart-tooltip"),
@@ -74,6 +87,11 @@ const YIELD_PERIODS = {
 const percentFormat = new Intl.NumberFormat("en-US", {
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,
+  signDisplay: "always",
+});
+
+const profitFormat = new Intl.NumberFormat("en-US", {
+  maximumFractionDigits: 0,
   signDisplay: "always",
 });
 
@@ -160,6 +178,10 @@ function formatYield(value, period = state.yieldPeriod) {
     maximumFractionDigits: digits,
     signDisplay: "always",
   }).format(value)}%`;
+}
+
+function formatProfit(value) {
+  return hasNumber(value) ? profitFormat.format(value) : "—";
 }
 
 function parseMarketDate(value) {
@@ -291,6 +313,87 @@ function renderRows(contracts) {
           ${formatYield(annualizedYield, "annualized")}
         </td>
         <td class="numeric" data-label="Volume">${volume}</td>
+      </tr>`;
+  }).join("");
+}
+
+function renderCarry(data) {
+  elements.carrySection.hidden = !hasNumber(data.contract_size);
+  if (elements.carrySection.hidden) return;
+
+  const trend = data.spot_trend;
+  const lookback = trend?.lookback_days ?? 180;
+  const contractSize = data.contract_size.toLocaleString("en-US");
+  elements.trendLookback.textContent = lookback;
+  elements.carryContractSize.textContent = contractSize;
+  elements.carryFootnote.textContent =
+    "A projection, not a forecast. It assumes spot keeps rising at its average " +
+    `daily pace, a short filled at the current bid, and ${contractSize} ` +
+    `${data.base_asset} per contract. Fees, taxes, and margin are ignored. ` +
+    `The window starts at the last daily close on or before ${lookback} days ago.`;
+
+  if (trend) {
+    const start = dateFormat.format(parseMarketDate(trend.start_date));
+    const end = dateFormat.format(parseMarketDate(trend.end_date));
+    elements.trendWindow.textContent = `${start} → ${end} · ${trend.days} days`;
+    elements.trendStartLabel.textContent = `Spot · ${start}`;
+    elements.trendEndLabel.textContent = `Spot · ${end}`;
+  } else {
+    elements.trendWindow.textContent = "Unavailable";
+    elements.trendStartLabel.textContent = "Spot at start";
+    elements.trendEndLabel.textContent = "Spot now";
+  }
+  elements.trendDaily.textContent = formatYield(trend?.daily_percent, "daily");
+  elements.trendDaily.className = signedClass(trend?.daily_percent);
+  elements.trendAnnualized.textContent = formatYield(
+    trend?.annualized_percent,
+    "annualized",
+  );
+  elements.trendAnnualized.className = signedClass(trend?.annualized_percent);
+  elements.trendStartSpot.textContent = formatPrice(trend?.start_spot);
+  elements.trendEndSpot.textContent = formatPrice(trend?.end_spot);
+
+  const priced = data.contracts.filter((contract) =>
+    hasNumber(contract.expected_short_profit_try)
+  );
+  const profitable = priced.filter(
+    (contract) => contract.expected_short_profit_try > 0,
+  ).length;
+  const noBid = data.contracts.filter((contract) => !hasNumber(contract.bid)).length;
+  const noBidNote = noBid
+    ? ` ${noBid} ${noBid === 1 ? "contract has" : "contracts have"} no bid in this snapshot.`
+    : "";
+  elements.carrySummary.textContent = trend
+    ? `At the ${trend.days}-day average pace of ` +
+      `${formatYield(trend.daily_percent, "daily")} a day, ${profitable} of ` +
+      `${priced.length} contracts with a bid show an expected profit when shorted.` +
+      noBidNote
+    : `The ${lookback}-day spot history was unavailable for this snapshot, ` +
+      "so no projection is shown.";
+
+  elements.carryRows.innerHTML = data.contracts.map((contract) => {
+    const profit = contract.expected_short_profit_try;
+    const nearClass = contract.days_to_maturity <= 31 ? "is-near" : "";
+    const bidNote = hasNumber(contract.bid) ? "" : " · NO BID";
+
+    return `
+      <tr>
+        <td data-label="Contract">
+          <span class="contract-name">
+            <strong>${contract.label}</strong>
+            <small>${contract.code}${bidNote}</small>
+          </span>
+        </td>
+        <td class="numeric" data-label="Bid"><span class="last-price">${formatPrice(contract.bid)}</span></td>
+        <td class="numeric" data-label="Days left">
+          <span class="days-badge ${nearClass}">${contract.days_to_maturity}</span>
+        </td>
+        <td class="numeric" data-label="Exp. spot at maturity">
+          ${formatPrice(contract.expected_spot_at_maturity)}
+        </td>
+        <td class="numeric ${signedClass(profit)}" data-label="Exp. profit · TRY">
+          <span class="carry-profit">${formatProfit(profit)}</span>
+        </td>
       </tr>`;
   }).join("");
 }
@@ -602,6 +705,7 @@ function selectMarket(marketKey, updateUrl = false) {
   renderSpot(market.spot);
   renderStats(market);
   renderRows(market.contracts);
+  renderCarry(market);
   renderChart();
   renderYieldChart();
 

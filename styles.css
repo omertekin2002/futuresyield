@@ -545,6 +545,49 @@ canvas {
   border-top: 1px solid var(--ink);
   font-size: 12px;
 }
+.carry-section {
+  margin: 20px 16px 0;
+  border: 1px solid var(--ink);
+}
+.carry-heading {
+  background: var(--market-tint);
+}
+.carry-heading .section-note {
+  max-width: 560px;
+}
+.carry-readouts {
+  border-top: 0;
+  border-bottom: 1px solid var(--ink);
+  background: var(--paper);
+}
+.carry-key strong {
+  font: 900 20px/1 var(--display);
+}
+.carry-formulas {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border-bottom: 1px solid var(--ink);
+  background: var(--market-tint);
+}
+.carry-formulas .formula-block {
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-start;
+  padding: 10px 12px;
+  border-bottom: 0;
+}
+.carry-formulas .formula-block + .formula-block {
+  border-left: 1px solid var(--ink);
+}
+.carry-section tbody tr:nth-child(even) {
+  background: var(--market-tint);
+}
+.carry-section tbody tr:hover {
+  background: var(--steel);
+}
+.carry-profit {
+  font: 700 14px/1.2 var(--sans);
+}
 .contracts-section {
   margin: 20px 16px;
   border: 1px solid var(--ink);
@@ -747,6 +790,9 @@ footer p {
     display: block;
     margin: 4px 0 0;
   }
+  .carry-section {
+    margin: 16px 12px 0;
+  }
   .contracts-section {
     margin: 16px 12px;
   }
@@ -889,6 +935,13 @@ footer p {
   .contracts-heading {
     align-items: flex-start;
     flex-direction: column;
+  }
+  .carry-formulas {
+    grid-template-columns: 1fr;
+  }
+  .carry-formulas .formula-block + .formula-block {
+    border-left: 0;
+    border-top: 1px solid var(--ink);
   }
   .contracts-heading .updated-block {
     align-items: flex-start;

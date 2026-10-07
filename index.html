@@ -263,6 +263,103 @@
         </div>
 
         <section
+          class="carry-section"
+          id="carry"
+          aria-labelledby="carry-title"
+          hidden
+        >
+          <div class="section-heading contracts-heading carry-heading">
+            <div>
+              <p class="eyebrow">Spot-trend projection</p>
+              <h2 id="carry-title">Short carry</h2>
+              <p class="section-note" id="carry-summary">
+                Expected profit from shorting each contract at the bid.
+              </p>
+            </div>
+            <div class="updated-block">
+              <span>Spot trend window</span>
+              <strong id="trend-window">—</strong>
+            </div>
+          </div>
+
+          <div class="stat-strip carry-readouts" aria-live="polite">
+            <div class="stat-item carry-key">
+              <span>Daily appreciation</span>
+              <strong id="trend-daily">—</strong>
+            </div>
+            <div class="stat-item">
+              <span>Annualized pace · 365D</span>
+              <strong id="trend-annualized">—</strong>
+            </div>
+            <div class="stat-item">
+              <span id="trend-start-label">Spot at start</span>
+              <strong id="trend-start-spot">—</strong>
+            </div>
+            <div class="stat-item">
+              <span id="trend-end-label">Spot now</span>
+              <strong id="trend-end-spot">—</strong>
+            </div>
+          </div>
+
+          <div class="carry-formulas">
+            <div class="formula-block">
+              <span>Daily appreciation</span>
+              <code
+                >(Spot today ÷ Spot
+                <span id="trend-lookback">180</span> days ago)<sup
+                  >1 ÷ days</sup
+                ></code
+              >
+            </div>
+            <div class="formula-block">
+              <span>Expected spot at maturity</span>
+              <code>Spot today × appreciation<sup>days left</sup></code>
+            </div>
+            <div class="formula-block">
+              <span>Expected profit per contract</span>
+              <code
+                >(Bid − expected spot) ×
+                <span id="carry-contract-size">1,000</span></code
+              >
+            </div>
+          </div>
+
+          <div
+            class="table-shell"
+            role="region"
+            aria-label="Expected profit from shorting each contract at the bid"
+            tabindex="0"
+          >
+            <table>
+              <caption class="sr-only">
+                Expected spot at maturity and expected profit per contract from
+                shorting each futures contract at the bid
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col">Contract</th>
+                  <th scope="col" class="numeric">Bid</th>
+                  <th scope="col" class="numeric">Days left</th>
+                  <th scope="col" class="numeric">
+                    Expected spot <small>at maturity</small>
+                  </th>
+                  <th scope="col" class="numeric">
+                    Expected profit <small>TRY per contract</small>
+                  </th>
+                </tr>
+              </thead>
+              <tbody id="carry-rows"></tbody>
+            </table>
+          </div>
+          <p class="table-footnote" id="carry-footnote">
+            A projection, not a forecast. It assumes spot keeps rising at its
+            average daily pace, a short filled at the current bid, and 1,000 USD
+            per contract. Fees, taxes, and margin are ignored. The window starts
+            at the last daily close on or before 180 days ago.
+          </p>
+        </section>
+
+        <section
           class="contracts-section"
           id="contracts"
           aria-labelledby="contracts-title"

@@ -25,6 +25,7 @@ from holidays.constants import HALF_DAY, PUBLIC
 
 ISTANBUL = ZoneInfo("Europe/Istanbul")
 TROY_OUNCE_GRAMS = 31.1034768
+SPOT_TREND_LOOKBACK_DAYS = 180
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,9 @@ class MarketConfig:
     curve_unit: str
     price_digits: int
     intraday_spot: bool = True
+    # Base-asset units per futures contract. Markets that set it also get the
+    # spot-trend projection and the expected profit of a short at the bid.
+    contract_size: int | None = None
 
 
 MARKET_CONFIGS = (
@@ -54,6 +58,7 @@ MARKET_CONFIGS = (
         spot_unit="TRY per USD",
         curve_unit="TRY / USD",
         price_digits=4,
+        contract_size=1_000,
     ),
     MarketConfig(
         key="EURTRY",
@@ -204,6 +209,28 @@ def compounded_yield_percent(factor: float | None, period_days: int) -> float | 
     return (factor**period_days - 1) * 100
 
 
+def projected_spot(
+    spot_price: float | None,
+    daily_factor: float | None,
+    days: int,
+) -> float | None:
+    """Project spot forward: spot * daily_factor ** days."""
+    if spot_price is None or daily_factor is None or days < 0:
+        return None
+    return spot_price * daily_factor**days
+
+
+def short_expected_profit(
+    bid: float | None,
+    expected_spot: float | None,
+    contract_size: int | None,
+) -> float | None:
+    """Return the TRY profit of one short sold at the bid and settled at expected spot."""
+    if bid is None or expected_spot is None or contract_size is None:
+        return None
+    return (bid - expected_spot) * contract_size
+
+
 def gold_try_per_gram(
     gold_usd_per_ounce: float | None,
     usd_try: float | None,
@@ -331,6 +358,55 @@ def fetch_spot(
         "change_percent": change_percent,
         "updated_at": iso_timestamp(raw.get("update_time")),
         "source": raw.get("source") or "borsapy FX current fallback",
+    }
+
+
+def fetch_spot_trend(
+    market: MarketConfig,
+    spot: dict[str, Any],
+    today: date,
+    lookback_days: int = SPOT_TREND_LOOKBACK_DAYS,
+) -> dict[str, Any]:
+    """Average the spot's gross daily appreciation over the lookback window.
+
+    The start is the last daily close on or before ``lookback_days`` calendar
+    days ago, so weekends and holidays stretch the window by the actual gap.
+    """
+    end_spot = finite_number(spot.get("last"))
+    if end_spot is None:
+        raise RuntimeError(f"No current {market.pair} spot to measure the trend")
+    updated_at = spot.get("updated_at")
+    end_date = date.fromisoformat(updated_at[:10]) if updated_at else today
+    target = end_date - timedelta(days=lookback_days)
+
+    frame = bp.FX(market.spot_asset).history(
+        start=(target - timedelta(days=14)).isoformat(),
+        end=(target + timedelta(days=1)).isoformat(),
+    )
+    closes = [
+        (stamp.date(), finite_number(row["Close"]))
+        for stamp, row in frame.iterrows()
+        if stamp.date() <= target
+    ]
+    closes = [(day, close) for day, close in closes if close is not None and close > 0]
+    if not closes:
+        raise RuntimeError(f"borsapy returned no {market.pair} close near {target}")
+
+    start_date, start_spot = closes[-1]
+    days = (end_date - start_date).days
+    factor = daily_yield_factor(end_spot, start_spot, days)
+    return {
+        "lookback_days": lookback_days,
+        "start_date": start_date.isoformat(),
+        "start_spot": start_spot,
+        "end_date": end_date.isoformat(),
+        "end_spot": end_spot,
+        "days": days,
+        "daily_factor": factor,
+        "daily_percent": compounded_yield_percent(factor, 1),
+        "monthly_percent": compounded_yield_percent(factor, 30),
+        "annualized_percent": compounded_yield_percent(factor, 365),
+        "source": "Daily close via borsapy FX history vs. current spot",
     }
 
 
@@ -467,6 +543,7 @@ def normalize_contract(
     today: date,
     generated_at: datetime,
     market: MarketConfig = DEFAULT_MARKET,
+    trend_factor: float | None = None,
 ) -> dict[str, Any]:
     symbol = metadata["symbol"]
     year, month = parse_contract_symbol(symbol, market)
@@ -495,6 +572,12 @@ def normalize_contract(
         else None
     )
     yield_factor = daily_yield_factor(last, spot_last, days_left)
+    bid = finite_number(quote.get("bid"))
+    expected_spot = (
+        projected_spot(spot_last, trend_factor, days_left)
+        if market.contract_size is not None
+        else None
+    )
 
     return {
         "symbol": symbol,
@@ -509,7 +592,7 @@ def normalize_contract(
         "open": finite_number(quote.get("open")),
         "high": finite_number(quote.get("high")),
         "low": finite_number(quote.get("low")),
-        "bid": finite_number(quote.get("bid")),
+        "bid": bid,
         "ask": finite_number(quote.get("ask")),
         "volume": finite_number(quote.get("volume")),
         "turnover_try": finite_number(table_row.get("turnover_try")),
@@ -519,6 +602,10 @@ def normalize_contract(
         "daily_yield_percent": compounded_yield_percent(yield_factor, 1),
         "monthly_yield_percent": compounded_yield_percent(yield_factor, 30),
         "annualized_yield_percent": compounded_yield_percent(yield_factor, 365),
+        "expected_spot_at_maturity": expected_spot,
+        "expected_short_profit_try": short_expected_profit(
+            bid, expected_spot, market.contract_size
+        ),
         "updated_at": iso_timestamp(quote.get("timestamp"))
         or generated_at.isoformat(timespec="seconds"),
         "status": "available" if last is not None else "unavailable",
@@ -564,6 +651,13 @@ def build_snapshot(now: datetime | None = None) -> dict[str, Any]:
     market_snapshots: dict[str, dict[str, Any]] = {}
     for market in MARKET_CONFIGS:
         spot = spots[market.key]
+        spot_trend = None
+        if market.contract_size is not None:
+            # The projection is supplementary; never fail the snapshot over it.
+            try:
+                spot_trend = fetch_spot_trend(market, spot, today)
+            except Exception as exc:
+                print(f"Warning: {market.pair} spot trend unavailable: {exc}")
         contracts = [
             normalize_contract(
                 item,
@@ -573,6 +667,7 @@ def build_snapshot(now: datetime | None = None) -> dict[str, Any]:
                 today,
                 generated_at,
                 market,
+                spot_trend["daily_factor"] if spot_trend else None,
             )
             for item in metadata_by_market[market.key]
         ]
@@ -590,12 +685,14 @@ def build_snapshot(now: datetime | None = None) -> dict[str, Any]:
             "spot_unit": market.spot_unit,
             "curve_unit": market.curve_unit,
             "price_digits": market.price_digits,
+            "contract_size": market.contract_size,
             "spot": spot,
+            "spot_trend": spot_trend,
             "contracts": contracts,
         }
 
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "generated_at": generated_at.isoformat(timespec="seconds"),
         "market_date": today.isoformat(),
         "timezone": "Europe/Istanbul",

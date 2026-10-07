@@ -14,6 +14,8 @@ redeployed every 15 minutes by GitHub Actions.
 - Official contract maturity date and calendar days remaining
 - Responsive price and implied-yield curves plus the full contract board
 - Daily, 30-day monthly, and 365-day annualized yields in the chart and contract table
+- For USD/TRY, the spot's average daily appreciation over the last 180 days and
+  the expected profit from shorting each contract at the bid
 - Snapshot age, delayed-data state, and one-click refresh
 
 Maturity is calculated as the final **full** Turkish business day of each
@@ -41,6 +43,23 @@ The yield curve starts with the gross daily factor
 `(contract price / spot rate)^(1 / days left)`. The chart converts the selected
 1-, 30-, or 365-day compounded factor to net percentage yield by subtracting
 one and multiplying by 100.
+
+### USD/TRY short carry
+
+The short-carry section projects spot forward at its recent pace and compares
+that with the price a short could sell at today:
+
+- **Daily appreciation** = `(spot today / spot 180 days ago)^(1 / days)`. The
+  start is the last daily close on or before 180 calendar days ago, so the
+  window is exactly 180 days unless that date was a weekend or holiday, in which
+  case the exponent uses the actual gap.
+- **Expected spot at maturity** = `spot today × daily appreciation^(days left)`
+- **Expected profit** = `(bid − expected spot at maturity) × 1,000` TRY per
+  contract, since one VİOP USD/TRY contract is 1,000 USD.
+
+Contracts without a bid show no profit. The projection ignores fees, taxes, and
+margin and is not a forecast. If the 180-day history cannot be fetched, the
+rest of the snapshot still publishes without the projection.
 
 ## Publish on GitHub Pages
 
@@ -77,6 +96,8 @@ Then open <http://localhost:8000>.
 - USD/TRY and EUR/TRY spot use borsapy's 15-minute FX history with `.current`
   as a fallback. XAU/TRY combines 15-minute XAU/USD and USD/TRY data into a
   TRY-per-gram reference, with `FX("gram-altin").current` as a fallback.
+- The 180-day USD/TRY reference uses borsapy's daily FX history
+  (`FX("USD").history(...)`, sourced from canlidoviz).
 - The dashboard polls its deployed JSON every minute, while the published
   snapshot is rebuilt on the 15-minute GitHub Actions schedule.
 - VİOP and TradingView market data may be delayed by approximately 15 minutes.
