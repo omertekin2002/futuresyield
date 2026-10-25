@@ -87,6 +87,17 @@ python -m http.server 8000
 
 Then open <http://localhost:8000>.
 
+To assemble the deployable site into `_site/` exactly as the Pages workflow
+does, run `bash scripts/build_site.sh`.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every pull request, on pushes to branches
+other than `main`, and on demand. It never deploys. It runs the updater tests
+offline on Python 3.10 and 3.12, checks `app.js` syntax with `node --check`,
+checks that `data/market.json` parses, and assembles the site with
+`scripts/build_site.sh`, which fails if any file the site needs is missing.
+
 ## Data notes
 
 - Futures discovery uses `borsapy.viop_contracts(..., full_info=True)` for
