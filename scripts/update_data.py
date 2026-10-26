@@ -16,14 +16,15 @@ from functools import lru_cache
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import borsapy as bp
-import holidays
-from holidays.constants import HALF_DAY, PUBLIC
+
+if __package__:
+    from .market_calendar import ISTANBUL, market_closures
+else:  # run as `python scripts/update_data.py`
+    from market_calendar import ISTANBUL, market_closures
 
 
-ISTANBUL = ZoneInfo("Europe/Istanbul")
 TROY_OUNCE_GRAMS = 31.1034768
 SPOT_TREND_LOOKBACK_DAYS = 180
 
@@ -143,18 +144,6 @@ def iso_timestamp(value: Any) -> str | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=ISTANBUL)
     return parsed.astimezone(ISTANBUL).isoformat(timespec="seconds")
-
-
-@lru_cache(maxsize=None)
-def market_closures(year: int) -> frozenset[date]:
-    """Return Türkiye public and half-day holidays that close VİOP for expiry."""
-    public_days = holidays.country_holidays(
-        "TR", years=year, observed=False, categories=PUBLIC
-    )
-    half_days = holidays.country_holidays(
-        "TR", years=year, observed=False, categories=HALF_DAY
-    )
-    return frozenset((*public_days.keys(), *half_days.keys()))
 
 
 def maturity_date(year: int, month: int) -> date:
