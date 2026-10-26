@@ -11,12 +11,14 @@ permissions:
   contents: read
 
 # Concurrency is set per job, not per workflow: a workflow-level group would
-# cancel the whole run, including an archive push already in progress.
+# cancel the whole run, including an archive push already in progress. Build
+# and deploy use separate groups so an older run's deploy cannot cancel a newer
+# run's build; a newer build or deploy still cancels an older one.
 jobs:
   build:
     runs-on: ubuntu-latest
     concurrency:
-      group: github-pages
+      group: github-pages-build
       cancel-in-progress: true
     steps:
       - name: Check out repository
@@ -63,7 +65,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     concurrency:
-      group: github-pages
+      group: github-pages-deploy
       cancel-in-progress: true
     permissions:
       pages: write
