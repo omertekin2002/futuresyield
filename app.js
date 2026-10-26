@@ -1,4 +1,6 @@
 const DATA_URL = "data/market.json";
+const HISTORY_URL = "data/history";
+const HISTORY_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const ISTANBUL_TIMEZONE = "Europe/Istanbul";
 
 const elements = {
@@ -9,6 +11,13 @@ const elements = {
   heroMarketLabel: document.querySelector("#hero-market-label"),
   dataState: document.querySelector("#data-state"),
   refreshButton: document.querySelector("#refresh-button"),
+  historyControl: document.querySelector("#history-control"),
+  historySelect: document.querySelector("#history-select"),
+  historyBanner: document.querySelector("#history-banner"),
+  historyBannerDate: document.querySelector("#history-banner-date"),
+  historyNotice: document.querySelector("#history-notice"),
+  liveButton: document.querySelector("#live-button"),
+  spotTag: document.querySelector("#spot-tag"),
   spotValue: document.querySelector("#spot-value"),
   spotChange: document.querySelector("#spot-change"),
   spotLow: document.querySelector("#spot-low"),
@@ -58,6 +67,13 @@ const state = {
   yieldPeriod: "daily",
   refreshTimer: null,
   resizeTimer: null,
+  // Archived end-of-day dates, newest first.
+  historyDays: [],
+  // The requested view and the one on screen: an archived date, or null for live.
+  viewDate: null,
+  renderedDate: null,
+  // Only the latest load may render, so a slow live poll can't replace a past close.
+  requestId: 0,
 };
 
 const YIELD_PERIODS = {
@@ -188,15 +204,26 @@ function parseMarketDate(value) {
   return new Date(`${value}T12:00:00+03:00`);
 }
 
+function formatDay(value) {
+  return dateFormat.format(parseMarketDate(value));
+}
+
+function setStatus(className, text) {
+  elements.dataState.classList.remove("is-fresh", "is-delayed", "is-error", "is-historical");
+  elements.dataState.classList.add(className);
+  elements.dataState.lastChild.textContent = ` ${text}`;
+}
+
 function updateStatus(generatedAt) {
+  if (state.renderedDate) {
+    setStatus("is-historical", `Historical · close of ${formatDay(state.renderedDate)}`);
+    return;
+  }
   const minutesOld = Math.max(0, (Date.now() - new Date(generatedAt).getTime()) / 60000);
-  elements.dataState.classList.remove("is-fresh", "is-delayed", "is-error");
   if (minutesOld <= 45) {
-    elements.dataState.classList.add("is-fresh");
-    elements.dataState.lastChild.textContent = " Latest snapshot";
+    setStatus("is-fresh", "Latest snapshot");
   } else {
-    elements.dataState.classList.add("is-delayed");
-    elements.dataState.lastChild.textContent = ` Update delayed · ${Math.floor(minutesOld)}m old`;
+    setStatus("is-delayed", `Update delayed · ${Math.floor(minutesOld)}m old`);
   }
 }
 
@@ -214,9 +241,10 @@ function renderMarketRail(snapshot) {
 
 function renderMarketIdentity(market) {
   const spacedPair = market.pair.replace("/", " · ");
+  const closeOf = state.renderedDate ? ` · close of ${formatDay(state.renderedDate)}` : "";
 
   document.body.dataset.market = market.key;
-  document.title = `Vade — ${market.pair} Futures Curve`;
+  document.title = `Vade — ${market.pair} Futures Curve${closeOf}`;
   elements.metaDescription.content =
     `The latest ${market.pair} spot reference and VİOP futures curve, ` +
     "refreshed every 15 minutes.";
@@ -225,8 +253,8 @@ function renderMarketIdentity(market) {
   elements.spotUnit.textContent = market.spot_unit;
   elements.curveUnit.textContent = market.curve_unit;
   elements.contractsCaption.textContent =
-    `Latest VİOP ${market.pair} futures prices, maturity dates, days remaining, ` +
-    "and compounded implied yields";
+    `${state.renderedDate ? "Closing" : "Latest"} VİOP ${market.pair} futures prices${closeOf}, ` +
+    "maturity dates, days remaining, and compounded implied yields";
   elements.footerMarketCopy.textContent =
     `Built as a clear window into the ${market.pair} term structure.`;
 
@@ -738,36 +766,130 @@ function renderSnapshot(snapshot) {
   updateStatus(snapshot.generated_at);
 }
 
-async function loadData() {
+async function fetchSnapshot(url, options) {
+  const response = await fetch(url, options);
+  if (!response.ok) throw new Error(`Market snapshot returned ${response.status}`);
+  const data = await response.json();
+  const marketsAreValid =
+    data.markets &&
+    Array.isArray(data.market_order) &&
+    data.market_order.every((key) =>
+      data.markets[key]?.spot && Array.isArray(data.markets[key]?.contracts)
+    );
+  if (!marketsAreValid) throw new Error("Invalid multi-market snapshot");
+  return data;
+}
+
+function showNotice(text) {
+  elements.historyNotice.textContent = text;
+  elements.historyNotice.hidden = false;
+}
+
+function hideNotice() {
+  elements.historyNotice.hidden = true;
+  elements.historyNotice.textContent = "";
+}
+
+function renderHistoryControl() {
+  elements.historyControl.hidden = !state.historyDays.length;
+  elements.historySelect.replaceChildren(
+    new Option("Live", ""),
+    ...state.historyDays.map((day) => new Option(`Close · ${formatDay(day)}`, day)),
+  );
+  elements.historySelect.value = state.viewDate ?? "";
+}
+
+function renderViewState() {
+  const historical = Boolean(state.renderedDate);
+  elements.historySelect.value = state.viewDate ?? "";
+  elements.historyBanner.hidden = !historical;
+  elements.historyBannerDate.textContent = historical ? formatDay(state.renderedDate) : "—";
+  elements.spotTag.textContent = historical ? "Past close" : "≈ 15 min delay";
+  document.body.dataset.view = historical ? "historical" : "live";
+
+  const url = new URL(window.location.href);
+  if (historical) url.searchParams.set("date", state.renderedDate);
+  else url.searchParams.delete("date");
+  if (url.href !== window.location.href) window.history.replaceState({}, "", url);
+}
+
+async function loadHistoryIndex() {
+  try {
+    const response = await fetch(`${HISTORY_URL}/index.json?v=${Date.now()}`, {
+      cache: "no-store",
+    });
+    if (!response.ok) throw new Error(`History index returned ${response.status}`);
+    const manifest = await response.json();
+    const days = (Array.isArray(manifest?.days) ? manifest.days : [])
+      .map((entry) => entry?.date)
+      .filter((day) => typeof day === "string" && HISTORY_DATE.test(day));
+    state.historyDays = [...new Set(days)].sort().reverse();
+  } catch (error) {
+    // History is optional; the live dashboard works without it.
+    console.warn("Archived snapshots are unavailable.", error);
+    state.historyDays = [];
+  }
+  renderHistoryControl();
+}
+
+// Load and render one view: an archived date, or null for the live snapshot.
+// A view that fails to load leaves the current one on screen.
+async function loadView(date) {
+  state.viewDate = date;
+  const request = ++state.requestId;
   elements.refreshButton.classList.add("is-loading");
   elements.refreshButton.disabled = true;
   try {
-    const response = await fetch(`${DATA_URL}?v=${Date.now()}`, { cache: "no-store" });
-    if (!response.ok) throw new Error(`Market snapshot returned ${response.status}`);
-    const data = await response.json();
-    const marketsAreValid =
-      data.markets &&
-      Array.isArray(data.market_order) &&
-      data.market_order.every((key) =>
-        data.markets[key]?.spot && Array.isArray(data.markets[key]?.contracts)
-      );
-    if (!marketsAreValid) throw new Error("Invalid multi-market snapshot");
+    const data = date
+      ? await fetchSnapshot(`${HISTORY_URL}/${date}.json`)
+      : await fetchSnapshot(`${DATA_URL}?v=${Date.now()}`, { cache: "no-store" });
+    if (request !== state.requestId) return;
+    state.renderedDate = date;
     renderSnapshot(data);
   } catch (error) {
+    if (request !== state.requestId) return;
     console.error(error);
-    elements.dataState.classList.remove("is-fresh", "is-delayed");
-    elements.dataState.classList.add("is-error");
-    elements.dataState.lastChild.textContent = " Data unavailable";
-    if (!state.snapshot) {
-      elements.rows.innerHTML = '<tr class="empty-row"><td colspan="11">The market snapshot could not be loaded. Try refreshing shortly.</td></tr>';
+    state.viewDate = state.renderedDate;
+    if (date) {
+      showNotice(`The close of ${formatDay(date)} could not be loaded.`);
+      if (!state.snapshot) {
+        loadView(null);
+        return;
+      }
+    } else if (state.renderedDate) {
+      showNotice(
+        "Live data is unavailable. Still showing the close of " +
+        `${formatDay(state.renderedDate)}.`,
+      );
+    } else {
+      setStatus("is-error", "Data unavailable");
+      if (!state.snapshot) {
+        elements.rows.innerHTML = '<tr class="empty-row"><td colspan="11">The market snapshot could not be loaded. Try refreshing shortly.</td></tr>';
+      }
     }
   } finally {
-    elements.refreshButton.classList.remove("is-loading");
-    elements.refreshButton.disabled = false;
+    if (request === state.requestId) {
+      elements.refreshButton.classList.remove("is-loading");
+      elements.refreshButton.disabled = false;
+      renderViewState();
+    }
   }
 }
 
-elements.refreshButton.addEventListener("click", loadData);
+function goLive() {
+  hideNotice();
+  loadView(null);
+}
+
+// Refresh always shows live data, so it also leaves a past close.
+elements.refreshButton.addEventListener("click", goLive);
+elements.liveButton.addEventListener("click", goLive);
+
+elements.historySelect.addEventListener("change", () => {
+  const date = elements.historySelect.value;
+  hideNotice();
+  loadView(state.historyDays.includes(date) ? date : null);
+});
 
 elements.marketButtons.forEach((button) => {
   button.addEventListener("click", () => {
@@ -855,5 +977,25 @@ elements.yieldCanvas.addEventListener("pointerleave", () => {
   elements.yieldTooltip.hidden = true;
 });
 
-loadData();
-state.refreshTimer = window.setInterval(loadData, 60_000);
+async function init() {
+  await loadHistoryIndex();
+  const requested = new URLSearchParams(window.location.search).get("date");
+  if (requested && state.historyDays.includes(requested)) {
+    loadView(requested);
+  } else {
+    if (requested) {
+      showNotice(
+        HISTORY_DATE.test(requested)
+          ? `No archived close for ${requested}. Showing live data.`
+          : "That date is not in the archive. Showing live data.",
+      );
+    }
+    loadView(null);
+  }
+  // The poll only refreshes the live view; a past close stays until the user leaves it.
+  state.refreshTimer = window.setInterval(() => {
+    if (!state.viewDate) loadView(null);
+  }, 60_000);
+}
+
+init();
