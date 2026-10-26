@@ -47,7 +47,20 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      # Optional: without a data-history branch the site ships with no
+      # history. Snapshots this run archives appear in the next deploy.
+      - name: Fetch archived end-of-day snapshots
+        run: |
+          if git ls-remote --exit-code --heads origin data-history > /dev/null; then
+            git fetch --no-tags --depth=1 origin data-history
+            git worktree add --detach "$RUNNER_TEMP/data-history" FETCH_HEAD
+          else
+            echo "No data-history branch; building without history"
+          fi
+
       - name: Prepare static site
+        env:
+          HISTORY_DIR: ${{ runner.temp }}/data-history/history
         run: bash scripts/build_site.sh
 
       - name: Configure GitHub Pages

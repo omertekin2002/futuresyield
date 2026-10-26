@@ -17,6 +17,7 @@ redeployed every 15 minutes by GitHub Actions.
 - For USD/TRY, the spot's average daily appreciation over the last 180 days and
   the expected profit from shorting each contract at the bid
 - Snapshot age, delayed-data state, and one-click refresh
+- Any archived end-of-day close, browsable from the **View** menu
 
 Maturity is calculated as the final **full** Turkish business day of each
 contract month. Weekends, public holidays, and half-day official holidays are
@@ -88,6 +89,31 @@ end-of-day snapshot per VİOP trading day on a separate `data-history` branch.
   is never overwritten, and a run that adds nothing makes no commit.
 - **Size.** About 27 KB per trading day, roughly 7 MB a year.
 
+### Browsing past closes
+
+When the site has archived days, a **View** menu appears next to the data
+status. It lists **Live** and every archived close, newest first. Choosing a
+close renders the whole dashboard (spot, curves, yields, carry and the contract
+board) from that day's snapshot, for every market.
+
+- **Unmistakable.** A "Past close" banner and a "Historical · close of …"
+  status replace the live freshness state. The one-minute poll never replaces a
+  past close; **Back to live**, **Refresh**, or choosing **Live** returns to live
+  data.
+- **Shareable.** `?date=YYYY-MM-DD` opens a close directly and combines with
+  `?market=`, for example `?date=2026-10-27&market=EURTRY`. Switching markets
+  keeps the date. A date that isn't archived falls back to live with a short
+  notice.
+- **Published with the site.** The Pages `build` job checks out `data-history`,
+  if it exists, and `scripts/build_site.sh` copies its `history/` into
+  `_site/data/history/`, so the files are served from the same origin. A close
+  archived by a run appears in the next run's deploy. Without the branch the
+  site ships an empty manifest and the menu stays hidden.
+
+To try it locally, put a copy of the branch's `history/` directory at the repo
+root (it's ignored by git) or point `HISTORY_DIR` at one, then run
+`bash scripts/build_site.sh` and serve `_site/`.
+
 The `archive` job runs after `build`, alongside `deploy`, so a failed archive
 never blocks or undoes the Pages deploy. It is the only job with
 `contents: write` and pushes only to `data-history`, never with force. The
@@ -134,9 +160,10 @@ python -m playwright install chromium
 python -m unittest tests/e2e/test_dashboard_smoke.py -v
 ```
 
-It builds `_site/`, swaps in the fixed snapshot `tests/fixtures/market.json`,
-serves it on a local port, and checks every market in headless Chromium for
-console errors and the main rendered values. It never touches the network. The
+It builds the site twice, with a small test-only history derived from
+`tests/fixtures/market.json` and without any, swaps in that fixed snapshot,
+serves both on a local port, and checks every market and the history view in
+headless Chromium for console errors and the main rendered values. It never touches the network. The
 `discover` command above skips it, so the updater tests still run without a
 browser.
 
