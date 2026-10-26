@@ -61,6 +61,41 @@ Contracts without a bid show no profit. The projection ignores fees, taxes, and
 margin and is not a forecast. If the 180-day history cannot be fetched, the
 rest of the snapshot still publishes without the projection.
 
+## History
+
+Each refresh overwrites `data/market.json`, so the Pages workflow also keeps one
+end-of-day snapshot per VİOP trading day on a separate `data-history` branch.
+`main` never receives these commits.
+
+- **Layout.** `history/<YYYY-MM-DD>.json` holds the snapshot exactly as
+  `scripts/update_data.py` wrote it, named after the trading day it closes.
+  `history/index.json` lists the archived days, sorted by date, as
+  `{ "date", "generated_at", "markets" }` entries under a `schema_version`, so
+  the dashboard never needs a directory listing.
+- **End-of-day rule.** VİOP's
+  [trading hours](https://www.borsaistanbul.com/en/markets/viop/market-functioning/trading-hours)
+  run from the 09:20 opening session through the 19:00–23:00 evening session
+  for FX and precious-metal futures. A snapshot taken at or after 23:15 on
+  trading day D counts as D; the 15 minutes allow for delayed quotes. So does
+  any snapshot taken before the next session opens at 09:20, including over
+  weekends and public holidays. Snapshots taken in between, including the gap
+  between the normal and evening sessions, are not end-of-day and are skipped.
+- **Half days.** A half-day holiday is still a trading day, but its only session
+  ends at 12:40 and it has no evening session, so snapshots from 12:55 onward
+  count as that day. On the year's last trading day the evening session is not
+  held either; the archive still waits until 23:15, which only delays it.
+- **Write-once.** The first end-of-day snapshot for a day wins. An existing day
+  is never overwritten, and a run that adds nothing makes no commit.
+- **Size.** About 27 KB per trading day, roughly 7 MB a year.
+
+The `archive` job runs after `build`, alongside `deploy`, so a failed archive
+never blocks or undoes the Pages deploy. It is the only job with
+`contents: write` and pushes only to `data-history`, never with force. The
+logic lives in `scripts/archive_snapshot.py`, and
+`scripts/archive_history.sh SNAPSHOT [WORKTREE]` runs it against a checkout of
+the branch, creating the branch as an orphan holding only `history/` on the
+first run.
+
 ## Publish on GitHub Pages
 
 1. Push this repository to GitHub with `main` as the default branch.
