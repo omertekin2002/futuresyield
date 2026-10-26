@@ -158,6 +158,16 @@
               </div>
             </section>
 
+            <div class="compare-control" id="compare-control" hidden>
+              <label for="compare-select">Compare with</label>
+              <select id="compare-select" aria-describedby="compare-hint">
+                <option value="">None</option>
+              </select>
+              <small id="compare-hint">
+                Overlays an earlier close on both curves.
+              </small>
+            </div>
+
             <section class="curve-section" aria-labelledby="curve-title">
               <div class="section-heading">
                 <div>
@@ -169,6 +179,12 @@
                 </p>
               </div>
 
+              <ul
+                class="chart-legend"
+                id="curve-legend"
+                aria-label="Price curve legend"
+                hidden
+              ></ul>
               <div class="curve-frame">
                 <div class="curve-y-label" id="curve-unit">TRY / USD</div>
                 <canvas
@@ -245,6 +261,12 @@
                 </div>
               </div>
 
+              <ul
+                class="chart-legend"
+                id="yield-legend"
+                aria-label="Yield curve legend"
+                hidden
+              ></ul>
               <div class="yield-frame">
                 <div class="yield-y-label">NET YIELD (%)</div>
                 <canvas
