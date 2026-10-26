@@ -1,4 +1,6 @@
 const DATA_URL = "data/market.json";
+const HISTORY_URL = "data/history";
+const HISTORY_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const ISTANBUL_TIMEZONE = "Europe/Istanbul";
 
 const elements = {
@@ -9,6 +11,17 @@ const elements = {
   heroMarketLabel: document.querySelector("#hero-market-label"),
   dataState: document.querySelector("#data-state"),
   refreshButton: document.querySelector("#refresh-button"),
+  historyControl: document.querySelector("#history-control"),
+  historySelect: document.querySelector("#history-select"),
+  historyBanner: document.querySelector("#history-banner"),
+  historyBannerDate: document.querySelector("#history-banner-date"),
+  historyNotice: document.querySelector("#history-notice"),
+  liveButton: document.querySelector("#live-button"),
+  compareControl: document.querySelector("#compare-control"),
+  compareSelect: document.querySelector("#compare-select"),
+  curveLegend: document.querySelector("#curve-legend"),
+  yieldLegend: document.querySelector("#yield-legend"),
+  spotTag: document.querySelector("#spot-tag"),
   spotValue: document.querySelector("#spot-value"),
   spotChange: document.querySelector("#spot-change"),
   spotLow: document.querySelector("#spot-low"),
@@ -58,7 +71,29 @@ const state = {
   yieldPeriod: "daily",
   refreshTimer: null,
   resizeTimer: null,
+  // Archived end-of-day dates, newest first.
+  historyDays: [],
+  // The requested view and the one on screen: an archived date, or null for live.
+  viewDate: null,
+  renderedDate: null,
+  // Only the latest load may render, so a slow live poll can't replace a past close.
+  requestId: 0,
+  // The archived close overlaid on both curves, or null, and its loaded snapshot.
+  compareDate: null,
+  compareSnapshot: null,
+  compareRequestId: 0,
+  // The view date the compare options were last built for.
+  compareReference: null,
 };
+
+// Quick comparison picks: the archived close nearest each target, if one is
+// within the tolerance, in calendar days.
+const COMPARE_PICKS = [
+  { label: "1 week ago", days: 7, tolerance: 3 },
+  { label: "1 month ago", months: 1, tolerance: 7 },
+  { label: "3 months ago", months: 3, tolerance: 14 },
+];
+const COMPARE_COLOR = "#5a1a8c";
 
 const YIELD_PERIODS = {
   daily: {
@@ -146,7 +181,7 @@ function formatPercent(value) {
   return hasNumber(value) ? `${percentFormat.format(value)}%` : "—";
 }
 
-function yieldValue(contract, period = state.yieldPeriod) {
+function yieldValue(contract, period = state.yieldPeriod, spot = state.data?.spot?.last) {
   const settings = YIELD_PERIODS[period];
   if (hasNumber(contract[settings.field])) return contract[settings.field];
 
@@ -154,15 +189,12 @@ function yieldValue(contract, period = state.yieldPeriod) {
   if (
     !hasNumber(factor) &&
     hasNumber(contract.last) &&
-    hasNumber(state.data?.spot?.last) &&
+    hasNumber(spot) &&
     contract.last > 0 &&
-    state.data.spot.last > 0 &&
+    spot > 0 &&
     contract.days_to_maturity > 0
   ) {
-    factor = Math.pow(
-      contract.last / state.data.spot.last,
-      1 / contract.days_to_maturity,
-    );
+    factor = Math.pow(contract.last / spot, 1 / contract.days_to_maturity);
   }
 
   return hasNumber(factor)
@@ -180,6 +212,17 @@ function formatYield(value, period = state.yieldPeriod) {
   }).format(value)}%`;
 }
 
+// A change in yield, in percentage points.
+function formatYieldDelta(value, period = state.yieldPeriod) {
+  if (!hasNumber(value)) return "—";
+  const digits = YIELD_PERIODS[period].digits;
+  return `${new Intl.NumberFormat("en-US", {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+    signDisplay: "always",
+  }).format(value)} pp`;
+}
+
 function formatProfit(value) {
   return hasNumber(value) ? profitFormat.format(value) : "—";
 }
@@ -188,15 +231,38 @@ function parseMarketDate(value) {
   return new Date(`${value}T12:00:00+03:00`);
 }
 
+function formatDay(value) {
+  return dateFormat.format(parseMarketDate(value));
+}
+
+function dayOffset(value, { days = 0, months = 0 }) {
+  const [year, month, day] = value.split("-").map(Number);
+  // Clamp to the target month's last day, so 31 Mar minus a month is 28/29 Feb.
+  const lastDay = new Date(Date.UTC(year, month - 1 - months + 1, 0)).getUTCDate();
+  const date = new Date(Date.UTC(year, month - 1 - months, Math.min(day, lastDay) - days));
+  return date.toISOString().slice(0, 10);
+}
+
+function daysBetween(first, second) {
+  return Math.abs(Date.parse(`${first}T00:00:00Z`) - Date.parse(`${second}T00:00:00Z`)) / 86_400_000;
+}
+
+function setStatus(className, text) {
+  elements.dataState.classList.remove("is-fresh", "is-delayed", "is-error", "is-historical");
+  elements.dataState.classList.add(className);
+  elements.dataState.lastChild.textContent = ` ${text}`;
+}
+
 function updateStatus(generatedAt) {
+  if (state.renderedDate) {
+    setStatus("is-historical", `Historical · close of ${formatDay(state.renderedDate)}`);
+    return;
+  }
   const minutesOld = Math.max(0, (Date.now() - new Date(generatedAt).getTime()) / 60000);
-  elements.dataState.classList.remove("is-fresh", "is-delayed", "is-error");
   if (minutesOld <= 45) {
-    elements.dataState.classList.add("is-fresh");
-    elements.dataState.lastChild.textContent = " Latest snapshot";
+    setStatus("is-fresh", "Latest snapshot");
   } else {
-    elements.dataState.classList.add("is-delayed");
-    elements.dataState.lastChild.textContent = ` Update delayed · ${Math.floor(minutesOld)}m old`;
+    setStatus("is-delayed", `Update delayed · ${Math.floor(minutesOld)}m old`);
   }
 }
 
@@ -214,9 +280,10 @@ function renderMarketRail(snapshot) {
 
 function renderMarketIdentity(market) {
   const spacedPair = market.pair.replace("/", " · ");
+  const closeOf = state.renderedDate ? ` · close of ${formatDay(state.renderedDate)}` : "";
 
   document.body.dataset.market = market.key;
-  document.title = `Vade — ${market.pair} Futures Curve`;
+  document.title = `Vade — ${market.pair} Futures Curve${closeOf}`;
   elements.metaDescription.content =
     `The latest ${market.pair} spot reference and VİOP futures curve, ` +
     "refreshed every 15 minutes.";
@@ -225,8 +292,8 @@ function renderMarketIdentity(market) {
   elements.spotUnit.textContent = market.spot_unit;
   elements.curveUnit.textContent = market.curve_unit;
   elements.contractsCaption.textContent =
-    `Latest VİOP ${market.pair} futures prices, maturity dates, days remaining, ` +
-    "and compounded implied yields";
+    `${state.renderedDate ? "Closing" : "Latest"} VİOP ${market.pair} futures prices${closeOf}, ` +
+    "maturity dates, days remaining, and compounded implied yields";
   elements.footerMarketCopy.textContent =
     `Built as a clear window into the ${market.pair} term structure.`;
 
@@ -398,12 +465,96 @@ function renderCarry(data) {
   }).join("");
 }
 
+// The comparison close's data for the selected market, once it has loaded.
+function comparisonMarket() {
+  return state.compareSnapshot?.markets?.[state.marketKey] ?? null;
+}
+
+// Contracts are matched by maturity month, so each keeps one slot on the x
+// axis whichever of the two days it is listed on.
+function maturityKey(contract) {
+  return contract.maturity_date?.slice(0, 7) ?? contract.code;
+}
+
+// Merge the current and comparison series into one slot per maturity month.
+// A contract listed on only one of the two days fills only that side.
+function alignSeries(current, compare) {
+  const slots = new Map();
+  [["current", current], ["compare", compare]].forEach(([side, points]) => {
+    points.forEach((point) => {
+      const key = maturityKey(point.contract);
+      if (!slots.has(key)) slots.set(key, { key, current: null, compare: null });
+      slots.get(key)[side] = point;
+    });
+  });
+  const aligned = [...slots.values()].map((slot) => ({
+    ...slot,
+    label: (slot.current ?? slot.compare).contract.label,
+  }));
+  // Without a comparison the snapshot's own order stands.
+  return compare.length
+    ? aligned.sort((first, second) => first.key.localeCompare(second.key))
+    : aligned;
+}
+
+function tracePath(context, points) {
+  context.beginPath();
+  points.forEach(({ x, y }, index) => {
+    if (index === 0) context.moveTo(x, y);
+    else context.lineTo(x, y);
+  });
+}
+
+// The comparison is a dashed line with hollow square markers, so it differs
+// from the current curve's solid line and round markers in more than colour.
+function drawComparison(context, points) {
+  if (!points.length) return;
+  context.save();
+  context.strokeStyle = COMPARE_COLOR;
+  context.lineWidth = 2;
+  context.setLineDash([7, 4]);
+  tracePath(context, points);
+  context.stroke();
+  context.setLineDash([]);
+  points.forEach(({ x, y }) => {
+    context.fillStyle = "#ffffff";
+    context.fillRect(x - 4, y - 4, 8, 8);
+    context.strokeRect(x - 4, y - 4, 8, 8);
+  });
+  context.restore();
+}
+
+function drawAxisLabels(context, slots, xAt, width, height) {
+  const labelEvery = width < 620 ? Math.ceil(slots.length / 4) : Math.ceil(slots.length / 8);
+  const lastX = xAt(slots.length - 1);
+  context.font = '11px Helvetica, Arial, sans-serif';
+  slots.forEach((slot, index) => {
+    const x = xAt(index);
+    if (index === slots.length - 1 || (index % labelEvery === 0 && lastX - x > 58)) {
+      context.fillStyle = "#000000";
+      context.textAlign = index === slots.length - 1 ? "right" : index === 0 ? "left" : "center";
+      context.fillText(slot.label.replace(" 20", " ’"), x, height - 20);
+    }
+  });
+}
+
+function comparisonNote() {
+  return comparisonMarket()
+    ? ` Dashed line with square markers: close of ${formatDay(state.compareDate)}.`
+    : "";
+}
+
 function renderChart() {
   if (!state.data) return;
-  const contracts = state.data.contracts.filter((contract) => hasNumber(contract.last));
+  const pricePoints = (contracts) => contracts
+    .filter((contract) => hasNumber(contract.last))
+    .map((contract) => ({ contract, value: contract.last }));
+  const current = pricePoints(state.data.contracts);
+  const compareMarket = comparisonMarket();
+  const slots = alignSeries(current, compareMarket ? pricePoints(compareMarket.contracts) : []);
   const canvas = elements.canvas;
   const bounds = canvas.getBoundingClientRect();
-  if (!bounds.width || !bounds.height || contracts.length < 1) return;
+  if (!bounds.width || !bounds.height || current.length < 1) return;
 
   const ratio = Math.min(window.devicePixelRatio || 1, 2);
   canvas.width = Math.round(bounds.width * ratio);
@@ -416,15 +567,19 @@ function renderChart() {
   const margin = { top: 22, right: 20, bottom: 48, left: 48 };
   const chartWidth = width - margin.left - margin.right;
   const chartHeight = height - margin.top - margin.bottom;
-  const values = contracts.map((contract) => contract.last);
+  const values = slots.flatMap((slot) => [slot.current?.value, slot.compare?.value]).filter(hasNumber);
   const rawMin = Math.min(...values, state.data.spot.last);
   const rawMax = Math.max(...values, state.data.spot.last);
   const padding = Math.max((rawMax - rawMin) * 0.12, 0.1);
   const min = rawMin - padding;
   const max = rawMax + padding;
 
-  const xAt = (index) => margin.left + (contracts.length === 1 ? chartWidth / 2 : index * chartWidth / (contracts.length - 1));
+  const xAt = (index) => margin.left + (slots.length === 1 ? chartWidth / 2 : index * chartWidth / (slots.length - 1));
   const yAt = (value) => margin.top + (max - value) / (max - min) * chartHeight;
+  const seriesPoints = (side) => slots.flatMap((slot, index) =>
+    slot[side] ? [{ x: xAt(index), y: yAt(slot[side].value) }] : []
+  );
+  const currentPoints = seriesPoints("current");
 
   context.font = '11px Helvetica, Arial, sans-serif';
   context.textBaseline = "middle";
@@ -446,15 +601,9 @@ function renderChart() {
     );
   }
 
-  context.beginPath();
-  contracts.forEach((contract, index) => {
-    const x = xAt(index);
-    const y = yAt(contract.last);
-    if (index === 0) context.moveTo(x, y);
-    else context.lineTo(x, y);
-  });
-  context.lineTo(xAt(contracts.length - 1), height - margin.bottom);
-  context.lineTo(xAt(0), height - margin.bottom);
+  tracePath(context, currentPoints);
+  context.lineTo(currentPoints.at(-1).x, height - margin.bottom);
+  context.lineTo(currentPoints[0].x, height - margin.bottom);
   context.closePath();
   context.fillStyle = "#c0d4a7";
   context.fill();
@@ -472,22 +621,14 @@ function renderChart() {
   context.textAlign = "left";
   context.fillText("SPOT", margin.left + 7, spotY - 10);
 
+  drawComparison(context, seriesPoints("compare"));
 
-  context.beginPath();
-  contracts.forEach((contract, index) => {
-    const x = xAt(index);
-    const y = yAt(contract.last);
-    if (index === 0) context.moveTo(x, y);
-    else context.lineTo(x, y);
-  });
+  tracePath(context, currentPoints);
   context.strokeStyle = "#000000";
   context.lineWidth = 2;
   context.stroke();
 
-  const labelEvery = width < 620 ? Math.ceil(contracts.length / 4) : Math.ceil(contracts.length / 8);
-  state.chartPoints = contracts.map((contract, index) => {
-    const x = xAt(index);
-    const y = yAt(contract.last);
+  currentPoints.forEach(({ x, y }, index) => {
     context.beginPath();
     context.arc(x, y, index === 0 ? 5 : 3.5, 0, Math.PI * 2);
     context.fillStyle = index === 0 ? "#000000" : "#ffffff";
@@ -495,28 +636,31 @@ function renderChart() {
     context.strokeStyle = "#000000";
     context.lineWidth = 2;
     context.stroke();
-
-    if (index === contracts.length - 1 || (index % labelEvery === 0 && xAt(contracts.length - 1) - x > 58)) {
-      context.fillStyle = "#000000";
-      context.textAlign = index === contracts.length - 1 ? "right" : index === 0 ? "left" : "center";
-      context.fillText(contract.label.replace(" 20", " ’"), x, height - 20);
-    }
-    return { x, y, contract };
   });
+
+  drawAxisLabels(context, slots, xAt, width, height);
+  state.chartPoints = slots.map((slot, index) => ({
+    ...slot,
+    x: xAt(index),
+    y: yAt((slot.current ?? slot.compare).value),
+  }));
   canvas.setAttribute(
     "aria-label",
-    `${state.data.pair} futures price curve across ${contracts.length} maturities, ` +
-    `from ${formatPrice(contracts[0].last)} to ` +
-    `${formatPrice(contracts.at(-1).last)} ${state.data.spot_unit}.`,
+    `${state.data.pair} futures price curve across ${current.length} maturities, ` +
+    `from ${formatPrice(current[0].value)} to ` +
+    `${formatPrice(current.at(-1).value)} ${state.data.spot_unit}.${comparisonNote()}`,
   );
 }
 
 function renderYieldChart() {
   if (!state.data) return;
   const settings = YIELD_PERIODS[state.yieldPeriod];
-  const contracts = state.data.contracts
-    .map((contract) => ({ contract, value: yieldValue(contract) }))
+  const yieldPoints = (market) => market.contracts
+    .map((contract) => ({ contract, value: yieldValue(contract, state.yieldPeriod, market.spot?.last) }))
     .filter((point) => hasNumber(point.value));
+  const contracts = yieldPoints(state.data);
+  const compareMarket = comparisonMarket();
+  const slots = alignSeries(contracts, compareMarket ? yieldPoints(compareMarket) : []);
   const canvas = elements.yieldCanvas;
   const bounds = canvas.getBoundingClientRect();
   if (!bounds.width || !bounds.height || contracts.length < 1) {
@@ -536,19 +680,24 @@ function renderYieldChart() {
   const chartWidth = width - margin.left - margin.right;
   const chartHeight = height - margin.top - margin.bottom;
   const values = contracts.map((point) => point.value);
-  const rawMin = Math.min(0, ...values);
-  const rawMax = Math.max(0, ...values);
+  const plotted = slots.flatMap((slot) => [slot.current?.value, slot.compare?.value]).filter(hasNumber);
+  const rawMin = Math.min(0, ...plotted);
+  const rawMax = Math.max(0, ...plotted);
   const range = rawMax - rawMin;
   const padding = Math.max(range * 0.12, state.yieldPeriod === "daily" ? 0.001 : 0.05);
   const min = rawMin - padding;
   const max = rawMax + padding;
 
   const xAt = (index) => margin.left + (
-    contracts.length === 1
+    slots.length === 1
       ? chartWidth / 2
-      : index * chartWidth / (contracts.length - 1)
+      : index * chartWidth / (slots.length - 1)
   );
   const yAt = (value) => margin.top + (max - value) / (max - min) * chartHeight;
+  const seriesPoints = (side) => slots.flatMap((slot, index) =>
+    slot[side] ? [{ ...slot[side], key: slot.key, x: xAt(index), y: yAt(slot[side].value) }] : []
+  );
+  const currentPoints = seriesPoints("current");
 
   context.font = '11px Helvetica, Arial, sans-serif';
   context.textBaseline = "middle";
@@ -578,57 +727,38 @@ function renderYieldChart() {
   context.lineTo(width - margin.right, zeroY);
   context.stroke();
 
-  context.beginPath();
-  contracts.forEach((point, index) => {
-    const x = xAt(index);
-    const y = yAt(point.value);
-    if (index === 0) context.moveTo(x, y);
-    else context.lineTo(x, y);
-  });
-  context.lineTo(xAt(contracts.length - 1), zeroY);
-  context.lineTo(xAt(0), zeroY);
+  tracePath(context, currentPoints);
+  context.lineTo(currentPoints.at(-1).x, zeroY);
+  context.lineTo(currentPoints[0].x, zeroY);
   context.closePath();
   context.fillStyle = "#a5b8c0";
   context.fill();
 
-  context.beginPath();
-  contracts.forEach((point, index) => {
-    const x = xAt(index);
-    const y = yAt(point.value);
-    if (index === 0) context.moveTo(x, y);
-    else context.lineTo(x, y);
-  });
+  drawComparison(context, seriesPoints("compare"));
+
+  tracePath(context, currentPoints);
   context.strokeStyle = "#000000";
   context.lineWidth = 2.5;
   context.stroke();
 
-  const peak = contracts.reduce(
-    (highest, point, index) =>
-      point.value > highest.value ? { ...point, index } : highest,
-    { ...contracts[0], index: 0 },
+  const peak = currentPoints.reduce(
+    (highest, point) => point.value > highest.value ? point : highest,
   );
-  const peakX = xAt(peak.index);
-  const peakY = yAt(peak.value);
 
   context.save();
   context.setLineDash([4, 5]);
   context.strokeStyle = "#000000";
   context.lineWidth = 1;
   context.beginPath();
-  context.moveTo(peakX, margin.top);
-  context.lineTo(peakX, height - margin.bottom);
+  context.moveTo(peak.x, margin.top);
+  context.lineTo(peak.x, height - margin.bottom);
   context.stroke();
   context.restore();
 
-  const labelEvery = width < 620
-    ? Math.ceil(contracts.length / 4)
-    : Math.ceil(contracts.length / 8);
-  state.yieldChartPoints = contracts.map((point, index) => {
-    const x = xAt(index);
-    const y = yAt(point.value);
-    const isPeak = index === peak.index;
+  currentPoints.forEach((point, index) => {
+    const isPeak = point === peak;
     context.beginPath();
-    context.arc(x, y, isPeak ? 7 : index === 0 ? 5 : 3.5, 0, Math.PI * 2);
+    context.arc(point.x, point.y, isPeak ? 7 : index === 0 ? 5 : 3.5, 0, Math.PI * 2);
     context.fillStyle = isPeak || index === 0 ? "#000000" : "#ffffff";
     context.fill();
     context.strokeStyle = "#000000";
@@ -637,34 +767,29 @@ function renderYieldChart() {
 
     if (isPeak) {
       context.beginPath();
-      context.arc(x, y, 11, 0, Math.PI * 2);
+      context.arc(point.x, point.y, 11, 0, Math.PI * 2);
       context.strokeStyle = "#000000";
       context.lineWidth = 2;
       context.stroke();
     }
-
-    if (index === contracts.length - 1 || (index % labelEvery === 0 && xAt(contracts.length - 1) - x > 58)) {
-      context.fillStyle = "#000000";
-      context.textAlign = index === contracts.length - 1
-        ? "right"
-        : index === 0 ? "left" : "center";
-      context.fillText(
-        point.contract.label.replace(" 20", " ’"),
-        x,
-        height - 20,
-      );
-    }
-    return { x, y, isPeak, ...point };
   });
+
+  drawAxisLabels(context, slots, xAt, width, height);
+  state.yieldChartPoints = slots.map((slot, index) => ({
+    ...slot,
+    x: xAt(index),
+    y: yAt((slot.current ?? slot.compare).value),
+    isPeak: slot.key === peak.key,
+  }));
 
   const peakTag = `HIGHEST ${settings.label.toUpperCase()} · ${formatYield(peak.value)}`;
   context.font = '700 11px Helvetica, Arial, sans-serif';
   const peakTagWidth = context.measureText(peakTag).width + 18;
   const peakTagX = Math.min(
-    Math.max(peakX - peakTagWidth / 2, margin.left),
+    Math.max(peak.x - peakTagWidth / 2, margin.left),
     width - margin.right - peakTagWidth,
   );
-  const peakTagY = peakY < margin.top + 42 ? peakY + 17 : peakY - 34;
+  const peakTagY = peak.y < margin.top + 42 ? peak.y + 17 : peak.y - 34;
   context.fillStyle = "#000000";
   context.fillRect(peakTagX, peakTagY, peakTagWidth, 22);
   context.fillStyle = "#ffffff";
@@ -686,7 +811,7 @@ function renderYieldChart() {
     "aria-label",
     `${settings.label} compounded ${state.data.pair} futures net yield by maturity. ` +
     `Highest ${settings.label.toLowerCase()} yield is ${formatYield(peak.value)} at ` +
-    `${peak.contract.label}.`,
+    `${peak.contract.label}.${comparisonNote()}`,
   );
 }
 
@@ -706,6 +831,7 @@ function selectMarket(marketKey, updateUrl = false) {
   renderStats(market);
   renderRows(market.contracts);
   renderCarry(market);
+  renderComparisonLegends();
   renderChart();
   renderYieldChart();
 
@@ -719,6 +845,7 @@ function selectMarket(marketKey, updateUrl = false) {
 function renderSnapshot(snapshot) {
   state.snapshot = snapshot;
   renderMarketRail(snapshot);
+  renderCompareControl();
 
   const queryMarket = new URLSearchParams(window.location.search)
     .get("market")
@@ -738,36 +865,265 @@ function renderSnapshot(snapshot) {
   updateStatus(snapshot.generated_at);
 }
 
-async function loadData() {
+async function fetchSnapshot(url, options) {
+  const response = await fetch(url, options);
+  if (!response.ok) throw new Error(`Market snapshot returned ${response.status}`);
+  const data = await response.json();
+  const marketsAreValid =
+    data.markets &&
+    Array.isArray(data.market_order) &&
+    data.market_order.every((key) =>
+      data.markets[key]?.spot && Array.isArray(data.markets[key]?.contracts)
+    );
+  if (!marketsAreValid) throw new Error("Invalid multi-market snapshot");
+  return data;
+}
+
+function showNotice(text) {
+  elements.historyNotice.textContent = text;
+  elements.historyNotice.hidden = false;
+}
+
+function hideNotice() {
+  elements.historyNotice.hidden = true;
+  elements.historyNotice.textContent = "";
+}
+
+// The day the comparison is measured from: the close on screen, or the live market date.
+function referenceDate() {
+  return state.renderedDate ?? state.snapshot?.market_date ?? null;
+}
+
+// Archived closes that can be compared with the view: only earlier ones, newest first.
+function compareDays(reference = referenceDate()) {
+  return reference ? state.historyDays.filter((day) => day < reference) : [];
+}
+
+function quickPicks(reference, days) {
+  const picks = [];
+  COMPARE_PICKS.forEach((pick) => {
+    const target = dayOffset(reference, pick);
+    const nearest = days.reduce((best, day) =>
+      best === null || daysBetween(day, target) < daysBetween(best, target) ? day : best,
+    null);
+    if (
+      nearest &&
+      daysBetween(nearest, target) <= pick.tolerance &&
+      !picks.some((existing) => existing.day === nearest)
+    ) {
+      picks.push({ label: pick.label, day: nearest });
+    }
+  });
+  return picks;
+}
+
+function updateCompareUrl() {
+  const url = new URL(window.location.href);
+  if (state.compareDate) url.searchParams.set("compare", state.compareDate);
+  else url.searchParams.delete("compare");
+  if (url.href !== window.location.href) window.history.replaceState({}, "", url);
+}
+
+function clearCompare() {
+  state.compareDate = null;
+  state.compareSnapshot = null;
+  state.compareRequestId += 1;
+  elements.compareSelect.value = "";
+  updateCompareUrl();
+}
+
+// Rebuild the compare options for the view's date and drop a comparison that
+// is no longer earlier than it. Doesn't redraw; the caller renders next.
+function renderCompareControl() {
+  const reference = referenceDate();
+  const days = compareDays(reference);
+  elements.compareControl.hidden = !days.length;
+
+  if (reference !== state.compareReference) {
+    state.compareReference = reference;
+    const options = [new Option("None", "")];
+    const picks = reference ? quickPicks(reference, days) : [];
+    if (picks.length) {
+      const group = document.createElement("optgroup");
+      group.label = "Quick picks";
+      group.append(...picks.map(({ label, day }) => new Option(`${label} · ${formatDay(day)}`, day)));
+      options.push(group);
+    }
+    if (days.length) {
+      const group = document.createElement("optgroup");
+      group.label = "Archived closes";
+      group.append(...days.map((day) => new Option(`Close · ${formatDay(day)}`, day)));
+      options.push(group);
+    }
+    elements.compareSelect.replaceChildren(...options);
+  }
+
+  if (state.compareDate && reference && !days.includes(state.compareDate)) {
+    showNotice(
+      `The close of ${formatDay(state.compareDate)} is not earlier than ` +
+      `${formatDay(reference)}, so the comparison is off.`,
+    );
+    clearCompare();
+  }
+  elements.compareSelect.value = state.compareDate ?? "";
+}
+
+function renderComparisonLegends() {
+  const shown = Boolean(state.compareSnapshot) && Boolean(state.data);
+  [elements.curveLegend, elements.yieldLegend].forEach((legend) => {
+    legend.hidden = !shown;
+  });
+  if (!shown) return;
+
+  const current = `${state.renderedDate ? "Close" : "Live"} · ${formatDay(referenceDate())}`;
+  const missing = comparisonMarket() ? "" : ` · no ${state.data.pair} data`;
+  const html =
+    `<li><span class="legend-swatch is-current" aria-hidden="true"></span>` +
+    `${current} <small>solid</small></li>` +
+    `<li><span class="legend-swatch is-compare" aria-hidden="true"></span>` +
+    `Close · ${formatDay(state.compareDate)}${missing} <small>dashed</small></li>`;
+  elements.curveLegend.innerHTML = html;
+  elements.yieldLegend.innerHTML = html;
+}
+
+function renderComparison() {
+  elements.tooltip.hidden = true;
+  elements.yieldTooltip.hidden = true;
+  renderComparisonLegends();
+  renderChart();
+  renderYieldChart();
+}
+
+// Overlay an archived close on both curves, or remove the overlay with null.
+// A comparison that fails to load is dropped with a notice.
+async function setCompare(date) {
+  clearCompare();
+  state.compareDate = date;
+  elements.compareSelect.value = date ?? "";
+  updateCompareUrl();
+  renderComparison();
+  if (!date) return;
+
+  const request = state.compareRequestId;
+  try {
+    const data = await fetchSnapshot(`${HISTORY_URL}/${date}.json`);
+    if (request !== state.compareRequestId) return;
+    state.compareSnapshot = data;
+  } catch (error) {
+    if (request !== state.compareRequestId) return;
+    console.error(error);
+    showNotice(`The close of ${formatDay(date)} could not be loaded for comparison.`);
+    clearCompare();
+  }
+  renderComparison();
+}
+
+function renderHistoryControl() {
+  elements.historyControl.hidden = !state.historyDays.length;
+  elements.historySelect.replaceChildren(
+    new Option("Live", ""),
+    ...state.historyDays.map((day) => new Option(`Close · ${formatDay(day)}`, day)),
+  );
+  elements.historySelect.value = state.viewDate ?? "";
+}
+
+function renderViewState() {
+  const historical = Boolean(state.renderedDate);
+  elements.historySelect.value = state.viewDate ?? "";
+  elements.historyBanner.hidden = !historical;
+  elements.historyBannerDate.textContent = historical ? formatDay(state.renderedDate) : "—";
+  elements.spotTag.textContent = historical ? "Past close" : "≈ 15 min delay";
+  document.body.dataset.view = historical ? "historical" : "live";
+
+  const url = new URL(window.location.href);
+  if (historical) url.searchParams.set("date", state.renderedDate);
+  else url.searchParams.delete("date");
+  if (url.href !== window.location.href) window.history.replaceState({}, "", url);
+}
+
+async function loadHistoryIndex() {
+  try {
+    const response = await fetch(`${HISTORY_URL}/index.json?v=${Date.now()}`, {
+      cache: "no-store",
+    });
+    if (!response.ok) throw new Error(`History index returned ${response.status}`);
+    const manifest = await response.json();
+    const days = (Array.isArray(manifest?.days) ? manifest.days : [])
+      .map((entry) => entry?.date)
+      .filter((day) => typeof day === "string" && HISTORY_DATE.test(day));
+    state.historyDays = [...new Set(days)].sort().reverse();
+  } catch (error) {
+    // History is optional; the live dashboard works without it.
+    console.warn("Archived snapshots are unavailable.", error);
+    state.historyDays = [];
+  }
+  renderHistoryControl();
+}
+
+// Load and render one view: an archived date, or null for the live snapshot.
+// A view that fails to load leaves the current one on screen.
+async function loadView(date) {
+  state.viewDate = date;
+  const request = ++state.requestId;
   elements.refreshButton.classList.add("is-loading");
   elements.refreshButton.disabled = true;
   try {
-    const response = await fetch(`${DATA_URL}?v=${Date.now()}`, { cache: "no-store" });
-    if (!response.ok) throw new Error(`Market snapshot returned ${response.status}`);
-    const data = await response.json();
-    const marketsAreValid =
-      data.markets &&
-      Array.isArray(data.market_order) &&
-      data.market_order.every((key) =>
-        data.markets[key]?.spot && Array.isArray(data.markets[key]?.contracts)
-      );
-    if (!marketsAreValid) throw new Error("Invalid multi-market snapshot");
+    const data = date
+      ? await fetchSnapshot(`${HISTORY_URL}/${date}.json`)
+      : await fetchSnapshot(`${DATA_URL}?v=${Date.now()}`, { cache: "no-store" });
+    if (request !== state.requestId) return;
+    state.renderedDate = date;
     renderSnapshot(data);
   } catch (error) {
+    if (request !== state.requestId) return;
     console.error(error);
-    elements.dataState.classList.remove("is-fresh", "is-delayed");
-    elements.dataState.classList.add("is-error");
-    elements.dataState.lastChild.textContent = " Data unavailable";
-    if (!state.snapshot) {
-      elements.rows.innerHTML = '<tr class="empty-row"><td colspan="11">The market snapshot could not be loaded. Try refreshing shortly.</td></tr>';
+    state.viewDate = state.renderedDate;
+    if (date) {
+      showNotice(`The close of ${formatDay(date)} could not be loaded.`);
+      if (!state.snapshot) {
+        loadView(null);
+        return;
+      }
+    } else if (state.renderedDate) {
+      showNotice(
+        "Live data is unavailable. Still showing the close of " +
+        `${formatDay(state.renderedDate)}.`,
+      );
+    } else {
+      setStatus("is-error", "Data unavailable");
+      if (!state.snapshot) {
+        elements.rows.innerHTML = '<tr class="empty-row"><td colspan="11">The market snapshot could not be loaded. Try refreshing shortly.</td></tr>';
+      }
     }
   } finally {
-    elements.refreshButton.classList.remove("is-loading");
-    elements.refreshButton.disabled = false;
+    if (request === state.requestId) {
+      elements.refreshButton.classList.remove("is-loading");
+      elements.refreshButton.disabled = false;
+      renderViewState();
+    }
   }
 }
 
-elements.refreshButton.addEventListener("click", loadData);
+function goLive() {
+  hideNotice();
+  loadView(null);
+}
+
+// Refresh always shows live data, so it also leaves a past close.
+elements.refreshButton.addEventListener("click", goLive);
+elements.liveButton.addEventListener("click", goLive);
+
+elements.historySelect.addEventListener("change", () => {
+  const date = elements.historySelect.value;
+  hideNotice();
+  loadView(state.historyDays.includes(date) ? date : null);
+});
+
+elements.compareSelect.addEventListener("change", () => {
+  const date = elements.compareSelect.value;
+  hideNotice();
+  setCompare(compareDays().includes(date) ? date : null);
+});
 
 elements.marketButtons.forEach((button) => {
   button.addEventListener("click", () => {
@@ -797,6 +1153,32 @@ elements.yieldPeriodButtons.forEach((button) => {
   });
 });
 
+// Both days' values for one maturity month, and the change from the
+// comparison close to the view. A side without the contract reads "not listed".
+function comparisonTooltip(point, format, formatDelta) {
+  const value = (side) => point[side] ? format(point[side].value) : "not listed";
+  const delta = point.current && point.compare
+    ? `Δ ${formatDelta(point.current.value - point.compare.value)}`
+    : "Δ —";
+  const contract = (point.current ?? point.compare).contract;
+  const daysLeft = point.current
+    ? `${contract.days_to_maturity} days left`
+    : "Not listed on the viewed day";
+  return `<strong>${point.label}</strong>` +
+    `${formatDay(referenceDate())}: ${value("current")}<br>` +
+    `${formatDay(state.compareDate)}: ${value("compare")}<br>` +
+    `<span class="tooltip-delta">${delta}</span><br>${daysLeft}`;
+}
+
+function placeTooltip(tooltip, point, bounds, minX) {
+  tooltip.classList.toggle("is-compare", Boolean(comparisonMarket()));
+  tooltip.hidden = false;
+  const tooltipX = Math.min(Math.max(point.x + 12, minX), bounds.width - tooltip.offsetWidth - 1);
+  const tooltipY = Math.max(point.y - tooltip.offsetHeight - 12, 8);
+  tooltip.style.left = `${tooltipX}px`;
+  tooltip.style.top = `${tooltipY}px`;
+}
+
 elements.canvas.addEventListener("pointermove", (event) => {
   if (!state.chartPoints.length) return;
   const bounds = elements.canvas.getBoundingClientRect();
@@ -810,15 +1192,16 @@ elements.canvas.addEventListener("pointermove", (event) => {
     return;
   }
 
-  elements.tooltip.innerHTML =
-    `<strong>${nearest.contract.label}</strong>` +
-    `${formatPrice(nearest.contract.last)} · ${state.data.spot_unit}<br>` +
-    `${nearest.contract.days_to_maturity} days left`;
-  const tooltipX = Math.min(Math.max(nearest.x + 12, 45), bounds.width - 155);
-  const tooltipY = Math.max(nearest.y - 72, 8);
-  elements.tooltip.style.left = `${tooltipX}px`;
-  elements.tooltip.style.top = `${tooltipY}px`;
-  elements.tooltip.hidden = false;
+  elements.tooltip.innerHTML = comparisonMarket()
+    ? comparisonTooltip(
+      nearest,
+      formatPrice,
+      (delta) => `${formatSignedPrice(delta)} ${state.data.spot_unit}`,
+    )
+    : `<strong>${nearest.label}</strong>` +
+      `${formatPrice(nearest.current.value)} · ${state.data.spot_unit}<br>` +
+      `${nearest.current.contract.days_to_maturity} days left`;
+  placeTooltip(elements.tooltip, nearest, bounds, 45);
 });
 
 elements.canvas.addEventListener("pointerleave", () => {
@@ -839,21 +1222,55 @@ elements.yieldCanvas.addEventListener("pointermove", (event) => {
   }
 
   const settings = YIELD_PERIODS[state.yieldPeriod];
-  elements.yieldTooltip.innerHTML =
-    `<strong>${nearest.contract.label}</strong>` +
-    `${formatYield(nearest.value)} ${settings.shortLabel}<br>` +
-    `${nearest.contract.days_to_maturity} days left` +
-    `${nearest.isPeak ? `<br>Highest ${settings.label.toLowerCase()} yield` : ""}`;
-  const tooltipX = Math.min(Math.max(nearest.x + 12, 60), bounds.width - 165);
-  const tooltipY = Math.max(nearest.y - 72, 8);
-  elements.yieldTooltip.style.left = `${tooltipX}px`;
-  elements.yieldTooltip.style.top = `${tooltipY}px`;
-  elements.yieldTooltip.hidden = false;
+  const peakNote = nearest.isPeak ? `<br>Highest ${settings.label.toLowerCase()} yield` : "";
+  elements.yieldTooltip.innerHTML = comparisonMarket()
+    ? comparisonTooltip(
+      nearest,
+      (value) => `${formatYield(value)} ${settings.shortLabel}`,
+      (delta) => formatYieldDelta(delta),
+    ) + peakNote
+    : `<strong>${nearest.label}</strong>` +
+      `${formatYield(nearest.current.value)} ${settings.shortLabel}<br>` +
+      `${nearest.current.contract.days_to_maturity} days left${peakNote}`;
+  placeTooltip(elements.yieldTooltip, nearest, bounds, 60);
 });
 
 elements.yieldCanvas.addEventListener("pointerleave", () => {
   elements.yieldTooltip.hidden = true;
 });
 
-loadData();
-state.refreshTimer = window.setInterval(loadData, 60_000);
+async function init() {
+  await loadHistoryIndex();
+  const params = new URLSearchParams(window.location.search);
+  const requestedCompare = params.get("compare");
+  if (requestedCompare && state.historyDays.includes(requestedCompare)) {
+    // Checked against the view's date once that has rendered.
+    setCompare(requestedCompare);
+  } else if (requestedCompare) {
+    showNotice(
+      HISTORY_DATE.test(requestedCompare)
+        ? `No archived close for ${requestedCompare} to compare with.`
+        : "That comparison date is not in the archive.",
+    );
+    updateCompareUrl();
+  }
+  const requested = params.get("date");
+  if (requested && state.historyDays.includes(requested)) {
+    loadView(requested);
+  } else {
+    if (requested) {
+      showNotice(
+        HISTORY_DATE.test(requested)
+          ? `No archived close for ${requested}. Showing live data.`
+          : "That date is not in the archive. Showing live data.",
+      );
+    }
+    loadView(null);
+  }
+  // The poll only refreshes the live view; a past close stays until the user leaves it.
+  state.refreshTimer = window.setInterval(() => {
+    if (!state.viewDate) loadView(null);
+  }, 60_000);
+}
+
+init();

@@ -40,16 +40,35 @@
       </header>
       <div class="service-band">
         <span>BORSA İSTANBUL / VİOP MARKET MONITOR</span>
-        <span
-          class="data-state"
-          id="data-state"
-          role="status"
-          aria-live="polite"
-        >
-          <span class="status-dot" aria-hidden="true"></span>
-          Loading market data
-        </span>
+        <div class="service-tools">
+          <div class="history-control" id="history-control" hidden>
+            <label for="history-select">View</label>
+            <select id="history-select">
+              <option value="">Live</option>
+            </select>
+          </div>
+          <span
+            class="data-state"
+            id="data-state"
+            role="status"
+            aria-live="polite"
+          >
+            <span class="status-dot" aria-hidden="true"></span>
+            Loading market data
+          </span>
+        </div>
       </div>
+      <div class="history-banner" id="history-banner" hidden>
+        <p>
+          <strong>Past close</strong> You are viewing the end-of-day snapshot
+          of <span id="history-banner-date">—</span>. These are not live
+          prices.
+        </p>
+        <button class="live-button" id="live-button" type="button">
+          Back to live
+        </button>
+      </div>
+      <p class="history-notice" id="history-notice" role="status" hidden></p>
 
       <main id="dashboard-content">
         <div class="catalog-layout">
@@ -83,7 +102,7 @@
             <aside class="spot-panel" aria-labelledby="spot-title">
               <div class="panel-kicker">
                 <span id="spot-title">Spot rate</span>
-                <span class="delay-tag">≈ 15 min delay</span>
+                <span class="delay-tag" id="spot-tag">≈ 15 min delay</span>
               </div>
               <div class="spot-value loading-value" id="spot-value">—</div>
               <div class="spot-meta">
@@ -139,6 +158,16 @@
               </div>
             </section>
 
+            <div class="compare-control" id="compare-control" hidden>
+              <label for="compare-select">Compare with</label>
+              <select id="compare-select" aria-describedby="compare-hint">
+                <option value="">None</option>
+              </select>
+              <small id="compare-hint">
+                Overlays an earlier close on both curves.
+              </small>
+            </div>
+
             <section class="curve-section" aria-labelledby="curve-title">
               <div class="section-heading">
                 <div>
@@ -150,6 +179,12 @@
                 </p>
               </div>
 
+              <ul
+                class="chart-legend"
+                id="curve-legend"
+                aria-label="Price curve legend"
+                hidden
+              ></ul>
               <div class="curve-frame">
                 <div class="curve-y-label" id="curve-unit">TRY / USD</div>
                 <canvas
@@ -226,6 +261,12 @@
                 </div>
               </div>
 
+              <ul
+                class="chart-legend"
+                id="yield-legend"
+                aria-label="Yield curve legend"
+                hidden
+              ></ul>
               <div class="yield-frame">
                 <div class="yield-y-label">NET YIELD (%)</div>
                 <canvas

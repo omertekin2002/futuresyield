@@ -17,6 +17,8 @@ redeployed every 15 minutes by GitHub Actions.
 - For USD/TRY, the spot's average daily appreciation over the last 180 days and
   the expected profit from shorting each contract at the bid
 - Snapshot age, delayed-data state, and one-click refresh
+- Any archived end-of-day close, browsable from the **View** menu
+- Any earlier archived close overlaid on both curves, with price and yield deltas
 
 Maturity is calculated as the final **full** Turkish business day of each
 contract month. Weekends, public holidays, and half-day official holidays are
@@ -61,6 +63,96 @@ Contracts without a bid show no profit. The projection ignores fees, taxes, and
 margin and is not a forecast. If the 180-day history cannot be fetched, the
 rest of the snapshot still publishes without the projection.
 
+## History
+
+Each refresh overwrites `data/market.json`, so the Pages workflow also keeps one
+end-of-day snapshot per VİOP trading day on a separate `data-history` branch.
+`main` never receives these commits.
+
+- **Layout.** `history/<YYYY-MM-DD>.json` holds the snapshot exactly as
+  `scripts/update_data.py` wrote it, named after the trading day it closes.
+  `history/index.json` lists the archived days, sorted by date, as
+  `{ "date", "generated_at", "markets" }` entries under a `schema_version`, so
+  the dashboard never needs a directory listing.
+- **End-of-day rule.** VİOP's
+  [trading hours](https://www.borsaistanbul.com/en/markets/viop/market-functioning/trading-hours)
+  run from the 09:20 opening session through the 19:00–23:00 evening session
+  for FX and precious-metal futures. A snapshot taken at or after 23:15 on
+  trading day D counts as D; the 15 minutes allow for delayed quotes. So does
+  any snapshot taken before the next session opens at 09:20, including over
+  weekends and public holidays. Snapshots taken in between, including the gap
+  between the normal and evening sessions, are not end-of-day and are skipped.
+- **Half days.** A half-day holiday is still a trading day, but its only session
+  ends at 12:40 and it has no evening session, so snapshots from 12:55 onward
+  count as that day. On the year's last trading day the evening session is not
+  held either; the archive still waits until 23:15, which only delays it.
+- **Write-once.** The first end-of-day snapshot for a day wins. An existing day
+  is never overwritten, and a run that adds nothing makes no commit.
+- **Size.** About 27 KB per trading day, roughly 7 MB a year.
+
+### Browsing past closes
+
+When the site has archived days, a **View** menu appears next to the data
+status. It lists **Live** and every archived close, newest first. Choosing a
+close renders the whole dashboard (spot, curves, yields, carry and the contract
+board) from that day's snapshot, for every market.
+
+- **Unmistakable.** A "Past close" banner and a "Historical · close of …"
+  status replace the live freshness state. The one-minute poll never replaces a
+  past close; **Back to live**, **Refresh**, or choosing **Live** returns to live
+  data.
+- **Shareable.** `?date=YYYY-MM-DD` opens a close directly and combines with
+  `?market=`, for example `?date=2026-10-27&market=EURTRY`. Switching markets
+  keeps the date. A date that isn't archived falls back to live with a short
+  notice.
+- **Published with the site.** The Pages `build` job checks out `data-history`,
+  if it exists, and `scripts/build_site.sh` copies its `history/` into
+  `_site/data/history/`, so the files are served from the same origin. A close
+  archived by a run appears in the next run's deploy. Without the branch the
+  site ships an empty manifest and the menu stays hidden.
+
+### Comparing two closes
+
+A **Compare with** menu above the curves overlays an earlier archived close on
+both the price and the yield curve, for every market. It offers **None** (the
+default), quick picks for **1 week**, **1 month** and **3 months** ago, and
+every archived close that is earlier than the day on screen. The live view
+counts as its market date.
+
+- **Quick picks.** Each one is the archived close nearest to the target date,
+  offered only if it lies within 3, 7 or 14 calendar days of it respectively.
+  Two picks that land on the same close are shown once.
+- **Drawing.** The comparison is a dashed purple line with hollow square
+  markers; the day on screen keeps its solid black line, round markers and
+  fill. A legend above each chart names both dates.
+- **Alignment.** Contracts are matched by maturity month. The x axis has one
+  evenly spaced slot per maturity month listed on either day, so a contract
+  that has since expired, or wasn't listed yet, still sits in its own month and
+  only one line passes through it.
+- **Deltas.** Tooltips show both days' values and the change from the
+  comparison to the day on screen: **Δ price** = price on screen − comparison
+  price, in the market's quote unit, and **Δ yield** = yield on screen −
+  comparison yield, in percentage points (pp), for the selected 1D, 30D or
+  365D period. Each day's yield uses that day's own spot and days to maturity.
+  A contract missing on either day shows "not listed" and no delta.
+- **Shareable.** `?compare=YYYY-MM-DD` combines with `?date=` and `?market=`,
+  for example `?date=2026-10-05&compare=2026-09-30&market=XAUTRY`, and survives
+  market and yield-period switches. A comparison that isn't archived, or isn't
+  earlier than the day on screen, is dropped with a short notice. Without
+  history the menu stays hidden.
+
+To try it locally, put a copy of the branch's `history/` directory at the repo
+root (it's ignored by git) or point `HISTORY_DIR` at one, then run
+`bash scripts/build_site.sh` and serve `_site/`.
+
+The `archive` job runs after `build`, alongside `deploy`, so a failed archive
+never blocks or undoes the Pages deploy. It is the only job with
+`contents: write` and pushes only to `data-history`, never with force. The
+logic lives in `scripts/archive_snapshot.py`, and
+`scripts/archive_history.sh SNAPSHOT [WORKTREE]` runs it against a checkout of
+the branch, creating the branch as an orphan holding only `history/` on the
+first run.
+
 ## Publish on GitHub Pages
 
 1. Push this repository to GitHub with `main` as the default branch.
@@ -86,6 +178,35 @@ python -m http.server 8000
 ```
 
 Then open <http://localhost:8000>.
+
+To assemble the deployable site into `_site/` exactly as the Pages workflow
+does, run `bash scripts/build_site.sh`.
+
+To run the headless browser smoke test of the dashboard, install the dev
+requirements and a Playwright Chromium, then run the test directly:
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m playwright install chromium
+python -m unittest tests/e2e/test_dashboard_smoke.py -v
+```
+
+It builds the site twice, with a small test-only history derived from
+`tests/fixtures/market.json` and without any, swaps in that fixed snapshot,
+serves both on a local port, and checks every market, the history view and the
+comparison overlay in headless Chromium for console errors and the main rendered values. It never touches the network. The
+`discover` command above skips it, so the updater tests still run without a
+browser.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every pull request, on pushes to branches
+other than `main`, and on demand. It never deploys. It runs the updater tests
+offline on Python 3.10 and 3.12, checks `app.js` syntax with `node --check`,
+checks that `data/market.json` parses, and assembles the site with
+`scripts/build_site.sh`, which fails if any file the site needs is missing.
+A separate `smoke` job installs `requirements-dev.txt` and Chromium and runs
+`python -m unittest tests/e2e/test_dashboard_smoke.py -v`.
 
 ## Data notes
 
