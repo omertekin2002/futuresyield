@@ -90,6 +90,21 @@ Then open <http://localhost:8000>.
 To assemble the deployable site into `_site/` exactly as the Pages workflow
 does, run `bash scripts/build_site.sh`.
 
+To run the headless browser smoke test of the dashboard, install the dev
+requirements and a Playwright Chromium, then run the test directly:
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m playwright install chromium
+python -m unittest tests/e2e/test_dashboard_smoke.py -v
+```
+
+It builds `_site/`, swaps in the fixed snapshot `tests/fixtures/market.json`,
+serves it on a local port, and checks every market in headless Chromium for
+console errors and the main rendered values. It never touches the network. The
+`discover` command above skips it, so the updater tests still run without a
+browser.
+
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs on every pull request, on pushes to branches
@@ -97,6 +112,8 @@ other than `main`, and on demand. It never deploys. It runs the updater tests
 offline on Python 3.10 and 3.12, checks `app.js` syntax with `node --check`,
 checks that `data/market.json` parses, and assembles the site with
 `scripts/build_site.sh`, which fails if any file the site needs is missing.
+A separate `smoke` job installs `requirements-dev.txt` and Chromium and runs
+`python -m unittest tests/e2e/test_dashboard_smoke.py -v`.
 
 ## Data notes
 
