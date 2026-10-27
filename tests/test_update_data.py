@@ -1,4 +1,7 @@
 from datetime import date, datetime
+import json
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
@@ -13,6 +16,7 @@ from scripts.update_data import (
     fetch_spot_trend,
     fetch_stream_quotes,
     gold_try_per_gram,
+    main,
     maturity_date,
     normalize_contract,
     parse_contract_symbol,
@@ -20,6 +24,10 @@ from scripts.update_data import (
     short_expected_profit,
     symbol_from_table_code,
 )
+from scripts.snapshot_schema import validate_snapshot
+
+
+FIXTURE = Path(__file__).resolve().parent / "fixtures" / "market.json"
 
 
 class ContractParsingTests(unittest.TestCase):
@@ -356,6 +364,14 @@ class SnapshotTests(unittest.TestCase):
         self.assertIsNone(eur["spot_trend"])
         self.assertIsNone(eur["contracts"][0]["expected_short_profit_try"])
 
+    def test_built_snapshots_pass_the_schema(self):
+        validate_snapshot(self.build_with_fakes(lambda *_args: {"daily_factor": 1.0005}))
+
+        def failing_trend(*_args):
+            raise RuntimeError("history down")
+
+        validate_snapshot(self.build_with_fakes(failing_trend))
+
     def test_spot_trend_failure_keeps_snapshot(self):
         def failing_trend(*_args):
             raise RuntimeError("history down")
@@ -366,6 +382,66 @@ class SnapshotTests(unittest.TestCase):
         self.assertIsNone(usd["spot_trend"])
         self.assertEqual(usd["contracts"][0]["last"], 48.0)
         self.assertIsNone(usd["contracts"][0]["expected_short_profit_try"])
+
+
+
+class MainTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.output = Path(temporary.name) / "data" / "market.json"
+        self.snapshot = json.loads(FIXTURE.read_text(encoding="utf-8"))
+
+    def run_main(self, snapshot, attempts=2):
+        argv = ["update_data.py", "--output", str(self.output), "--attempts", str(attempts)]
+        with (
+            patch("sys.argv", argv),
+            patch("scripts.update_data.build_snapshot", return_value=snapshot) as build,
+            patch("scripts.update_data.time.sleep"),
+            patch("builtins.print") as mock_print,
+        ):
+            main()
+        return build, mock_print
+
+    def test_writes_a_valid_snapshot(self):
+        build, _print = self.run_main(self.snapshot)
+
+        build.assert_called_once()
+        self.assertEqual(json.loads(self.output.read_text(encoding="utf-8")), self.snapshot)
+
+    def test_invalid_snapshot_is_a_failed_attempt_and_never_written(self):
+        self.snapshot["markets"]["USDTRY"]["contracts"][0]["days_to_maturity"] = -1
+
+        with self.assertRaises(SystemExit) as caught:
+            self.run_main(self.snapshot)
+
+        self.assertIn("keeping last deployment", str(caught.exception.code))
+        self.assertIn(
+            "markets.USDTRY.contracts[0].days_to_maturity", str(caught.exception.code)
+        )
+        self.assertFalse(self.output.exists())
+        self.assertFalse(self.output.with_suffix(".json.tmp").exists())
+
+    def test_invalid_snapshot_is_retried(self):
+        invalid = json.loads(json.dumps(self.snapshot))
+        invalid["schema_version"] = 5
+        argv = ["update_data.py", "--output", str(self.output), "--attempts", "3"]
+        with (
+            patch("sys.argv", argv),
+            patch(
+                "scripts.update_data.build_snapshot",
+                side_effect=[invalid, self.snapshot],
+            ) as build,
+            patch("scripts.update_data.time.sleep"),
+            patch("builtins.print") as mock_print,
+        ):
+            main()
+
+        self.assertEqual(build.call_count, 2)
+        self.assertIn("Attempt 1/3 failed", mock_print.call_args_list[0].args[0])
+        self.assertEqual(
+            json.loads(self.output.read_text(encoding="utf-8"))["schema_version"], 4
+        )
 
 
 if __name__ == "__main__":

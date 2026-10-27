@@ -257,6 +257,13 @@ button:hover {
   background: var(--yellow);
   font: 12px/1.4 var(--serif);
 }
+.days-note {
+  margin: 0;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--ink);
+  background: var(--sky);
+  font: 12px/1.4 var(--serif);
+}
 .catalog-layout {
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr);
@@ -999,7 +1006,8 @@ footer p {
     flex-direction: column;
     padding: 10px 12px;
   }
-  .history-notice {
+  .history-notice,
+  .days-note {
     padding: 8px 12px;
   }
   .catalog-layout {

@@ -8,7 +8,7 @@ __init__.py, so `python -m unittest discover -s tests` never collects it.
 """
 
 import copy
-from datetime import date
+from datetime import date, datetime
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -50,6 +50,18 @@ HISTORY_LABELS = {
     "2026-10-06": "06 Oct 2026",
 }
 LIVE_LABEL = "07 Oct 2026"
+# The browser clock for every test unless it sets its own: late on the
+# fixture's market date in Istanbul, so the live snapshot keeps its stored
+# days left and is still old enough to show as delayed.
+FIXTURE_DAY_TIME = datetime.fromisoformat("2026-10-07T23:00:00+03:00")
+# The next Istanbul day, when days left move on by one.
+NEXT_DAY_TIME = datetime.fromisoformat("2026-10-08T10:00:00+03:00")
+# The contract table's yield columns: label, stored field, period in days, digits.
+YIELD_COLUMNS = (
+    ("Daily yield · 1D", "daily_yield_percent", 1, 4),
+    ("Monthly yield · 30D", "monthly_yield_percent", 30, 2),
+    ("Annualized · 365D", "annualized_yield_percent", 365, 2),
+)
 # On this day each market still lists a Sep 2026 contract and not yet its
 # last live maturity, so a comparison has contracts missing on either side.
 ROLLED_DAY = "2026-07-07"
@@ -172,10 +184,19 @@ class DashboardSmokeTests(unittest.TestCase):
         cls.tmp.cleanup()
 
     def setUp(self):
-        self.context = self.browser.new_context(viewport={"width": 1280, "height": 900})
-        self.page = self.context.new_page()
         self.errors = []
         self.external_requests = []
+        self.open_context()
+
+    def open_context(self, timezone_id=None, now=FIXTURE_DAY_TIME, **options):
+        """Open a fresh page whose clock reads now, in an optional local zone."""
+        self.context = self.browser.new_context(
+            viewport={"width": 1280, "height": 900},
+            **({"timezone_id": timezone_id} if timezone_id else {}),
+            **options,
+        )
+        self.page = self.context.new_page()
+        self.page.clock.set_fixed_time(now)
         self.page.on(
             "console",
             lambda message: message.type == "error"
@@ -390,6 +411,94 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assert_live()
         expect(self.page.locator("#history-control")).to_be_hidden()
         expect(self.page.locator("#history-notice")).to_be_visible()
+
+    def serve_snapshot(self, pattern, snapshot):
+        self.page.route(
+            pattern,
+            lambda route: route.fulfill(
+                status=200, content_type="application/json", body=json.dumps(snapshot)
+            ),
+        )
+
+    def expect_load_errors(self, count):
+        """Take the expected console errors for rejected snapshots off the list."""
+        rejected = [error for error in self.errors if "snapshot" in error]
+        self.assertEqual(len(rejected), count, self.errors)
+        self.errors = [error for error in self.errors if error not in rejected]
+
+    def test_rejects_unknown_schema_version(self):
+        unknown = copy.deepcopy(self.snapshot)
+        unknown["schema_version"] = 5
+        self.serve_snapshot(re.compile(r"/data/market\.json"), unknown)
+        self.page.goto(self.base_url)
+        state = self.page.locator("#data-state")
+        expect(state).to_have_class(re.compile(r"\bis-error\b"))
+        expect(state).to_contain_text("Data unavailable")
+        expect(self.page.locator("#contract-rows")).to_contain_text("could not be loaded")
+        self.expect_load_errors(1)
+
+    def test_rejects_archived_day_with_bad_schema(self):
+        day = max(HISTORY_FIXTURE)
+        unknown = copy.deepcopy(self.history[day])
+        unknown["schema_version"] = 3
+        missing = copy.deepcopy(self.history[day])
+        del missing["markets"]["EURTRY"]["contracts"][0]["days_to_maturity"]
+        # The newest matching route wins, so each subtest serves its own file.
+        for name, snapshot in (("schema_version", unknown), ("days", missing)):
+            with self.subTest(broken=name):
+                self.serve_snapshot(re.compile(rf"/data/history/{day}\.json"), snapshot)
+                self.open_dashboard(f"?date={day}")
+                self.assert_live()
+                self.assert_market(self.snapshot["default_market"])
+                expect(self.page.locator("#history-notice")).to_contain_text(
+                    "could not be loaded"
+                )
+        self.expect_load_errors(2)
+
+    def test_snapshot_markup_renders_as_text(self):
+        # Bypasses the updater's schema check, which rejects such a snapshot.
+        markup = '<img src=x onerror="window.__xss=1">'
+        hostile = copy.deepcopy(self.snapshot)
+        usd = hostile["markets"]["USDTRY"]
+        usd["pair"] += markup
+        usd["spot_unit"] += markup
+        front = usd["contracts"][0]
+        front["label"] += markup
+        front["code"] += markup
+        # The comparison day lists no USD/TRY, so the legend names the pair.
+        day = "2026-09-30"
+        past = copy.deepcopy(self.history[day])
+        del past["markets"]["USDTRY"]
+        past["market_order"].remove("USDTRY")
+        self.serve_snapshot(re.compile(r"/data/market\.json"), hostile)
+        self.serve_snapshot(re.compile(rf"/data/history/{day}\.json"), past)
+        self.open_dashboard("?market=USDTRY")
+
+        page = self.page
+        for rows in ("#contract-rows", "#carry-rows"):
+            with self.subTest(rows=rows):
+                first = page.locator(f"{rows} > tr").first
+                expect(first.locator("strong")).to_have_text(front["label"])
+                expect(first.locator("small")).to_contain_text(front["code"])
+
+        tooltips = (("#curve-chart", "#chart-tooltip", "chartPoints"),
+                    ("#yield-chart", "#yield-tooltip", "yieldChartPoints"))
+        for canvas, tooltip, kind in tooltips:
+            with self.subTest(tooltip=tooltip):
+                self.hover(canvas, self.chart_points(kind)[0])
+                expect(page.locator(f"{tooltip} strong")).to_have_text(front["label"])
+        expect(page.locator("#chart-tooltip")).to_contain_text(usd["spot_unit"])
+
+        self.compare_select().select_option(day)
+        expect(page.locator("#curve-legend")).to_contain_text(f"no {usd['pair']} data")
+        expect(page.locator("#yield-legend")).to_contain_text(f"no {usd['pair']} data")
+
+        containers = ("#contract-rows", "#carry-rows", "#chart-tooltip",
+                      "#yield-tooltip", "#curve-legend", "#yield-legend")
+        for container in containers:
+            with self.subTest(container=container):
+                expect(page.locator(f"{container} img")).to_have_count(0)
+        self.assertIsNone(page.evaluate("() => window.__xss"))
 
     # Comparison overlay
 
@@ -616,6 +725,226 @@ class DashboardSmokeTests(unittest.TestCase):
         expect(self.page.locator("#curve-legend")).to_be_hidden()
         self.assertNotIn("compare=", self.page.url)
         self.assert_market(self.snapshot["default_market"])
+
+    # Days left on a later Istanbul day than the live snapshot's
+
+    def reopen_at(self, now, timezone_id=None, **options):
+        """Replace the page with one whose clock reads now."""
+        self.context.close()
+        self.open_context(timezone_id, now, **options)
+
+    def column(self, rows, label):
+        return [
+            text.strip()
+            for text in self.page.locator(f'{rows} td[data-label="{label}"]').all_inner_texts()
+        ]
+
+    def number(self, text):
+        return float(text.replace(",", "").replace("%", ""))
+
+    def expected_days(self, market, today):
+        """Each contract's calendar days left from today, as the updater counts them."""
+        return [
+            (date.fromisoformat(contract["maturity_date"]) - today).days
+            for contract in market["contracts"]
+        ]
+
+    def assert_note(self, adjusted_to):
+        note = self.page.locator("#days-note")
+        if adjusted_to:
+            expect(note).to_be_visible()
+            expect(note).to_have_text(
+                f"Days left and yields adjusted to {adjusted_to}; "
+                f"prices are from the {LIVE_LABEL} snapshot."
+            )
+        else:
+            expect(note).to_be_hidden()
+
+    def assert_days(self, key, days):
+        """The table, tooltips and curve horizon show these days left for market key."""
+        market = self.snapshot["markets"][key]
+        self.assertEqual(self.column("#contract-rows", "Days left"), [str(d) for d in days])
+        if isinstance(market.get("contract_size"), (int, float)):
+            self.assertEqual(self.column("#carry-rows", "Days left"), [str(d) for d in days])
+        priced = [d for d, c in zip(days, market["contracts"]) if c.get("last") is not None]
+        expect(self.page.locator("#curve-horizon")).to_have_text(f"{priced[-1]} days")
+        self.hover_label("#curve-chart", market["contracts"][-1]["label"])
+        expect(self.page.locator("#chart-tooltip")).to_contain_text(f"{days[-1]} days left")
+        self.hover_label("#yield-chart", market["contracts"][-1]["label"], "yieldChartPoints")
+        expect(self.page.locator("#yield-tooltip")).to_contain_text(f"{days[-1]} days left")
+
+    def test_fixture_day_keeps_stored_values(self):
+        self.open_dashboard("?market=USDTRY")
+        self.assert_note(None)
+        market = self.snapshot["markets"]["USDTRY"]
+        self.assert_days("USDTRY", [c["days_to_maturity"] for c in market["contracts"]])
+        for label, field, _, digits in YIELD_COLUMNS:
+            with self.subTest(column=label):
+                for text, contract in zip(self.column("#contract-rows", label), market["contracts"]):
+                    self.assertAlmostEqual(self.number(text), contract[field], delta=10 ** -digits)
+
+    def test_next_istanbul_day_recomputes_days_and_yields(self):
+        self.reopen_at(NEXT_DAY_TIME)
+        today = date(2026, 10, 8)
+        for key in self.snapshot["market_order"]:
+            with self.subTest(market=key):
+                market = self.snapshot["markets"][key]
+                self.open_dashboard(f"?market={key}")
+                self.assert_note("08 Oct 2026")
+                self.assert_market(key)
+                days = self.expected_days(market, today)
+                self.assertEqual(days, [c["days_to_maturity"] - 1 for c in market["contracts"]])
+                self.assert_days(key, days)
+
+                spot = market["spot"]["last"]
+                factors = [
+                    (c["last"] / spot) ** (1 / d) if c.get("last") else None
+                    for c, d in zip(market["contracts"], days)
+                ]
+                for label, _, period, digits in YIELD_COLUMNS:
+                    cells = self.column("#contract-rows", label)
+                    for text, factor in zip(cells, factors):
+                        self.assertAlmostEqual(
+                            self.number(text), (factor ** period - 1) * 100, delta=10 ** -digits,
+                        )
+                # The yield curve plots the same recomputed daily yields.
+                plotted = [p["current"] for p in self.chart_points("yieldChartPoints")]
+                for value, factor in zip(plotted, [f for f in factors if f]):
+                    self.assertAlmostEqual(value, (factor - 1) * 100, places=9)
+
+                if isinstance(market.get("contract_size"), (int, float)):
+                    trend = market["spot_trend"]["daily_factor"]
+                    expected = [spot * trend ** d for d in days]
+                    spots = self.column("#carry-rows", "Exp. spot at maturity")
+                    profits = self.column("#carry-rows", "Exp. profit · TRY")
+                    for contract, value, spot_text, profit_text in zip(
+                        market["contracts"], expected, spots, profits,
+                    ):
+                        self.assertAlmostEqual(self.number(spot_text), value, delta=1e-4)
+                        if contract.get("bid") is None:
+                            self.assertEqual(profit_text, "—")
+                        else:
+                            self.assertAlmostEqual(
+                                self.number(profit_text),
+                                (contract["bid"] - value) * market["contract_size"],
+                                delta=1,
+                            )
+                        # A day closer to maturity, the projection grows less.
+                        self.assertLess(value, contract["expected_spot_at_maturity"])
+
+    def test_contract_maturing_today_shows_zero_days_and_no_yield(self):
+        self.reopen_at(datetime.fromisoformat("2026-10-30T12:00:00+03:00"))
+        self.open_dashboard("?market=USDTRY")
+        self.assert_note("30 Oct 2026")
+        first = self.page.locator("#contract-rows > tr").first
+        expect(first.locator("strong")).to_have_text("Oct 2026")
+        self.assertEqual(self.column("#contract-rows", "Days left")[0], "0")
+        for label, *_ in YIELD_COLUMNS:
+            self.assertEqual(self.column("#contract-rows", label)[0], "—")
+        labels = [p["label"] for p in self.chart_points("yieldChartPoints")]
+        self.assertNotIn("Oct 2026", labels)
+
+    def test_matured_contracts_are_dropped(self):
+        self.reopen_at(datetime.fromisoformat("2026-10-31T12:00:00+03:00"))
+        for key in self.snapshot["market_order"]:
+            with self.subTest(market=key):
+                self.open_dashboard(f"?market={key}")
+                self.assert_note("31 Oct 2026")
+                live = [c["label"] for c in self.snapshot["markets"][key]["contracts"]]
+                self.assertEqual(live[0], "Oct 2026")
+                rows = self.page.locator("#contract-rows strong")
+                expect(rows).to_have_text(live[1:])
+                for kind in ("chartPoints", "yieldChartPoints"):
+                    self.assertEqual([p["label"] for p in self.chart_points(kind)], live[1:])
+                expect(self.page.locator(f'[data-market-count="{key}"]')).to_have_text(
+                    f"{len(live) - 1} maturities"
+                )
+
+    def test_market_left_without_prices_clears_its_charts(self):
+        # Only Oct 2026 has a gold price, and it matures before the clock's day.
+        snapshot = copy.deepcopy(self.snapshot)
+        for contract in snapshot["markets"]["XAUTRY"]["contracts"][1:]:
+            contract["last"] = None
+        # A pixel ratio below 1, as at reduced zoom, must still clear the whole canvas.
+        self.reopen_at(
+            datetime.fromisoformat("2026-10-31T12:00:00+03:00"), device_scale_factor=0.5,
+        )
+        self.serve_snapshot(re.compile(r"/data/market\.json"), snapshot)
+        self.open_dashboard("?market=USDTRY")
+        self.page.locator('.market-options [data-market="XAUTRY"]').click()
+        expect(self.page.locator("#contract-rows > tr")).to_have_count(2)
+        self.assertEqual(self.chart_points(), [])
+        self.assertEqual(self.chart_points("yieldChartPoints"), [])
+        expect(self.page.locator("#curve-summary")).to_have_text(
+            "2 listed maturities. None has a price to plot."
+        )
+        expect(self.page.locator("#yield-summary")).to_have_text(
+            "No maturity has a yield to plot."
+        )
+        expect(self.page.locator("#yield-front-value")).to_have_text("—")
+        for canvas in ("#curve-chart", "#yield-chart"):
+            expect(self.page.locator(canvas)).to_have_attribute(
+                "aria-label", re.compile("XAU/TRY.*no "),
+            )
+            blank = self.page.evaluate(
+                f"""() => {{
+                    const canvas = document.querySelector("{canvas}");
+                    const pixels = canvas.getContext("2d")
+                        .getImageData(0, 0, canvas.width, canvas.height).data;
+                    return pixels.every((value) => value === 0);
+                }}"""
+            )
+            self.assertTrue(blank, f"{canvas} still shows the previous market")
+
+    def test_day_boundary_uses_istanbul_time(self):
+        market = self.snapshot["markets"]["USDTRY"]
+        stored = [c["days_to_maturity"] for c in market["contracts"]]
+        # 20:30 UTC is 23:30 in Istanbul but already 8 Oct in Kiritimati;
+        # 21:30 UTC is 00:30 on 8 Oct in Istanbul but still 7 Oct in Los Angeles.
+        for now, zone, note, days in (
+            ("2026-10-07T20:30:00+00:00", "Pacific/Kiritimati", None, stored),
+            ("2026-10-07T21:30:00+00:00", "America/Los_Angeles", "08 Oct 2026",
+             [d - 1 for d in stored]),
+        ):
+            with self.subTest(now=now, zone=zone):
+                self.reopen_at(datetime.fromisoformat(now), zone)
+                self.open_dashboard("?market=USDTRY")
+                self.assert_note(note)
+                self.assertEqual(self.column("#contract-rows", "Days left"), [str(d) for d in days])
+
+    def test_archived_and_compared_closes_keep_stored_values(self):
+        self.reopen_at(NEXT_DAY_TIME)
+        day = "2026-10-06"
+        archived = self.history[day]["markets"]["USDTRY"]
+        self.open_day(day, "&market=USDTRY")
+        self.assert_note(None)
+        self.assertEqual(
+            self.column("#contract-rows", "Days left"),
+            [str(c["days_to_maturity"]) for c in archived["contracts"]],
+        )
+        for text, contract in zip(
+            self.column("#contract-rows", "Daily yield · 1D"), archived["contracts"],
+        ):
+            self.assertAlmostEqual(self.number(text), contract["daily_yield_percent"], delta=1e-4)
+
+        # Live is adjusted to 8 Oct, but the comparison keeps the 30 Sep values.
+        compared = "2026-09-30"
+        self.open_dashboard(f"?compare={compared}&market=USDTRY")
+        self.assert_comparing(compared)
+        self.assert_note("08 Oct 2026")
+        past = {
+            c["label"]: c["daily_yield_percent"]
+            for c in self.history[compared]["markets"]["USDTRY"]["contracts"]
+        }
+        live = self.snapshot["markets"]["USDTRY"]
+        for point in self.chart_points("yieldChartPoints"):
+            self.assertAlmostEqual(point["compare"], past[point["label"]], places=9)
+        front = live["contracts"][0]
+        self.assertAlmostEqual(
+            self.chart_points("yieldChartPoints")[0]["current"],
+            ((front["last"] / live["spot"]["last"]) ** (1 / 22) - 1) * 100,
+            places=9,
+        )
 
 
 if __name__ == "__main__":

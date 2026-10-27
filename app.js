@@ -1,4 +1,6 @@
 const DATA_URL = "data/market.json";
+// The snapshot schema this dashboard renders; see scripts/snapshot_schema.py.
+const SNAPSHOT_SCHEMA_VERSION = 4;
 const HISTORY_URL = "data/history";
 const HISTORY_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const ISTANBUL_TIMEZONE = "Europe/Istanbul";
@@ -16,6 +18,7 @@ const elements = {
   historyBanner: document.querySelector("#history-banner"),
   historyBannerDate: document.querySelector("#history-banner-date"),
   historyNotice: document.querySelector("#history-notice"),
+  daysNote: document.querySelector("#days-note"),
   liveButton: document.querySelector("#live-button"),
   compareControl: document.querySelector("#compare-control"),
   compareSelect: document.querySelector("#compare-select"),
@@ -84,6 +87,8 @@ const state = {
   compareRequestId: 0,
   // The view date the compare options were last built for.
   compareReference: null,
+  // The Istanbul day the live snapshot's days left were moved to, or null.
+  adjustedDay: null,
 };
 
 // Quick comparison picks: the archived close nearest each target, if one is
@@ -153,6 +158,18 @@ const dateTimeFormat = new Intl.DateTimeFormat("en-GB", {
 
 function hasNumber(value) {
   return typeof value === "number" && Number.isFinite(value);
+}
+
+// Snapshot strings come from upstream market data, so any of them that goes
+// into an HTML template is escaped first.
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  })[char]);
 }
 
 function signedClass(value) {
@@ -247,6 +264,82 @@ function daysBetween(first, second) {
   return Math.abs(Date.parse(`${first}T00:00:00Z`) - Date.parse(`${second}T00:00:00Z`)) / 86_400_000;
 }
 
+// Calendar days from one ISO date to a later one; negative if it is earlier.
+function daysUntil(from, to) {
+  return Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000);
+}
+
+const istanbulDayFormat = new Intl.DateTimeFormat("en-US", {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  timeZone: ISTANBUL_TIMEZONE,
+});
+
+// Today's date in Istanbul as YYYY-MM-DD, whatever the browser's own zone.
+function istanbulToday(now = new Date()) {
+  const parts = Object.fromEntries(
+    istanbulDayFormat.formatToParts(now).map(({ type, value }) => [type, value]),
+  );
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+// The updater's yield and carry rules, from scripts/update_data.py.
+function dailyYieldFactor(last, spot, days) {
+  if (!hasNumber(last) || !hasNumber(spot) || last <= 0 || spot <= 0 || days <= 0) return null;
+  return Math.pow(last / spot, 1 / days);
+}
+
+function compoundedYieldPercent(factor, periodDays) {
+  return hasNumber(factor) && factor > 0 ? (Math.pow(factor, periodDays) - 1) * 100 : null;
+}
+
+function projectedSpot(spot, dailyFactor, days) {
+  return hasNumber(spot) && hasNumber(dailyFactor) && days >= 0
+    ? spot * Math.pow(dailyFactor, days)
+    : null;
+}
+
+// The live snapshot's days left, and everything built on them, are fixed for
+// its market date. Once Istanbul has moved on to a later day, return a copy
+// with those terms recomputed for today and expired contracts dropped, as the
+// updater would. Prices, premiums and the spot trend stay as published.
+function rollSnapshotForward(snapshot, today) {
+  if (!(snapshot.market_date < today)) return snapshot;
+  const rolled = structuredClone(snapshot);
+  Object.values(rolled.markets).forEach((market) => {
+    const spot = market.spot?.last;
+    const trendFactor = market.spot_trend?.daily_factor;
+    market.contracts = market.contracts
+      .map((contract) => {
+        const days = daysUntil(today, contract.maturity_date);
+        const factor = dailyYieldFactor(contract.last, spot, days);
+        const expectedSpot = hasNumber(market.contract_size)
+          ? projectedSpot(spot, trendFactor, days)
+          : null;
+        return {
+          ...contract,
+          days_to_maturity: days,
+          annualized_premium_percent:
+            hasNumber(contract.premium_percent) && days > 0
+              ? contract.premium_percent * 365 / days
+              : null,
+          daily_yield_factor: factor,
+          daily_yield_percent: compoundedYieldPercent(factor, 1),
+          monthly_yield_percent: compoundedYieldPercent(factor, 30),
+          annualized_yield_percent: compoundedYieldPercent(factor, 365),
+          expected_spot_at_maturity: expectedSpot,
+          expected_short_profit_try:
+            hasNumber(contract.bid) && hasNumber(expectedSpot)
+              ? (contract.bid - expectedSpot) * market.contract_size
+              : null,
+        };
+      })
+      .filter((contract) => contract.days_to_maturity >= 0);
+  });
+  return rolled;
+}
+
 function setStatus(className, text) {
   elements.dataState.classList.remove("is-fresh", "is-delayed", "is-error", "is-historical");
   elements.dataState.classList.add(className);
@@ -329,6 +422,9 @@ function renderStats(data) {
     elements.curveSummary.textContent =
       `${data.contracts.length} listed maturities. The curve ${direction} from ` +
       `${formatPrice(front.last)} to ${formatPrice(final.last)} ${data.spot_unit}.`;
+  } else {
+    elements.curveSummary.textContent =
+      `${data.contracts.length} listed maturities. None has a price to plot.`;
   }
 }
 
@@ -356,8 +452,8 @@ function renderRows(contracts) {
       <tr>
         <td data-label="Contract">
           <span class="contract-name">
-            <strong>${contract.label}</strong>
-            <small>${contract.code}${index === 0 ? " · FRONT" : ""}${unavailable}</small>
+            <strong>${escapeHtml(contract.label)}</strong>
+            <small>${escapeHtml(contract.code)}${index === 0 ? " · FRONT" : ""}${unavailable}</small>
           </span>
         </td>
         <td class="numeric" data-label="Last"><span class="last-price">${formatPrice(contract.last)}</span></td>
@@ -367,7 +463,7 @@ function renderRows(contracts) {
         <td class="numeric" data-label="Bid / Ask"><span class="cell-subtle">${spread}</span></td>
         <td data-label="Maturity">${maturity}</td>
         <td class="numeric" data-label="Days left">
-          <span class="days-badge ${nearClass}">${contract.days_to_maturity}</span>
+          <span class="days-badge ${nearClass}">${escapeHtml(contract.days_to_maturity)}</span>
         </td>
         <td class="numeric ${premiumClass}" data-label="vs. spot">${formatPercent(contract.premium_percent)}</td>
         <td class="numeric yield-table-value ${signedClass(dailyYield)}" data-label="Daily yield · 1D">
@@ -447,13 +543,13 @@ function renderCarry(data) {
       <tr>
         <td data-label="Contract">
           <span class="contract-name">
-            <strong>${contract.label}</strong>
-            <small>${contract.code}${bidNote}</small>
+            <strong>${escapeHtml(contract.label)}</strong>
+            <small>${escapeHtml(contract.code)}${bidNote}</small>
           </span>
         </td>
         <td class="numeric" data-label="Bid"><span class="last-price">${formatPrice(contract.bid)}</span></td>
         <td class="numeric" data-label="Days left">
-          <span class="days-badge ${nearClass}">${contract.days_to_maturity}</span>
+          <span class="days-badge ${nearClass}">${escapeHtml(contract.days_to_maturity)}</span>
         </td>
         <td class="numeric" data-label="Exp. spot at maturity">
           ${formatPrice(contract.expected_spot_at_maturity)}
@@ -495,6 +591,15 @@ function alignSeries(current, compare) {
   return compare.length
     ? aligned.sort((first, second) => first.key.localeCompare(second.key))
     : aligned;
+}
+
+// Blank a chart that has nothing to plot, so the previous view's curve doesn't linger.
+function clearChart(canvas, label) {
+  const context = canvas.getContext("2d");
+  // The last render left the context scaled by the pixel ratio.
+  context.setTransform(1, 0, 0, 1, 0, 0);
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  canvas.setAttribute("aria-label", label);
 }
 
 function tracePath(context, points) {
@@ -553,8 +658,13 @@ function renderChart() {
   const compareMarket = comparisonMarket();
   const slots = alignSeries(current, compareMarket ? pricePoints(compareMarket.contracts) : []);
   const canvas = elements.canvas;
+  if (current.length < 1) {
+    state.chartPoints = [];
+    clearChart(canvas, `${state.data.pair} futures price curve: no priced maturities.`);
+    return;
+  }
   const bounds = canvas.getBoundingClientRect();
-  if (!bounds.width || !bounds.height || current.length < 1) return;
+  if (!bounds.width || !bounds.height) return;
 
   const ratio = Math.min(window.devicePixelRatio || 1, 2);
   canvas.width = Math.round(bounds.width * ratio);
@@ -662,8 +772,19 @@ function renderYieldChart() {
   const compareMarket = comparisonMarket();
   const slots = alignSeries(contracts, compareMarket ? yieldPoints(compareMarket) : []);
   const canvas = elements.yieldCanvas;
+  if (contracts.length < 1) {
+    state.yieldChartPoints = [];
+    clearChart(canvas, `${state.data.pair} futures net yield: no maturities with a yield.`);
+    elements.yieldPeriodLabel.textContent = `${settings.label} · ${settings.shortLabel}`;
+    [elements.yieldFrontValue, elements.yieldAverageValue].forEach((element) => {
+      element.textContent = "—";
+      element.className = "";
+    });
+    elements.yieldSummary.textContent = "No maturity has a yield to plot.";
+    return;
+  }
   const bounds = canvas.getBoundingClientRect();
-  if (!bounds.width || !bounds.height || contracts.length < 1) {
+  if (!bounds.width || !bounds.height) {
     state.yieldChartPoints = [];
     return;
   }
@@ -863,17 +984,37 @@ function renderSnapshot(snapshot) {
   elements.updatedAt.textContent =
     `${dateTimeFormat.format(new Date(snapshot.generated_at))} TRT`;
   updateStatus(snapshot.generated_at);
+  renderDaysNote(snapshot);
+}
+
+// Days left that no longer match the snapshot's own date are never silent.
+function renderDaysNote(snapshot) {
+  elements.daysNote.hidden = !state.adjustedDay;
+  elements.daysNote.textContent = state.adjustedDay
+    ? `Days left and yields adjusted to ${formatDay(state.adjustedDay)}; ` +
+      `prices are from the ${formatDay(snapshot.market_date)} snapshot.`
+    : "";
 }
 
 async function fetchSnapshot(url, options) {
   const response = await fetch(url, options);
   if (!response.ok) throw new Error(`Market snapshot returned ${response.status}`);
   const data = await response.json();
+  // A light mirror of the updater's schema check, so a bad live or archived
+  // file shows the load error instead of a broken render.
+  if (data?.schema_version !== SNAPSHOT_SCHEMA_VERSION) {
+    throw new Error(`Unsupported snapshot schema version ${data?.schema_version}`);
+  }
   const marketsAreValid =
     data.markets &&
     Array.isArray(data.market_order) &&
     data.market_order.every((key) =>
-      data.markets[key]?.spot && Array.isArray(data.markets[key]?.contracts)
+      data.markets[key]?.spot &&
+      Array.isArray(data.markets[key]?.contracts) &&
+      data.markets[key].contracts.every((contract) =>
+        typeof contract?.maturity_date === "string" &&
+        Number.isInteger(contract.days_to_maturity)
+      )
     );
   if (!marketsAreValid) throw new Error("Invalid multi-market snapshot");
   return data;
@@ -976,7 +1117,7 @@ function renderComparisonLegends() {
   if (!shown) return;
 
   const current = `${state.renderedDate ? "Close" : "Live"} · ${formatDay(referenceDate())}`;
-  const missing = comparisonMarket() ? "" : ` · no ${state.data.pair} data`;
+  const missing = comparisonMarket() ? "" : ` · no ${escapeHtml(state.data.pair)} data`;
   const html =
     `<li><span class="legend-swatch is-current" aria-hidden="true"></span>` +
     `${current} <small>solid</small></li>` +
@@ -1072,8 +1213,12 @@ async function loadView(date) {
       ? await fetchSnapshot(`${HISTORY_URL}/${date}.json`)
       : await fetchSnapshot(`${DATA_URL}?v=${Date.now()}`, { cache: "no-store" });
     if (request !== state.requestId) return;
+    // Only the live view moves on with the calendar; a past close is its own day.
+    const today = istanbulToday();
+    const shown = date ? data : rollSnapshotForward(data, today);
     state.renderedDate = date;
-    renderSnapshot(data);
+    state.adjustedDay = shown === data ? null : today;
+    renderSnapshot(shown);
   } catch (error) {
     if (request !== state.requestId) return;
     console.error(error);
@@ -1162,9 +1307,9 @@ function comparisonTooltip(point, format, formatDelta) {
     : "Δ —";
   const contract = (point.current ?? point.compare).contract;
   const daysLeft = point.current
-    ? `${contract.days_to_maturity} days left`
+    ? `${escapeHtml(contract.days_to_maturity)} days left`
     : "Not listed on the viewed day";
-  return `<strong>${point.label}</strong>` +
+  return `<strong>${escapeHtml(point.label)}</strong>` +
     `${formatDay(referenceDate())}: ${value("current")}<br>` +
     `${formatDay(state.compareDate)}: ${value("compare")}<br>` +
     `<span class="tooltip-delta">${delta}</span><br>${daysLeft}`;
@@ -1196,11 +1341,11 @@ elements.canvas.addEventListener("pointermove", (event) => {
     ? comparisonTooltip(
       nearest,
       formatPrice,
-      (delta) => `${formatSignedPrice(delta)} ${state.data.spot_unit}`,
+      (delta) => `${formatSignedPrice(delta)} ${escapeHtml(state.data.spot_unit)}`,
     )
-    : `<strong>${nearest.label}</strong>` +
-      `${formatPrice(nearest.current.value)} · ${state.data.spot_unit}<br>` +
-      `${nearest.current.contract.days_to_maturity} days left`;
+    : `<strong>${escapeHtml(nearest.label)}</strong>` +
+      `${formatPrice(nearest.current.value)} · ${escapeHtml(state.data.spot_unit)}<br>` +
+      `${escapeHtml(nearest.current.contract.days_to_maturity)} days left`;
   placeTooltip(elements.tooltip, nearest, bounds, 45);
 });
 
@@ -1229,9 +1374,9 @@ elements.yieldCanvas.addEventListener("pointermove", (event) => {
       (value) => `${formatYield(value)} ${settings.shortLabel}`,
       (delta) => formatYieldDelta(delta),
     ) + peakNote
-    : `<strong>${nearest.label}</strong>` +
+    : `<strong>${escapeHtml(nearest.label)}</strong>` +
       `${formatYield(nearest.current.value)} ${settings.shortLabel}<br>` +
-      `${nearest.current.contract.days_to_maturity} days left${peakNote}`;
+      `${escapeHtml(nearest.current.contract.days_to_maturity)} days left${peakNote}`;
   placeTooltip(elements.yieldTooltip, nearest, bounds, 60);
 });
 
