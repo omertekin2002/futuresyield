@@ -391,6 +391,49 @@ class DashboardSmokeTests(unittest.TestCase):
         expect(self.page.locator("#history-control")).to_be_hidden()
         expect(self.page.locator("#history-notice")).to_be_visible()
 
+    def serve_snapshot(self, pattern, snapshot):
+        self.page.route(
+            pattern,
+            lambda route: route.fulfill(
+                status=200, content_type="application/json", body=json.dumps(snapshot)
+            ),
+        )
+
+    def expect_load_errors(self, count):
+        """Take the expected console errors for rejected snapshots off the list."""
+        rejected = [error for error in self.errors if "snapshot" in error]
+        self.assertEqual(len(rejected), count, self.errors)
+        self.errors = [error for error in self.errors if error not in rejected]
+
+    def test_rejects_unknown_schema_version(self):
+        unknown = copy.deepcopy(self.snapshot)
+        unknown["schema_version"] = 5
+        self.serve_snapshot(re.compile(r"/data/market\.json"), unknown)
+        self.page.goto(self.base_url)
+        state = self.page.locator("#data-state")
+        expect(state).to_have_class(re.compile(r"\bis-error\b"))
+        expect(state).to_contain_text("Data unavailable")
+        expect(self.page.locator("#contract-rows")).to_contain_text("could not be loaded")
+        self.expect_load_errors(1)
+
+    def test_rejects_archived_day_with_bad_schema(self):
+        day = max(HISTORY_FIXTURE)
+        unknown = copy.deepcopy(self.history[day])
+        unknown["schema_version"] = 3
+        missing = copy.deepcopy(self.history[day])
+        del missing["markets"]["EURTRY"]["contracts"][0]["days_to_maturity"]
+        # The newest matching route wins, so each subtest serves its own file.
+        for name, snapshot in (("schema_version", unknown), ("days", missing)):
+            with self.subTest(broken=name):
+                self.serve_snapshot(re.compile(rf"/data/history/{day}\.json"), snapshot)
+                self.open_dashboard(f"?date={day}")
+                self.assert_live()
+                self.assert_market(self.snapshot["default_market"])
+                expect(self.page.locator("#history-notice")).to_contain_text(
+                    "could not be loaded"
+                )
+        self.expect_load_errors(2)
+
     # Comparison overlay
 
     def compare_select(self):

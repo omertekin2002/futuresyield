@@ -1,4 +1,6 @@
 const DATA_URL = "data/market.json";
+// The snapshot schema this dashboard renders; see scripts/snapshot_schema.py.
+const SNAPSHOT_SCHEMA_VERSION = 4;
 const HISTORY_URL = "data/history";
 const HISTORY_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const ISTANBUL_TIMEZONE = "Europe/Istanbul";
@@ -869,11 +871,21 @@ async function fetchSnapshot(url, options) {
   const response = await fetch(url, options);
   if (!response.ok) throw new Error(`Market snapshot returned ${response.status}`);
   const data = await response.json();
+  // A light mirror of the updater's schema check, so a bad live or archived
+  // file shows the load error instead of a broken render.
+  if (data?.schema_version !== SNAPSHOT_SCHEMA_VERSION) {
+    throw new Error(`Unsupported snapshot schema version ${data?.schema_version}`);
+  }
   const marketsAreValid =
     data.markets &&
     Array.isArray(data.market_order) &&
     data.market_order.every((key) =>
-      data.markets[key]?.spot && Array.isArray(data.markets[key]?.contracts)
+      data.markets[key]?.spot &&
+      Array.isArray(data.markets[key]?.contracts) &&
+      data.markets[key].contracts.every((contract) =>
+        typeof contract?.maturity_date === "string" &&
+        Number.isInteger(contract.days_to_maturity)
+      )
     );
   if (!marketsAreValid) throw new Error("Invalid multi-market snapshot");
   return data;

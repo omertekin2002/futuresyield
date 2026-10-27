@@ -21,8 +21,10 @@ import borsapy as bp
 
 if __package__:
     from .market_calendar import ISTANBUL, market_closures
+    from .snapshot_schema import validate_snapshot
 else:  # run as `python scripts/update_data.py`
     from market_calendar import ISTANBUL, market_closures
+    from snapshot_schema import validate_snapshot
 
 
 TROY_OUNCE_GRAMS = 31.1034768
@@ -729,6 +731,8 @@ def main() -> None:
     for attempt in range(1, args.attempts + 1):
         try:
             snapshot = build_snapshot()
+            # An invalid snapshot is a failed attempt, so it is never published.
+            validate_snapshot(snapshot)
             write_snapshot(snapshot, args.output)
             availability = ", ".join(
                 f"{key} "

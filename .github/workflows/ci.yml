@@ -50,6 +50,9 @@ jobs:
       - name: Check market snapshot parses
         run: python3 -m json.tool data/market.json > /dev/null
 
+      - name: Validate market snapshots against the schema
+        run: python3 -m scripts.snapshot_schema data/market.json tests/fixtures/market.json
+
       - name: Assemble static site
         run: bash scripts/build_site.sh
 
