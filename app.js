@@ -157,6 +157,18 @@ function hasNumber(value) {
   return typeof value === "number" && Number.isFinite(value);
 }
 
+// Snapshot strings come from upstream market data, so any of them that goes
+// into an HTML template is escaped first.
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  })[char]);
+}
+
 function signedClass(value) {
   if (!hasNumber(value) || value === 0) return "";
   return value > 0 ? "positive" : "negative";
@@ -358,8 +370,8 @@ function renderRows(contracts) {
       <tr>
         <td data-label="Contract">
           <span class="contract-name">
-            <strong>${contract.label}</strong>
-            <small>${contract.code}${index === 0 ? " · FRONT" : ""}${unavailable}</small>
+            <strong>${escapeHtml(contract.label)}</strong>
+            <small>${escapeHtml(contract.code)}${index === 0 ? " · FRONT" : ""}${unavailable}</small>
           </span>
         </td>
         <td class="numeric" data-label="Last"><span class="last-price">${formatPrice(contract.last)}</span></td>
@@ -369,7 +381,7 @@ function renderRows(contracts) {
         <td class="numeric" data-label="Bid / Ask"><span class="cell-subtle">${spread}</span></td>
         <td data-label="Maturity">${maturity}</td>
         <td class="numeric" data-label="Days left">
-          <span class="days-badge ${nearClass}">${contract.days_to_maturity}</span>
+          <span class="days-badge ${nearClass}">${escapeHtml(contract.days_to_maturity)}</span>
         </td>
         <td class="numeric ${premiumClass}" data-label="vs. spot">${formatPercent(contract.premium_percent)}</td>
         <td class="numeric yield-table-value ${signedClass(dailyYield)}" data-label="Daily yield · 1D">
@@ -449,13 +461,13 @@ function renderCarry(data) {
       <tr>
         <td data-label="Contract">
           <span class="contract-name">
-            <strong>${contract.label}</strong>
-            <small>${contract.code}${bidNote}</small>
+            <strong>${escapeHtml(contract.label)}</strong>
+            <small>${escapeHtml(contract.code)}${bidNote}</small>
           </span>
         </td>
         <td class="numeric" data-label="Bid"><span class="last-price">${formatPrice(contract.bid)}</span></td>
         <td class="numeric" data-label="Days left">
-          <span class="days-badge ${nearClass}">${contract.days_to_maturity}</span>
+          <span class="days-badge ${nearClass}">${escapeHtml(contract.days_to_maturity)}</span>
         </td>
         <td class="numeric" data-label="Exp. spot at maturity">
           ${formatPrice(contract.expected_spot_at_maturity)}
@@ -988,7 +1000,7 @@ function renderComparisonLegends() {
   if (!shown) return;
 
   const current = `${state.renderedDate ? "Close" : "Live"} · ${formatDay(referenceDate())}`;
-  const missing = comparisonMarket() ? "" : ` · no ${state.data.pair} data`;
+  const missing = comparisonMarket() ? "" : ` · no ${escapeHtml(state.data.pair)} data`;
   const html =
     `<li><span class="legend-swatch is-current" aria-hidden="true"></span>` +
     `${current} <small>solid</small></li>` +
@@ -1174,9 +1186,9 @@ function comparisonTooltip(point, format, formatDelta) {
     : "Δ —";
   const contract = (point.current ?? point.compare).contract;
   const daysLeft = point.current
-    ? `${contract.days_to_maturity} days left`
+    ? `${escapeHtml(contract.days_to_maturity)} days left`
     : "Not listed on the viewed day";
-  return `<strong>${point.label}</strong>` +
+  return `<strong>${escapeHtml(point.label)}</strong>` +
     `${formatDay(referenceDate())}: ${value("current")}<br>` +
     `${formatDay(state.compareDate)}: ${value("compare")}<br>` +
     `<span class="tooltip-delta">${delta}</span><br>${daysLeft}`;
@@ -1208,11 +1220,11 @@ elements.canvas.addEventListener("pointermove", (event) => {
     ? comparisonTooltip(
       nearest,
       formatPrice,
-      (delta) => `${formatSignedPrice(delta)} ${state.data.spot_unit}`,
+      (delta) => `${formatSignedPrice(delta)} ${escapeHtml(state.data.spot_unit)}`,
     )
-    : `<strong>${nearest.label}</strong>` +
-      `${formatPrice(nearest.current.value)} · ${state.data.spot_unit}<br>` +
-      `${nearest.current.contract.days_to_maturity} days left`;
+    : `<strong>${escapeHtml(nearest.label)}</strong>` +
+      `${formatPrice(nearest.current.value)} · ${escapeHtml(state.data.spot_unit)}<br>` +
+      `${escapeHtml(nearest.current.contract.days_to_maturity)} days left`;
   placeTooltip(elements.tooltip, nearest, bounds, 45);
 });
 
@@ -1241,9 +1253,9 @@ elements.yieldCanvas.addEventListener("pointermove", (event) => {
       (value) => `${formatYield(value)} ${settings.shortLabel}`,
       (delta) => formatYieldDelta(delta),
     ) + peakNote
-    : `<strong>${nearest.label}</strong>` +
+    : `<strong>${escapeHtml(nearest.label)}</strong>` +
       `${formatYield(nearest.current.value)} ${settings.shortLabel}<br>` +
-      `${nearest.current.contract.days_to_maturity} days left${peakNote}`;
+      `${escapeHtml(nearest.current.contract.days_to_maturity)} days left${peakNote}`;
   placeTooltip(elements.yieldTooltip, nearest, bounds, 60);
 });
 

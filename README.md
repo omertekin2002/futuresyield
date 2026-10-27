@@ -46,7 +46,10 @@ Every snapshot is checked against an explicit schema before it is written.
 each market's units and spot, and every contract's keys, ISO dates, numeric
 types (finite numbers or null, never strings, NaN or booleans), non-negative
 days to maturity, a `status` that matches `last`, sorted contracts without
-duplicate symbols, and at least one priced contract per market. It lists every
+duplicate symbols, and at least one priced contract per market. The strings
+the dashboard renders must keep the updater's formats: VİOP symbols like
+`USDTRYV2026`, table codes like `F_USDTRY1026`, and labels like `Oct 2026`, so
+markup in upstream data is rejected before it is published. It lists every
 problem it finds by path. A snapshot that fails counts as a failed attempt, so
 it is never published. Check a file by hand with
 `python -m scripts.snapshot_schema data/market.json`.

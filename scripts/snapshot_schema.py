@@ -32,6 +32,15 @@ SPOT_TREND_NUMBERS = (
     "annualized_percent",
 )
 CONTRACT_STRINGS = ("symbol", "code", "label", "source")
+# The dashboard renders these, so they must keep the shapes update_data.py
+# produces: a TradingView symbol (`contract_pattern`), a VİOP table code
+# (`table_code_pattern` with a real month) and a "%b %Y" label. `source` is
+# never rendered and stays free-form.
+CONTRACT_FORMATS = {
+    "symbol": re.compile(r"^[A-Z]{3,10}[FGHJKMNQUVXZ]\d{4}$"),
+    "code": re.compile(r"^F_[A-Z]{3,10}(0[1-9]|1[0-2])\d{2}$"),
+    "label": re.compile(r"^[A-Z][a-z]{2} \d{4}$"),
+}
 CONTRACT_NUMBERS = (
     "last",
     "change",
@@ -119,6 +128,17 @@ class Checker:
         value = obj.get(key)
         if not isinstance(value, str) or not value:
             self.fail(f"{path}.{key}", f"must be a non-empty string, got {value!r}")
+
+    def formatted_string(
+        self, obj: dict[str, Any], key: str, path: str, pattern: re.Pattern[str]
+    ) -> None:
+        value = obj.get(key)
+        if not isinstance(value, str) or not value:
+            self.string(obj, key, path)
+        elif not pattern.fullmatch(value):
+            self.fail(
+                f"{path}.{key}", f"must match {pattern.pattern!r}, got {value!r}"
+            )
 
     def number_or_null(self, obj: dict[str, Any], key: str, path: str) -> None:
         value = obj.get(key)
@@ -246,7 +266,11 @@ class Checker:
             self.fail(f"{path}.{key}", "is missing")
 
         for field in CONTRACT_STRINGS:
-            if field not in missing:
+            if field in missing:
+                continue
+            if field in CONTRACT_FORMATS:
+                self.formatted_string(contract, field, path, CONTRACT_FORMATS[field])
+            else:
                 self.string(contract, field, path)
         for field in CONTRACT_NUMBERS:
             if field not in missing:

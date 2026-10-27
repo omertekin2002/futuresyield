@@ -157,6 +157,41 @@ class InvalidSnapshotTests(unittest.TestCase):
                 self.front["days_to_maturity"] = days
                 self.assert_rejected("markets.USDTRY.contracts[0].days_to_maturity")
 
+    def test_markup_in_rendered_contract_strings(self):
+        markup = '<img src=x onerror="window.__xss=1">'
+        for field in ("symbol", "code", "label"):
+            with self.subTest(field=field):
+                self.setUp()
+                self.front[field] = self.front[field] + markup
+                error = self.assert_rejected(f"markets.USDTRY.contracts[0].{field}")
+                self.assertIn("must match", str(error))
+
+    def test_contract_strings_in_the_wrong_format(self):
+        cases = {
+            "symbol": ("usdtryv2026", "USDTRYA2026", "USDTRYV26", "USDTRYV2026\n"),
+            "code": ("USDTRY1026", "F_USDTRY1326", "F_USDTRY0026", "f_usdtry1026"),
+            "label": ("October 2026", "oct 2026", "Oct 26", "2026-10"),
+        }
+        for field, values in cases.items():
+            for value in values:
+                with self.subTest(field=field, value=value):
+                    self.setUp()
+                    self.front[field] = value
+                    self.assert_rejected(f"markets.USDTRY.contracts[0].{field}")
+
+    def test_source_stays_free_form(self):
+        self.front["source"] = "İş Yatırım via borsapy <table>"
+        validate_snapshot(self.snapshot)
+
+    def test_non_string_contract_strings_are_still_rejected(self):
+        self.front["label"] = ""
+        self.front["code"] = None
+        error = self.assert_rejected(
+            "markets.USDTRY.contracts[0].label",
+            "markets.USDTRY.contracts[0].code",
+        )
+        self.assertIn("non-empty string", str(error))
+
     def test_unsorted_contracts(self):
         contracts = self.usd["contracts"]
         contracts[0], contracts[1] = contracts[1], contracts[0]
@@ -232,6 +267,19 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn(f"{broken}: Invalid market snapshot", result.stdout)
         self.assertIn("schema_version: must be 4, got 5", result.stdout)
+
+    def test_reports_markup_in_a_label_by_path(self):
+        snapshot = load(FIXTURE)
+        snapshot["markets"]["EURTRY"]["contracts"][1]["label"] = "<b>Nov</b> 2026"
+        with tempfile.TemporaryDirectory() as tmp:
+            broken = Path(tmp) / "broken.json"
+            broken.write_text(json.dumps(snapshot), encoding="utf-8")
+            result = self.run_cli(broken)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "markets.EURTRY.contracts[1].label: must match", result.stdout
+        )
+        self.assertIn("'<b>Nov</b> 2026'", result.stdout)
 
 
 if __name__ == "__main__":
