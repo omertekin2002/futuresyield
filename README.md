@@ -59,6 +59,19 @@ The yield curve starts with the gross daily factor
 1-, 30-, or 365-day compounded factor to net percentage yield by subtracting
 one and multiplying by 100.
 
+Days left are counted from the snapshot's market date, and refreshes can land
+hours apart, so the live snapshot can still be from the previous day after
+midnight. When the live snapshot's `market_date` is earlier than today in
+Europe/Istanbul (whatever the browser's own time zone), the dashboard
+recomputes, on a copy, everything that depends on time to maturity: days left,
+the daily factor and the 1D/30D/365D yields, the curve horizon, and the USD/TRY
+expected spot and profit. It uses the updater's rules, so a contract maturing
+today shows 0 days and no yield, and a contract that has matured is dropped.
+Prices, premiums and the spot trend stay as published. A note under the data
+status says so, for example "Days left and yields adjusted to 08 Oct 2026;
+prices are from the 07 Oct 2026 snapshot". Archived closes and comparison
+overlays always keep their stored values, since each describes its own day.
+
 ### USD/TRY short carry
 
 The short-carry section projects spot forward at its recent pace and compares
@@ -212,9 +225,12 @@ python -m unittest tests/e2e/test_dashboard_smoke.py -v
 It builds the site twice, with a small test-only history derived from
 `tests/fixtures/market.json` and without any, swaps in that fixed snapshot,
 serves both on a local port, and checks every market, the history view and the
-comparison overlay in headless Chromium for console errors and the main rendered values. It never touches the network. The
-`discover` command above skips it, so the updater tests still run without a
-browser.
+comparison overlay in headless Chromium for console errors and the main
+rendered values. The browser clock is pinned to the fixture's market date;
+separate cases move it to later Istanbul days and check the recomputed days
+left, yields and carry against hand-computed values. It never touches the
+network. The `discover` command above skips it, so the updater tests still run
+without a browser.
 
 ## Continuous integration
 
