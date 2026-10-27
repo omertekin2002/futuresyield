@@ -422,6 +422,9 @@ function renderStats(data) {
     elements.curveSummary.textContent =
       `${data.contracts.length} listed maturities. The curve ${direction} from ` +
       `${formatPrice(front.last)} to ${formatPrice(final.last)} ${data.spot_unit}.`;
+  } else {
+    elements.curveSummary.textContent =
+      `${data.contracts.length} listed maturities. None has a price to plot.`;
   }
 }
 
@@ -590,6 +593,12 @@ function alignSeries(current, compare) {
     : aligned;
 }
 
+// Blank a chart that has nothing to plot, so the previous view's curve doesn't linger.
+function clearChart(canvas, label) {
+  canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
+  canvas.setAttribute("aria-label", label);
+}
+
 function tracePath(context, points) {
   context.beginPath();
   points.forEach(({ x, y }, index) => {
@@ -646,8 +655,13 @@ function renderChart() {
   const compareMarket = comparisonMarket();
   const slots = alignSeries(current, compareMarket ? pricePoints(compareMarket.contracts) : []);
   const canvas = elements.canvas;
+  if (current.length < 1) {
+    state.chartPoints = [];
+    clearChart(canvas, `${state.data.pair} futures price curve: no priced maturities.`);
+    return;
+  }
   const bounds = canvas.getBoundingClientRect();
-  if (!bounds.width || !bounds.height || current.length < 1) return;
+  if (!bounds.width || !bounds.height) return;
 
   const ratio = Math.min(window.devicePixelRatio || 1, 2);
   canvas.width = Math.round(bounds.width * ratio);
@@ -755,8 +769,19 @@ function renderYieldChart() {
   const compareMarket = comparisonMarket();
   const slots = alignSeries(contracts, compareMarket ? yieldPoints(compareMarket) : []);
   const canvas = elements.yieldCanvas;
+  if (contracts.length < 1) {
+    state.yieldChartPoints = [];
+    clearChart(canvas, `${state.data.pair} futures net yield: no maturities with a yield.`);
+    elements.yieldPeriodLabel.textContent = `${settings.label} · ${settings.shortLabel}`;
+    [elements.yieldFrontValue, elements.yieldAverageValue].forEach((element) => {
+      element.textContent = "—";
+      element.className = "";
+    });
+    elements.yieldSummary.textContent = "No maturity has a yield to plot.";
+    return;
+  }
   const bounds = canvas.getBoundingClientRect();
-  if (!bounds.width || !bounds.height || contracts.length < 1) {
+  if (!bounds.width || !bounds.height) {
     state.yieldChartPoints = [];
     return;
   }

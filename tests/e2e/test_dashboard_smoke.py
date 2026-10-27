@@ -859,6 +859,39 @@ class DashboardSmokeTests(unittest.TestCase):
                     f"{len(live) - 1} maturities"
                 )
 
+    def test_market_left_without_prices_clears_its_charts(self):
+        # Only Oct 2026 has a gold price, and it matures before the clock's day.
+        snapshot = copy.deepcopy(self.snapshot)
+        for contract in snapshot["markets"]["XAUTRY"]["contracts"][1:]:
+            contract["last"] = None
+        self.reopen_at(datetime.fromisoformat("2026-10-31T12:00:00+03:00"))
+        self.serve_snapshot(re.compile(r"/data/market\.json"), snapshot)
+        self.open_dashboard("?market=USDTRY")
+        self.page.locator('.market-options [data-market="XAUTRY"]').click()
+        expect(self.page.locator("#contract-rows > tr")).to_have_count(2)
+        self.assertEqual(self.chart_points(), [])
+        self.assertEqual(self.chart_points("yieldChartPoints"), [])
+        expect(self.page.locator("#curve-summary")).to_have_text(
+            "2 listed maturities. None has a price to plot."
+        )
+        expect(self.page.locator("#yield-summary")).to_have_text(
+            "No maturity has a yield to plot."
+        )
+        expect(self.page.locator("#yield-front-value")).to_have_text("—")
+        for canvas in ("#curve-chart", "#yield-chart"):
+            expect(self.page.locator(canvas)).to_have_attribute(
+                "aria-label", re.compile("XAU/TRY.*no "),
+            )
+            blank = self.page.evaluate(
+                f"""() => {{
+                    const canvas = document.querySelector("{canvas}");
+                    const pixels = canvas.getContext("2d")
+                        .getImageData(0, 0, canvas.width, canvas.height).data;
+                    return pixels.every((value) => value === 0);
+                }}"""
+            )
+            self.assertTrue(blank, f"{canvas} still shows the previous market")
+
     def test_day_boundary_uses_istanbul_time(self):
         market = self.snapshot["markets"]["USDTRY"]
         stored = [c["days_to_maturity"] for c in market["contracts"]]
