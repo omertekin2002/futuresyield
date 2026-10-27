@@ -3,7 +3,8 @@
 A zero-backend GitHub Pages dashboard for USD/TRY, EUR/TRY, and XAU/TRY spot
 references and every listed futures contract on Borsa İstanbul's VİOP market.
 Market data is pulled with [borsapy](https://github.com/saidsurucu/borsapy) and
-redeployed every 15 minutes by GitHub Actions.
+redeployed by GitHub Actions every 15 minutes during VİOP trading hours on
+weekdays, 09:20–23:20 Istanbul time.
 
 ## What it shows
 
@@ -16,7 +17,7 @@ redeployed every 15 minutes by GitHub Actions.
 - Daily, 30-day monthly, and 365-day annualized yields in the chart and contract table
 - For USD/TRY, the spot's average daily appreciation over the last 180 days and
   the expected profit from shorting each contract at the bid
-- Snapshot age, delayed-data state, and one-click refresh
+- Snapshot age, delayed-data and market-closed states, and one-click refresh
 - Any archived end-of-day close, browsable from the **View** menu
 - Any earlier archived close overlaid on both curves, with price and yield deltas
 
@@ -31,13 +32,32 @@ futures specifications.
 
 ```mermaid
 flowchart LR
-  A["GitHub Actions · every 15 min"] --> B["borsapy · spot + contract discovery + quotes"]
+  T["Maintainer's timer · weekdays 09:20–23:20 TRT, every 15 min"] -->|workflow_dispatch| A["GitHub Actions · pages.yml"]
+  F["GitHub cron · */15, fallback"] -.-> A
+  A --> B["borsapy · spot + contract discovery + quotes"]
   B --> C["data/market.json"]
   C --> D["Static dashboard artifact"]
   D --> E["GitHub Pages"]
 ```
 
-The scheduled job only replaces the live site after a complete, valid snapshot
+A systemd user timer on the maintainer's machine starts the Pages workflow with
+`gh workflow run pages.yml` every 15 minutes on weekdays, from 09:20 to 23:20
+Istanbul time, which covers VİOP's sessions and the 23:15 end-of-day archive
+cutoff. The workflow's own `*/15` schedule stays as a fallback, but GitHub runs
+it only every few hours in practice. Refreshes pause overnight, at weekends,
+and whenever that machine is offline; see
+[Publish on GitHub Pages](#publish-on-github-pages) to set up your own trigger.
+
+The dashboard's status reflects that schedule, in Europe/Istanbul time whatever
+the browser's own zone. Inside the weekday 09:20–23:20 window, a live snapshot
+at most 45 minutes old shows as **Latest snapshot**, and an older one as
+**Update delayed**. Outside it, a snapshot no more than 45 minutes older than
+the last scheduled refresh (23:20 on the most recent weekday, so taken at 22:35
+or later) shows a neutral **Market closed** with its time; an older one still
+shows **Update delayed**, so a dead trigger stays visible. Weekday public
+holidays need no special case, because the timer still fires on them.
+
+The workflow only replaces the live site after a complete, valid snapshot
 is produced. If upstream market data is temporarily unavailable, the job fails
 and the previous successful Pages deployment stays online.
 
@@ -192,8 +212,32 @@ first run.
    the push-triggered run.
 
 The same workflow runs at `*/15 * * * *` and can also be started manually.
-GitHub may delay scheduled jobs during periods of high load, and scheduled
-workflows in inactive public repositories can be disabled after 60 days.
+GitHub may delay scheduled jobs during periods of high load, and in practice
+this schedule fires only every few hours. Scheduled workflows in inactive
+public repositories can also be disabled after 60 days. So the `*/15` cron is
+only a fallback: the dashboard's 15-minute cadence comes from an external
+trigger that dispatches the workflow during trading hours.
+
+This repository's trigger is a systemd user timer on the maintainer's machine,
+kept outside the repository. A fork needs its own. On a Linux machine with
+`gh` logged in to an account that can run the fork's workflows, a oneshot
+service runs:
+
+```bash
+gh workflow run pages.yml --repo <owner>/<repo> --ref main
+```
+
+and a timer starts it with these lines in its `[Timer]` section (weekdays,
+09:20 through 23:20 Istanbul time, every 15 minutes):
+
+```ini
+OnCalendar=Mon..Fri *-*-* 09:20,35,50:00 Europe/Istanbul
+OnCalendar=Mon..Fri *-*-* 10..22:05,20,35,50:00 Europe/Istanbul
+OnCalendar=Mon..Fri *-*-* 23:05,20:00 Europe/Istanbul
+```
+
+Refreshes stop whenever that machine is offline; the dashboard then shows
+**Update delayed** once its snapshot is older than the schedule allows.
 
 ## Run locally
 
@@ -228,7 +272,8 @@ serves both on a local port, and checks every market, the history view and the
 comparison overlay in headless Chromium for console errors and the main
 rendered values. The browser clock is pinned to the fixture's market date;
 separate cases move it to later Istanbul days and check the recomputed days
-left, yields and carry against hand-computed values. It never touches the
+left, yields and carry against hand-computed values, and check the data status
+inside and outside the refresh window, in Istanbul and other time zones. It never touches the
 network. The `discover` command above skips it, so the updater tests still run
 without a browser.
 
@@ -256,7 +301,8 @@ A separate `smoke` job installs `requirements-dev.txt` and Chromium and runs
 - The 180-day USD/TRY reference uses borsapy's daily FX history
   (`FX("USD").history(...)`, sourced from canlidoviz).
 - The dashboard polls its deployed JSON every minute, while the published
-  snapshot is rebuilt on the 15-minute GitHub Actions schedule.
+  snapshot is rebuilt every 15 minutes on weekdays, 09:20–23:20 Istanbul time,
+  by the externally dispatched GitHub Actions workflow described above.
 - VİOP and TradingView market data may be delayed by approximately 15 minutes.
 
 This project is for personal and educational use only. It is not investment
