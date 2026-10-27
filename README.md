@@ -41,6 +41,16 @@ The scheduled job only replaces the live site after a complete, valid snapshot
 is produced. If upstream market data is temporarily unavailable, the job fails
 and the previous successful Pages deployment stays online.
 
+Every snapshot is checked against an explicit schema before it is written.
+`scripts/snapshot_schema.py` encodes schema version 4: the top-level fields,
+each market's units and spot, and every contract's keys, ISO dates, numeric
+types (finite numbers or null, never strings, NaN or booleans), non-negative
+days to maturity, a `status` that matches `last`, sorted contracts without
+duplicate symbols, and at least one priced contract per market. It lists every
+problem it finds by path. A snapshot that fails counts as a failed attempt, so
+it is never published. Check a file by hand with
+`python -m scripts.snapshot_schema data/market.json`.
+
 The yield curve starts with the gross daily factor
 `(contract price / spot rate)^(1 / days left)`. The chart converts the selected
 1-, 30-, or 365-day compounded factor to net percentage yield by subtracting
@@ -88,6 +98,11 @@ end-of-day snapshot per VİOP trading day on a separate `data-history` branch.
   held either; the archive still waits until 23:15, which only delays it.
 - **Write-once.** The first end-of-day snapshot for a day wins. An existing day
   is never overwritten, and a run that adds nothing makes no commit.
+- **Validated.** `archive()` runs the same schema check before it writes
+  anything, so a snapshot that fails it is never archived. The dashboard also
+  rejects a live or archived file with an unknown `schema_version`, or with
+  contracts missing their maturity date or days to maturity, and shows its
+  usual load error.
 - **Size.** About 27 KB per trading day, roughly 7 MB a year.
 
 ### Browsing past closes
@@ -203,8 +218,10 @@ browser.
 `.github/workflows/ci.yml` runs on every pull request, on pushes to branches
 other than `main`, and on demand. It never deploys. It runs the updater tests
 offline on Python 3.10 and 3.12, checks `app.js` syntax with `node --check`,
-checks that `data/market.json` parses, and assembles the site with
-`scripts/build_site.sh`, which fails if any file the site needs is missing.
+checks that `data/market.json` parses, validates it and
+`tests/fixtures/market.json` with `scripts/snapshot_schema.py`, and assembles
+the site with `scripts/build_site.sh`, which fails if any file the site needs
+is missing.
 A separate `smoke` job installs `requirements-dev.txt` and Chromium and runs
 `python -m unittest tests/e2e/test_dashboard_smoke.py -v`.
 
