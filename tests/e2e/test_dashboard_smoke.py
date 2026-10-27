@@ -434,6 +434,51 @@ class DashboardSmokeTests(unittest.TestCase):
                 )
         self.expect_load_errors(2)
 
+    def test_snapshot_markup_renders_as_text(self):
+        # Bypasses the updater's schema check, which rejects such a snapshot.
+        markup = '<img src=x onerror="window.__xss=1">'
+        hostile = copy.deepcopy(self.snapshot)
+        usd = hostile["markets"]["USDTRY"]
+        usd["pair"] += markup
+        usd["spot_unit"] += markup
+        front = usd["contracts"][0]
+        front["label"] += markup
+        front["code"] += markup
+        # The comparison day lists no USD/TRY, so the legend names the pair.
+        day = "2026-09-30"
+        past = copy.deepcopy(self.history[day])
+        del past["markets"]["USDTRY"]
+        past["market_order"].remove("USDTRY")
+        self.serve_snapshot(re.compile(r"/data/market\.json"), hostile)
+        self.serve_snapshot(re.compile(rf"/data/history/{day}\.json"), past)
+        self.open_dashboard("?market=USDTRY")
+
+        page = self.page
+        for rows in ("#contract-rows", "#carry-rows"):
+            with self.subTest(rows=rows):
+                first = page.locator(f"{rows} > tr").first
+                expect(first.locator("strong")).to_have_text(front["label"])
+                expect(first.locator("small")).to_contain_text(front["code"])
+
+        tooltips = (("#curve-chart", "#chart-tooltip", "chartPoints"),
+                    ("#yield-chart", "#yield-tooltip", "yieldChartPoints"))
+        for canvas, tooltip, kind in tooltips:
+            with self.subTest(tooltip=tooltip):
+                self.hover(canvas, self.chart_points(kind)[0])
+                expect(page.locator(f"{tooltip} strong")).to_have_text(front["label"])
+        expect(page.locator("#chart-tooltip")).to_contain_text(usd["spot_unit"])
+
+        self.compare_select().select_option(day)
+        expect(page.locator("#curve-legend")).to_contain_text(f"no {usd['pair']} data")
+        expect(page.locator("#yield-legend")).to_contain_text(f"no {usd['pair']} data")
+
+        containers = ("#contract-rows", "#carry-rows", "#chart-tooltip",
+                      "#yield-tooltip", "#curve-legend", "#yield-legend")
+        for container in containers:
+            with self.subTest(container=container):
+                expect(page.locator(f"{container} img")).to_have_count(0)
+        self.assertIsNone(page.evaluate("() => window.__xss"))
+
     # Comparison overlay
 
     def compare_select(self):
