@@ -186,6 +186,9 @@ button:hover {
 .is-delayed .status-dot {
   background: var(--yellow);
 }
+.is-closed .status-dot {
+  background: var(--sky);
+}
 .is-error .status-dot {
   background: var(--salmon);
 }

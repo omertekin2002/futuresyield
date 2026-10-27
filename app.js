@@ -284,6 +284,60 @@ function istanbulToday(now = new Date()) {
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
+const istanbulClockFormat = new Intl.DateTimeFormat("en-US", {
+  year: "numeric",
+  month: "numeric",
+  day: "numeric",
+  hour: "numeric",
+  minute: "numeric",
+  second: "numeric",
+  hourCycle: "h23",
+  timeZone: ISTANBUL_TIMEZONE,
+});
+
+// The Istanbul wall-clock time of date, as milliseconds on a UTC timeline, so
+// Istanbul times compare and step by days whatever the browser's own zone.
+function istanbulWallClock(date) {
+  const parts = Object.fromEntries(
+    istanbulClockFormat.formatToParts(date).map(({ type, value }) => [type, Number(value)]),
+  );
+  return Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+}
+
+// Snapshots refresh every 15 minutes on weekdays, 09:20 to 23:20 Istanbul time.
+const FIRST_REFRESH_MINUTE = 9 * 60 + 20;
+const LAST_REFRESH_MINUTE = 23 * 60 + 20;
+const FRESH_MINUTES = 45;
+const MINUTE_MS = 60_000;
+const DAY_MS = 24 * 60 * MINUTE_MS;
+
+function isWeekday(wallClock) {
+  const day = new Date(wallClock).getUTCDay();
+  return day >= 1 && day <= 5;
+}
+
+// The refresh state of a live snapshot generated at generatedAt, at now:
+// "fresh", "delayed", or "closed" when refreshes have stopped for the night or
+// weekend and the snapshot is no older than the last scheduled refresh allows.
+function refreshState(generatedAt, now = new Date()) {
+  if ((now - generatedAt) / MINUTE_MS <= FRESH_MINUTES) return "fresh";
+  const nowClock = istanbulWallClock(now);
+  const midnight = nowClock - (nowClock % DAY_MS);
+  const minuteOfDay = (nowClock - midnight) / MINUTE_MS;
+  const inWindow = isWeekday(nowClock)
+    && minuteOfDay >= FIRST_REFRESH_MINUTE
+    && minuteOfDay <= LAST_REFRESH_MINUTE;
+  if (inWindow) return "delayed";
+
+  // Outside the window, measure from 23:20 on the most recent weekday.
+  let lastDay = minuteOfDay > LAST_REFRESH_MINUTE ? midnight : midnight - DAY_MS;
+  while (!isWeekday(lastDay)) lastDay -= DAY_MS;
+  const lastRefresh = lastDay + LAST_REFRESH_MINUTE * MINUTE_MS;
+  return istanbulWallClock(generatedAt) >= lastRefresh - FRESH_MINUTES * MINUTE_MS
+    ? "closed"
+    : "delayed";
+}
+
 // The updater's yield and carry rules, from scripts/update_data.py.
 function dailyYieldFactor(last, spot, days) {
   if (!hasNumber(last) || !hasNumber(spot) || last <= 0 || spot <= 0 || days <= 0) return null;
@@ -341,7 +395,7 @@ function rollSnapshotForward(snapshot, today) {
 }
 
 function setStatus(className, text) {
-  elements.dataState.classList.remove("is-fresh", "is-delayed", "is-error", "is-historical");
+  elements.dataState.classList.remove("is-fresh", "is-delayed", "is-closed", "is-error", "is-historical");
   elements.dataState.classList.add(className);
   elements.dataState.lastChild.textContent = ` ${text}`;
 }
@@ -351,11 +405,15 @@ function updateStatus(generatedAt) {
     setStatus("is-historical", `Historical · close of ${formatDay(state.renderedDate)}`);
     return;
   }
-  const minutesOld = Math.max(0, (Date.now() - new Date(generatedAt).getTime()) / 60000);
-  if (minutesOld <= 45) {
+  const generated = new Date(generatedAt);
+  const status = refreshState(generated);
+  if (status === "fresh") {
     setStatus("is-fresh", "Latest snapshot");
+  } else if (status === "closed") {
+    setStatus("is-closed", `Market closed · snapshot ${dateTimeFormat.format(generated)} TRT`);
   } else {
-    setStatus("is-delayed", `Update delayed · ${Math.floor(minutesOld)}m old`);
+    const minutesOld = Math.floor((Date.now() - generated.getTime()) / MINUTE_MS);
+    setStatus("is-delayed", `Update delayed · ${minutesOld}m old`);
   }
 }
 
@@ -379,7 +437,7 @@ function renderMarketIdentity(market) {
   document.title = `Vade — ${market.pair} Futures Curve${closeOf}`;
   elements.metaDescription.content =
     `The latest ${market.pair} spot reference and VİOP futures curve, ` +
-    "refreshed every 15 minutes.";
+    "refreshed every 15 minutes during VİOP trading hours on weekdays.";
   elements.wordmarkPair.textContent = spacedPair;
   elements.heroMarketLabel.textContent = `${market.pair},`;
   elements.spotUnit.textContent = market.spot_unit;
