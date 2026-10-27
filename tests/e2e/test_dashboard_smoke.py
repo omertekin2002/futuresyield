@@ -287,6 +287,77 @@ class DashboardSmokeTests(unittest.TestCase):
         self.open_dashboard()
         expect(self.page.locator("#data-state")).to_contain_text("Update delayed")
 
+    # Data status around the weekday 09:20–23:20 Istanbul refresh window
+
+    def open_live_at(self, now, generated_at=None, timezone_id=None):
+        """Open live data at now, optionally as if generated at generated_at."""
+        self.reopen_at(datetime.fromisoformat(now), timezone_id)
+        if generated_at:
+            snapshot = copy.deepcopy(self.snapshot)
+            snapshot["generated_at"] = generated_at
+            self.serve_snapshot(re.compile(r"/data/market\.json"), snapshot)
+        self.page.goto(self.base_url)
+
+    def assert_status(self, state, text):
+        status = self.page.locator("#data-state")
+        expect(status).to_have_class(re.compile(rf"\b{state}\b"))
+        expect(status).to_have_text(text)
+        if state != "is-delayed":
+            expect(status).not_to_have_class(re.compile(r"\bis-delayed\b"))
+
+    def test_status_inside_the_refresh_window_keeps_the_45_minute_rule(self):
+        # The fixture was generated on Wednesday 7 Oct at 14:06:12 Istanbul time.
+        for now, state, text in (
+            ("2026-10-07T14:30:00+03:00", "is-fresh", "Latest snapshot"),
+            ("2026-10-07T14:51:12+03:00", "is-fresh", "Latest snapshot"),
+            ("2026-10-07T15:00:00+03:00", "is-delayed", "Update delayed · 53m old"),
+            ("2026-10-07T23:20:00+03:00", "is-delayed", "Update delayed · 553m old"),
+        ):
+            with self.subTest(now=now):
+                self.open_live_at(now)
+                self.assert_status(state, text)
+
+    def test_status_after_hours_is_closed_once_the_last_refresh_landed(self):
+        # The last scheduled refresh before each clock is 23:20 on the most
+        # recent weekday, so a snapshot from 22:35 or later is on schedule.
+        for now, generated_at in (
+            ("2026-10-10T12:00:00+03:00", "2026-10-09T22:50:00+03:00"),  # Saturday
+            ("2026-10-11T23:59:00+03:00", "2026-10-09T22:35:00+03:00"),  # Sunday
+            ("2026-10-12T09:19:00+03:00", "2026-10-09T23:20:00+03:00"),  # Monday morning
+            ("2026-10-08T02:00:00+03:00", "2026-10-07T23:05:00+03:00"),  # weeknight
+            ("2026-10-07T23:59:00+03:00", "2026-10-07T23:05:00+03:00"),  # after 23:20
+        ):
+            with self.subTest(now=now):
+                self.open_live_at(now, generated_at)
+                label = datetime.fromisoformat(generated_at).strftime("%d %b, %H:%M")
+                self.assert_status("is-closed", f"Market closed · snapshot {label} TRT")
+
+    def test_status_after_hours_still_flags_a_missed_last_refresh(self):
+        for now, generated_at, minutes in (
+            ("2026-10-10T12:00:00+03:00", None, 4193),  # Saturday, Wednesday's snapshot
+            ("2026-10-10T12:00:00+03:00", "2026-10-09T22:34:59+03:00", 805),
+            ("2026-10-08T02:00:00+03:00", None, 713),  # weeknight, afternoon snapshot
+            ("2026-10-12T09:20:00+03:00", "2026-10-09T23:20:00+03:00", 3480),  # window opens
+        ):
+            with self.subTest(now=now, generated_at=generated_at):
+                self.open_live_at(now, generated_at)
+                self.assert_status("is-delayed", f"Update delayed · {minutes}m old")
+
+    def test_status_window_uses_istanbul_time(self):
+        # 06:00 UTC on Saturday is 09:00 in Istanbul but still Friday 23:00 in
+        # Los Angeles; 10:30 UTC on Friday is 13:30 in Istanbul but already
+        # Saturday 00:30 in Kiritimati.
+        for now, zone, generated_at, state, text in (
+            ("2026-10-10T06:00:00+00:00", "America/Los_Angeles",
+             "2026-10-09T22:50:00+03:00", "is-closed",
+             "Market closed · snapshot 09 Oct, 22:50 TRT"),
+            ("2026-10-09T10:30:00+00:00", "Pacific/Kiritimati",
+             "2026-10-08T22:50:00+03:00", "is-delayed", "Update delayed · 880m old"),
+        ):
+            with self.subTest(zone=zone):
+                self.open_live_at(now, generated_at, zone)
+                self.assert_status(state, text)
+
     def test_each_market_via_query(self):
         for key in self.snapshot["market_order"]:
             with self.subTest(market=key):
