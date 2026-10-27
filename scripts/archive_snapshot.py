@@ -16,8 +16,10 @@ from typing import Any
 
 if __package__:
     from .market_calendar import ISTANBUL, half_days, public_holidays
+    from .snapshot_schema import validate_snapshot
 else:  # run as `python scripts/archive_snapshot.py`
     from market_calendar import ISTANBUL, half_days, public_holidays
+    from snapshot_schema import validate_snapshot
 
 
 # Borsa İstanbul VİOP trading hours (Istanbul time). The opening session starts
@@ -121,8 +123,11 @@ def archive(snapshot_path: Path, checkout: Path) -> str:
     """Archive the snapshot if it is end-of-day; return a log line."""
     raw = snapshot_path.read_bytes()
     snapshot = json.loads(raw)
-    if not isinstance(snapshot.get("markets"), dict) or not snapshot["markets"]:
-        raise ValueError(f"{snapshot_path} has no markets")
+    # Archived days are never overwritten, so check before writing anything.
+    try:
+        validate_snapshot(snapshot)
+    except ValueError as exc:
+        raise ValueError(f"{snapshot_path} is not archived: {exc}") from exc
     generated_at = parse_generated_at(snapshot.get("generated_at"))
 
     history = checkout / HISTORY_DIR

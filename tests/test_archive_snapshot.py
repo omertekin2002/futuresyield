@@ -162,6 +162,50 @@ class ArchiveTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             archive(snapshot, self.checkout)
 
+    def test_rejects_invalid_snapshot_without_writing(self):
+        good = self.write_snapshot("2026-10-07T23:20:00+03:00", "good.json")
+        archive(good, self.checkout)
+        before = {path.name: path.read_bytes() for path in self.history.iterdir()}
+        snapshot = json.loads(snapshot_bytes("2026-10-08T23:20:00+03:00"))
+        snapshot["markets"]["EURTRY"]["contracts"][0]["last"] = "55.1"
+        broken = self.root / "broken.json"
+        broken.write_text(json.dumps(snapshot), encoding="utf-8")
+
+        with self.assertRaises(ValueError) as caught:
+            archive(broken, self.checkout)
+
+        self.assertIn("markets.EURTRY.contracts[0].last", str(caught.exception))
+        after = {path.name: path.read_bytes() for path in self.history.iterdir()}
+        self.assertEqual(after, before)
+
+    def test_invalid_snapshot_creates_no_history(self):
+        snapshot = json.loads(snapshot_bytes("2026-10-07T23:20:00+03:00"))
+        snapshot["schema_version"] = 3
+        broken = self.root / "broken.json"
+        broken.write_text(json.dumps(snapshot), encoding="utf-8")
+
+        with self.assertRaises(ValueError):
+            archive(broken, self.checkout)
+
+        self.assertFalse(self.checkout.exists())
+
+    def test_command_line_rejects_invalid_snapshot(self):
+        snapshot = json.loads(snapshot_bytes("2026-10-07T23:20:00+03:00"))
+        snapshot["schema_version"] = 3
+        broken = self.root / "broken.json"
+        broken.write_text(json.dumps(snapshot), encoding="utf-8")
+
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "archive_snapshot.py"),
+             str(broken), str(self.checkout)],
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("schema_version", result.stderr)
+        self.assertFalse(self.checkout.exists())
+
     def test_command_line_exits_zero_and_logs(self):
         snapshot = self.write_snapshot("2026-10-10T10:00:00+03:00")
         command = [sys.executable, str(ROOT / "scripts" / "archive_snapshot.py")]
