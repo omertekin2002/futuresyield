@@ -188,11 +188,12 @@ class DashboardSmokeTests(unittest.TestCase):
         self.external_requests = []
         self.open_context()
 
-    def open_context(self, timezone_id=None, now=FIXTURE_DAY_TIME):
+    def open_context(self, timezone_id=None, now=FIXTURE_DAY_TIME, **options):
         """Open a fresh page whose clock reads now, in an optional local zone."""
         self.context = self.browser.new_context(
             viewport={"width": 1280, "height": 900},
             **({"timezone_id": timezone_id} if timezone_id else {}),
+            **options,
         )
         self.page = self.context.new_page()
         self.page.clock.set_fixed_time(now)
@@ -727,10 +728,10 @@ class DashboardSmokeTests(unittest.TestCase):
 
     # Days left on a later Istanbul day than the live snapshot's
 
-    def reopen_at(self, now, timezone_id=None):
+    def reopen_at(self, now, timezone_id=None, **options):
         """Replace the page with one whose clock reads now."""
         self.context.close()
-        self.open_context(timezone_id, now)
+        self.open_context(timezone_id, now, **options)
 
     def column(self, rows, label):
         return [
@@ -864,7 +865,10 @@ class DashboardSmokeTests(unittest.TestCase):
         snapshot = copy.deepcopy(self.snapshot)
         for contract in snapshot["markets"]["XAUTRY"]["contracts"][1:]:
             contract["last"] = None
-        self.reopen_at(datetime.fromisoformat("2026-10-31T12:00:00+03:00"))
+        # A pixel ratio below 1, as at reduced zoom, must still clear the whole canvas.
+        self.reopen_at(
+            datetime.fromisoformat("2026-10-31T12:00:00+03:00"), device_scale_factor=0.5,
+        )
         self.serve_snapshot(re.compile(r"/data/market\.json"), snapshot)
         self.open_dashboard("?market=USDTRY")
         self.page.locator('.market-options [data-market="XAUTRY"]').click()

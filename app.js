@@ -595,7 +595,10 @@ function alignSeries(current, compare) {
 
 // Blank a chart that has nothing to plot, so the previous view's curve doesn't linger.
 function clearChart(canvas, label) {
-  canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
+  const context = canvas.getContext("2d");
+  // The last render left the context scaled by the pixel ratio.
+  context.setTransform(1, 0, 0, 1, 0, 0);
+  context.clearRect(0, 0, canvas.width, canvas.height);
   canvas.setAttribute("aria-label", label);
 }
 
