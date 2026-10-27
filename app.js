@@ -18,6 +18,7 @@ const elements = {
   historyBanner: document.querySelector("#history-banner"),
   historyBannerDate: document.querySelector("#history-banner-date"),
   historyNotice: document.querySelector("#history-notice"),
+  daysNote: document.querySelector("#days-note"),
   liveButton: document.querySelector("#live-button"),
   compareControl: document.querySelector("#compare-control"),
   compareSelect: document.querySelector("#compare-select"),
@@ -86,6 +87,8 @@ const state = {
   compareRequestId: 0,
   // The view date the compare options were last built for.
   compareReference: null,
+  // The Istanbul day the live snapshot's days left were moved to, or null.
+  adjustedDay: null,
 };
 
 // Quick comparison picks: the archived close nearest each target, if one is
@@ -259,6 +262,82 @@ function dayOffset(value, { days = 0, months = 0 }) {
 
 function daysBetween(first, second) {
   return Math.abs(Date.parse(`${first}T00:00:00Z`) - Date.parse(`${second}T00:00:00Z`)) / 86_400_000;
+}
+
+// Calendar days from one ISO date to a later one; negative if it is earlier.
+function daysUntil(from, to) {
+  return Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000);
+}
+
+const istanbulDayFormat = new Intl.DateTimeFormat("en-US", {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  timeZone: ISTANBUL_TIMEZONE,
+});
+
+// Today's date in Istanbul as YYYY-MM-DD, whatever the browser's own zone.
+function istanbulToday(now = new Date()) {
+  const parts = Object.fromEntries(
+    istanbulDayFormat.formatToParts(now).map(({ type, value }) => [type, value]),
+  );
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+// The updater's yield and carry rules, from scripts/update_data.py.
+function dailyYieldFactor(last, spot, days) {
+  if (!hasNumber(last) || !hasNumber(spot) || last <= 0 || spot <= 0 || days <= 0) return null;
+  return Math.pow(last / spot, 1 / days);
+}
+
+function compoundedYieldPercent(factor, periodDays) {
+  return hasNumber(factor) && factor > 0 ? (Math.pow(factor, periodDays) - 1) * 100 : null;
+}
+
+function projectedSpot(spot, dailyFactor, days) {
+  return hasNumber(spot) && hasNumber(dailyFactor) && days >= 0
+    ? spot * Math.pow(dailyFactor, days)
+    : null;
+}
+
+// The live snapshot's days left, and everything built on them, are fixed for
+// its market date. Once Istanbul has moved on to a later day, return a copy
+// with those terms recomputed for today and expired contracts dropped, as the
+// updater would. Prices, premiums and the spot trend stay as published.
+function rollSnapshotForward(snapshot, today) {
+  if (!(snapshot.market_date < today)) return snapshot;
+  const rolled = structuredClone(snapshot);
+  Object.values(rolled.markets).forEach((market) => {
+    const spot = market.spot?.last;
+    const trendFactor = market.spot_trend?.daily_factor;
+    market.contracts = market.contracts
+      .map((contract) => {
+        const days = daysUntil(today, contract.maturity_date);
+        const factor = dailyYieldFactor(contract.last, spot, days);
+        const expectedSpot = hasNumber(market.contract_size)
+          ? projectedSpot(spot, trendFactor, days)
+          : null;
+        return {
+          ...contract,
+          days_to_maturity: days,
+          annualized_premium_percent:
+            hasNumber(contract.premium_percent) && days > 0
+              ? contract.premium_percent * 365 / days
+              : null,
+          daily_yield_factor: factor,
+          daily_yield_percent: compoundedYieldPercent(factor, 1),
+          monthly_yield_percent: compoundedYieldPercent(factor, 30),
+          annualized_yield_percent: compoundedYieldPercent(factor, 365),
+          expected_spot_at_maturity: expectedSpot,
+          expected_short_profit_try:
+            hasNumber(contract.bid) && hasNumber(expectedSpot)
+              ? (contract.bid - expectedSpot) * market.contract_size
+              : null,
+        };
+      })
+      .filter((contract) => contract.days_to_maturity >= 0);
+  });
+  return rolled;
 }
 
 function setStatus(className, text) {
@@ -877,6 +956,16 @@ function renderSnapshot(snapshot) {
   elements.updatedAt.textContent =
     `${dateTimeFormat.format(new Date(snapshot.generated_at))} TRT`;
   updateStatus(snapshot.generated_at);
+  renderDaysNote(snapshot);
+}
+
+// Days left that no longer match the snapshot's own date are never silent.
+function renderDaysNote(snapshot) {
+  elements.daysNote.hidden = !state.adjustedDay;
+  elements.daysNote.textContent = state.adjustedDay
+    ? `Days left and yields adjusted to ${formatDay(state.adjustedDay)}; ` +
+      `prices are from the ${formatDay(snapshot.market_date)} snapshot.`
+    : "";
 }
 
 async function fetchSnapshot(url, options) {
@@ -1096,8 +1185,12 @@ async function loadView(date) {
       ? await fetchSnapshot(`${HISTORY_URL}/${date}.json`)
       : await fetchSnapshot(`${DATA_URL}?v=${Date.now()}`, { cache: "no-store" });
     if (request !== state.requestId) return;
+    // Only the live view moves on with the calendar; a past close is its own day.
+    const today = istanbulToday();
+    const shown = date ? data : rollSnapshotForward(data, today);
     state.renderedDate = date;
-    renderSnapshot(data);
+    state.adjustedDay = shown === data ? null : today;
+    renderSnapshot(shown);
   } catch (error) {
     if (request !== state.requestId) return;
     console.error(error);
