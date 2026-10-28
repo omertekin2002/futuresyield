@@ -26,6 +26,11 @@ try:
 except ImportError:  # pragma: no cover - exercised only without Playwright
     sync_playwright = None
 
+try:
+    from axe_playwright_python.sync_playwright import Axe
+except ImportError:  # pragma: no cover - exercised only without axe
+    Axe = None
+
 ROOT = Path(__file__).resolve().parents[2]
 SITE = ROOT / "_site"
 FIXTURE = ROOT / "tests" / "fixtures" / "market.json"
@@ -67,6 +72,14 @@ YIELD_COLUMNS = (
 ROLLED_DAY = "2026-07-07"
 SPOT_PRICES = ("last", "open", "high", "low", "change")
 CONTRACT_PRICES = ("last", "bid", "ask", "change", "expected_spot_at_maturity")
+
+# The accessibility audit: axe-core's WCAG 2.1 A and AA rules, failing on any
+# serious or critical violation.
+AXE_TAGS = ("wcag2a", "wcag2aa", "wcag21a", "wcag21aa")
+AXE_FAILING_IMPACTS = ("serious", "critical")
+# Rules the audit turns off, each mapped to a one-line reason. None so far.
+AXE_DISABLED_RULES = {}
+MOBILE_VIEWPORT = {"width": 390, "height": 844}
 
 
 def set_yields(contract, spot):
@@ -191,9 +204,11 @@ class DashboardSmokeTests(unittest.TestCase):
     def open_context(self, timezone_id=None, now=FIXTURE_DAY_TIME, **options):
         """Open a fresh page whose clock reads now, in an optional local zone."""
         self.context = self.browser.new_context(
-            viewport={"width": 1280, "height": 900},
-            **({"timezone_id": timezone_id} if timezone_id else {}),
-            **options,
+            **{
+                "viewport": {"width": 1280, "height": 900},
+                **({"timezone_id": timezone_id} if timezone_id else {}),
+                **options,
+            }
         )
         self.page = self.context.new_page()
         self.page.clock.set_fixed_time(now)
@@ -1016,6 +1031,83 @@ class DashboardSmokeTests(unittest.TestCase):
             ((front["last"] / live["spot"]["last"]) ** (1 / 22) - 1) * 100,
             places=9,
         )
+
+    # Accessibility: axe-core audit of each rendered state
+
+    def assert_accessible(self, state):
+        """Fail with every serious or critical WCAG 2.1 A/AA violation on the page."""
+        options = {
+            "runOnly": {"type": "tag", "values": list(AXE_TAGS)},
+            "rules": {rule: {"enabled": False} for rule in AXE_DISABLED_RULES},
+            "resultTypes": ["violations"],
+        }
+        results = Axe().run(self.page, options=options).response
+        failures = [
+            f"{violation['id']} ({violation['impact']}) at "
+            f"{' '.join(map(str, node['target']))}: {violation['help']} "
+            f"<{violation['helpUrl']}>\n    "
+            + "; ".join(check["message"] for key in ("any", "all", "none")
+                        for check in node[key])
+            for violation in results["violations"]
+            if violation["impact"] in AXE_FAILING_IMPACTS
+            for node in violation["nodes"]
+        ]
+        if failures:
+            self.fail(f"{state}: {len(failures)} accessibility violation(s)\n"
+                      + "\n".join(failures))
+
+    @unittest.skipIf(Axe is None, "axe-playwright-python is not installed")
+    def test_accessibility_of_each_live_market(self):
+        for key in self.snapshot["market_order"]:
+            with self.subTest(market=key):
+                self.open_dashboard(f"?market={key}")
+                self.assert_market(key)
+                self.assert_accessible(f"live {key}")
+
+    @unittest.skipIf(Axe is None, "axe-playwright-python is not installed")
+    def test_accessibility_of_a_past_close(self):
+        day = max(HISTORY_FIXTURE)
+        self.open_day(day)
+        self.assert_market(self.snapshot["default_market"], self.history[day])
+        self.assert_accessible(f"past close {day}")
+
+    @unittest.skipIf(Axe is None, "axe-playwright-python is not installed")
+    def test_accessibility_of_a_comparison_with_its_tooltip(self):
+        compared = "2026-09-30"
+        self.open_dashboard(f"?compare={compared}")
+        self.assert_comparing(compared)
+        self.hover("#curve-chart", self.chart_points()[0])
+        expect(self.page.locator("#chart-tooltip")).to_be_visible()
+        self.assert_accessible(f"comparison with {compared}")
+
+    @unittest.skipIf(Axe is None, "axe-playwright-python is not installed")
+    def test_accessibility_of_each_yield_period(self):
+        self.open_dashboard()
+        for period in ("monthly", "annualized", "daily"):
+            with self.subTest(period=period):
+                self.page.locator(f'[data-yield-period="{period}"]').click()
+                expect(
+                    self.page.locator('[data-yield-period][aria-pressed="true"]')
+                ).to_have_attribute("data-yield-period", period)
+                self.assert_accessible(f"{period} yields")
+
+    @unittest.skipIf(Axe is None, "axe-playwright-python is not installed")
+    def test_accessibility_on_a_narrow_mobile_viewport(self):
+        self.reopen_at(FIXTURE_DAY_TIME, viewport=MOBILE_VIEWPORT)
+        self.open_dashboard("?market=USDTRY")
+        self.assert_market("USDTRY")
+        self.assert_accessible("USDTRY at 390x844")
+
+    @unittest.skipIf(Axe is None, "axe-playwright-python is not installed")
+    def test_accessibility_of_the_load_error(self):
+        unknown = copy.deepcopy(self.snapshot)
+        unknown["schema_version"] = 5
+        self.serve_snapshot(re.compile(r"/data/market\.json"), unknown)
+        self.page.goto(self.base_url)
+        expect(self.page.locator("#data-state")).to_have_class(re.compile(r"\bis-error\b"))
+        expect(self.page.locator("#contract-rows")).to_contain_text("could not be loaded")
+        self.expect_load_errors(1)
+        self.assert_accessible("load error")
 
 
 if __name__ == "__main__":
