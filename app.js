@@ -304,10 +304,10 @@ function istanbulWallClock(date) {
   return Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
 }
 
-// Snapshots refresh every 15 minutes on weekdays, 09:20 to 23:20 Istanbul time.
+// Snapshots refresh hourly at :20 on weekdays, 09:20 to 23:20 Istanbul time.
 const FIRST_REFRESH_MINUTE = 9 * 60 + 20;
 const LAST_REFRESH_MINUTE = 23 * 60 + 20;
-const FRESH_MINUTES = 45;
+const FRESH_MINUTES = 90;
 const MINUTE_MS = 60_000;
 const DAY_MS = 24 * 60 * MINUTE_MS;
 
@@ -437,7 +437,7 @@ function renderMarketIdentity(market) {
   document.title = `Vade — ${market.pair} Futures Curve${closeOf}`;
   elements.metaDescription.content =
     `The latest ${market.pair} spot reference and VİOP futures curve, ` +
-    "refreshed every 15 minutes during VİOP trading hours on weekdays.";
+    "refreshed hourly during VİOP trading hours on weekdays.";
   elements.wordmarkPair.textContent = spacedPair;
   elements.heroMarketLabel.textContent = `${market.pair},`;
   elements.spotUnit.textContent = market.spot_unit;

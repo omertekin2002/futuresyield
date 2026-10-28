@@ -687,7 +687,7 @@ def build_snapshot(now: datetime | None = None) -> dict[str, Any]:
         "generated_at": generated_at.isoformat(timespec="seconds"),
         "market_date": today.isoformat(),
         "timezone": "Europe/Istanbul",
-        "refresh_interval_minutes": 15,
+        "refresh_interval_minutes": 60,
         "default_market": DEFAULT_MARKET.key,
         "market_order": [market.key for market in MARKET_CONFIGS],
         "markets": market_snapshots,

@@ -320,12 +320,12 @@ class DashboardSmokeTests(unittest.TestCase):
         if state != "is-delayed":
             expect(status).not_to_have_class(re.compile(r"\bis-delayed\b"))
 
-    def test_status_inside_the_refresh_window_keeps_the_45_minute_rule(self):
+    def test_status_inside_the_refresh_window_keeps_the_90_minute_rule(self):
         # The fixture was generated on Wednesday 7 Oct at 14:06:12 Istanbul time.
         for now, state, text in (
             ("2026-10-07T14:30:00+03:00", "is-fresh", "Latest snapshot"),
-            ("2026-10-07T14:51:12+03:00", "is-fresh", "Latest snapshot"),
-            ("2026-10-07T15:00:00+03:00", "is-delayed", "Update delayed · 53m old"),
+            ("2026-10-07T15:36:12+03:00", "is-fresh", "Latest snapshot"),
+            ("2026-10-07T15:40:00+03:00", "is-delayed", "Update delayed · 93m old"),
             ("2026-10-07T23:20:00+03:00", "is-delayed", "Update delayed · 553m old"),
         ):
             with self.subTest(now=now):
@@ -334,13 +334,13 @@ class DashboardSmokeTests(unittest.TestCase):
 
     def test_status_after_hours_is_closed_once_the_last_refresh_landed(self):
         # The last scheduled refresh before each clock is 23:20 on the most
-        # recent weekday, so a snapshot from 22:35 or later is on schedule.
+        # recent weekday, so a snapshot from 21:50 or later is on schedule.
         for now, generated_at in (
             ("2026-10-10T12:00:00+03:00", "2026-10-09T22:50:00+03:00"),  # Saturday
-            ("2026-10-11T23:59:00+03:00", "2026-10-09T22:35:00+03:00"),  # Sunday
+            ("2026-10-11T23:59:00+03:00", "2026-10-09T21:50:00+03:00"),  # Sunday
             ("2026-10-12T09:19:00+03:00", "2026-10-09T23:20:00+03:00"),  # Monday morning
             ("2026-10-08T02:00:00+03:00", "2026-10-07T23:05:00+03:00"),  # weeknight
-            ("2026-10-07T23:59:00+03:00", "2026-10-07T23:05:00+03:00"),  # after 23:20
+            ("2026-10-07T23:59:00+03:00", "2026-10-07T22:20:00+03:00"),  # after 23:20
         ):
             with self.subTest(now=now):
                 self.open_live_at(now, generated_at)
@@ -350,7 +350,7 @@ class DashboardSmokeTests(unittest.TestCase):
     def test_status_after_hours_still_flags_a_missed_last_refresh(self):
         for now, generated_at, minutes in (
             ("2026-10-10T12:00:00+03:00", None, 4193),  # Saturday, Wednesday's snapshot
-            ("2026-10-10T12:00:00+03:00", "2026-10-09T22:34:59+03:00", 805),
+            ("2026-10-10T12:00:00+03:00", "2026-10-09T21:49:59+03:00", 850),
             ("2026-10-08T02:00:00+03:00", None, 713),  # weeknight, afternoon snapshot
             ("2026-10-12T09:20:00+03:00", "2026-10-09T23:20:00+03:00", 3480),  # window opens
         ):
