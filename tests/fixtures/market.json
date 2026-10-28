@@ -3,7 +3,7 @@
   "generated_at": "2026-10-07T14:06:12+03:00",
   "market_date": "2026-10-07",
   "timezone": "Europe/Istanbul",
-  "refresh_interval_minutes": 15,
+  "refresh_interval_minutes": 60,
   "default_market": "USDTRY",
   "market_order": [
     "USDTRY",
