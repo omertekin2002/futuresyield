@@ -277,6 +277,18 @@ inside and outside the refresh window, in Istanbul and other time zones. It neve
 network. The `discover` command above skips it, so the updater tests still run
 without a browser.
 
+**Accessibility.** The smoke test also runs
+[axe-core](https://github.com/dequelabs/axe-core), bundled with
+`axe-playwright-python`, against the WCAG 2.1 A and AA rules. It audits the
+live view of each market, a past close with its banner, a comparison overlay
+with both legends and a tooltip showing, each yield period, a 390×844 mobile
+viewport and the load-error state. It fails on any serious or critical
+violation and lists each one's rule, impact, element and help text. The audit
+doesn't cover keyboard access to the chart points, which isn't there yet: the
+charts are labelled images, and the contract table is their full text
+alternative. As an automated check, it also can't judge everything WCAG asks
+for, such as whether labels make sense.
+
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs on every pull request, on pushes to branches
@@ -287,7 +299,8 @@ checks that `data/market.json` parses, validates it and
 the site with `scripts/build_site.sh`, which fails if any file the site needs
 is missing.
 A separate `smoke` job installs `requirements-dev.txt` and Chromium and runs
-`python -m unittest tests/e2e/test_dashboard_smoke.py -v`.
+`python -m unittest tests/e2e/test_dashboard_smoke.py -v`, including the
+accessibility audit.
 
 ## Data notes
 
