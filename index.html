@@ -191,10 +191,19 @@
                 <canvas
                   id="curve-chart"
                   role="img"
+                  tabindex="0"
                   aria-label="Selected VİOP futures price curve by maturity"
+                  aria-describedby="chart-keys"
                 ></canvas>
+                <div class="chart-marker" id="curve-marker" aria-hidden="true" hidden></div>
                 <div class="chart-tooltip" id="chart-tooltip" hidden></div>
               </div>
+              <p class="sr-only" id="chart-keys">
+                Use the left and right arrow keys to step through the maturities,
+                Home and End to jump to the first and last, and Escape to hide
+                the details.
+              </p>
+              <p class="sr-only" id="curve-announcer" aria-live="polite"></p>
 
               <div class="stat-strip">
                 <div class="stat-item">
@@ -273,14 +282,18 @@
                 <canvas
                   id="yield-chart"
                   role="img"
+                  tabindex="0"
                   aria-label="Selected VİOP futures yield by maturity"
+                  aria-describedby="chart-keys"
                 ></canvas>
+                <div class="chart-marker" id="yield-marker" aria-hidden="true" hidden></div>
                 <div
                   class="chart-tooltip yield-tooltip"
                   id="yield-tooltip"
                   hidden
                 ></div>
               </div>
+              <p class="sr-only" id="yield-announcer" aria-live="polite"></p>
 
               <div class="yield-readouts" aria-live="polite">
                 <div>
@@ -460,6 +473,9 @@
             “Days left” uses calendar days. Maturity is the final full Turkish
             business day of the contract month, following Borsa İstanbul rules.
             Yield columns show net compounded returns over 1, 30, and 365 days.
+            Under each last price is its last trade in Istanbul time: the time
+            alone on the market’s latest quote day, the date and time on an
+            earlier day, marked <strong>stale</strong>.
           </p>
         </section>
       </main>

@@ -12,6 +12,8 @@ redeployed by GitHub Actions every hour during VİOP trading hours on weekdays,
 - Current spot reference, daily range, and daily change for each market
 - Automatic discovery of new dated contracts across all three VİOP families
 - Last price, daily change, bid/ask, volume, and premium to spot
+- Each contract's last-trade time, with a **stale** tag on contracts that
+  didn't trade on the market's latest quote day
 - Official contract maturity date and calendar days remaining
 - Responsive price and implied-yield curves plus the full contract board
 - Daily, 30-day monthly, and 365-day annualized yields in the chart and contract table
@@ -66,7 +68,10 @@ Every snapshot is checked against an explicit schema before it is written.
 each market's units and spot, and every contract's keys, ISO dates, numeric
 types (finite numbers or null, never strings, NaN or booleans), non-negative
 days to maturity, a `status` that matches `last`, sorted contracts without
-duplicate symbols, and at least one priced contract per market. The strings
+duplicate symbols, and at least one priced contract per market. A contract's
+`updated_at` is the time of its last trade, as an ISO timestamp with an offset,
+or null when the quote carried no time; the updater never fills in the
+snapshot time. The strings
 the dashboard renders must keep the updater's formats: VİOP symbols like
 `USDTRYV2026`, table codes like `F_USDTRY1026`, and labels like `Oct 2026`, so
 markup in upstream data is rejected before it is published. It lists every
@@ -279,13 +284,20 @@ without a browser.
 [axe-core](https://github.com/dequelabs/axe-core), bundled with
 `axe-playwright-python`, against the WCAG 2.1 A and AA rules. It audits the
 live view of each market, a past close with its banner, a comparison overlay
-with both legends and a tooltip showing, each yield period, a 390×844 mobile
-viewport and the load-error state. It fails on any serious or critical
-violation and lists each one's rule, impact, element and help text. The audit
-doesn't cover keyboard access to the chart points, which isn't there yet: the
-charts are labelled images, and the contract table is their full text
-alternative. As an automated check, it also can't judge everything WCAG asks
-for, such as whether labels make sense.
+with both legends and a tooltip showing, a tooltip opened from the keyboard on
+each chart, each yield period, a 390×844 mobile viewport and the load-error
+state. It fails on any serious or critical violation and lists each one's
+rule, impact, element and help text. As an automated check, it can't judge
+everything WCAG asks for, such as whether labels make sense.
+
+Each chart is one Tab stop, with a labelled summary and the contract table as
+its full text alternative. On a focused chart, Left and Right arrow step
+through the maturities, Home and End jump to the first and last, and Escape
+hides the tooltip; Tab moves on as usual. The tooltip matches the pointer's,
+a ring marks the active point, and a polite live region reads out the same
+text: the maturity, its price or yield, days left, the peak note and, with a
+comparison on, both days' values and the change. Separate smoke-test cases
+cover these keys on both charts.
 
 ## Continuous integration
 
@@ -315,6 +327,18 @@ accessibility audit.
   snapshot is rebuilt every hour on weekdays, 09:20–23:20 Istanbul time,
   by the externally dispatched GitHub Actions workflow described above.
 - VİOP and TradingView market data may be delayed by approximately 15 minutes.
+- Illiquid back months can go a day or more without a trade, and their last
+  price still drives the curve, premium and yields. Under each last price the
+  contract table shows the contract's last trade in Istanbul time: the time
+  alone on the market's latest quote day, the date and time otherwise, and "—"
+  when the quote carried no time. A contract is **stale** when its last trade
+  falls on an earlier Istanbul day than the newest last trade of any contract in
+  the same market and snapshot, so holidays and weekends need no special case.
+  A contract without a time is never marked stale. Snapshots written before
+  `updated_at` could be null filled a missing time in with the snapshot's own
+  `generated_at`, so a contract time equal to it also shows "—". Chart
+  tooltips and the keyboard read-out include the same line; with a comparison
+  on, it describes only the day on screen.
 
 This project is for personal and educational use only. It is not investment
 advice. Review borsapy's upstream data-license disclaimer before use; commercial

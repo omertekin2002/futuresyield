@@ -40,6 +40,8 @@ const elements = {
   yieldSummary: document.querySelector("#yield-summary"),
   yieldCanvas: document.querySelector("#yield-chart"),
   yieldTooltip: document.querySelector("#yield-tooltip"),
+  yieldMarker: document.querySelector("#yield-marker"),
+  yieldAnnouncer: document.querySelector("#yield-announcer"),
   yieldPeriodLabel: document.querySelector("#yield-period-label"),
   yieldFrontValue: document.querySelector("#yield-front-value"),
   yieldAverageValue: document.querySelector("#yield-average-value"),
@@ -62,6 +64,8 @@ const elements = {
   contractsCaption: document.querySelector("#contracts-caption"),
   canvas: document.querySelector("#curve-chart"),
   tooltip: document.querySelector("#chart-tooltip"),
+  marker: document.querySelector("#curve-marker"),
+  announcer: document.querySelector("#curve-announcer"),
   footerMarketCopy: document.querySelector("#footer-market-copy"),
 };
 
@@ -150,6 +154,20 @@ const dateFormat = new Intl.DateTimeFormat("en-GB", {
 const dateTimeFormat = new Intl.DateTimeFormat("en-GB", {
   day: "2-digit",
   month: "short",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+  timeZone: ISTANBUL_TIMEZONE,
+});
+
+// A contract's last trade: "27 Oct" and "18:07", in Istanbul time.
+const tradeDayFormat = new Intl.DateTimeFormat("en-GB", {
+  day: "2-digit",
+  month: "short",
+  timeZone: ISTANBUL_TIMEZONE,
+});
+
+const tradeTimeFormat = new Intl.DateTimeFormat("en-GB", {
   hour: "2-digit",
   minute: "2-digit",
   hourCycle: "h23",
@@ -276,7 +294,8 @@ const istanbulDayFormat = new Intl.DateTimeFormat("en-US", {
   timeZone: ISTANBUL_TIMEZONE,
 });
 
-// Today's date in Istanbul as YYYY-MM-DD, whatever the browser's own zone.
+// The Istanbul date of a moment, today by default, as YYYY-MM-DD, whatever
+// the browser's own zone.
 function istanbulToday(now = new Date()) {
   const parts = Object.fromEntries(
     istanbulDayFormat.formatToParts(now).map(({ type, value }) => [type, value]),
@@ -302,6 +321,38 @@ function istanbulWallClock(date) {
     istanbulClockFormat.formatToParts(date).map(({ type, value }) => [type, Number(value)]),
   );
   return Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+}
+
+// Each contract's last trade, mapped from the contract, against the newest one
+// in its market and snapshot: the time alone on that Istanbul day, the date
+// and time on an earlier day, which makes it stale, and "—" without a time,
+// which is never stale. Older snapshots filled a missing time in with their
+// own generated_at, so that exact time counts as none.
+function lastTrades(contracts, generatedAt) {
+  const standIn = Date.parse(generatedAt);
+  const times = contracts.map((contract) => {
+    const time = typeof contract.updated_at === "string" ? Date.parse(contract.updated_at) : NaN;
+    return Number.isNaN(time) || time === standIn ? null : new Date(time);
+  });
+  const days = times.map((time) => time && istanbulToday(time));
+  const newestDay = days.reduce(
+    (newest, day) => day && (!newest || day > newest) ? day : newest,
+    null,
+  );
+  return new Map(contracts.map((contract, index) => {
+    const time = times[index];
+    if (!time) return [contract, { text: "—", stale: false }];
+    const clock = tradeTimeFormat.format(time);
+    return [contract, days[index] === newestDay
+      ? { text: clock, stale: false }
+      : { text: `${tradeDayFormat.format(time)} ${clock}`, stale: true }];
+  }));
+}
+
+// The tooltip line for a contract of the day on screen.
+function lastTradeLine(contract) {
+  const trade = lastTrades(state.data.contracts, state.snapshot.generated_at).get(contract);
+  return { text: `Last trade ${trade.text}${trade.stale ? " · stale" : ""}` };
 }
 
 // Snapshots refresh hourly at :20 on weekdays, 09:20 to 23:20 Istanbul time.
@@ -492,6 +543,7 @@ function renderRows(contracts) {
     return;
   }
 
+  const trades = lastTrades(contracts, state.snapshot.generated_at);
   elements.rows.innerHTML = contracts.map((contract, index) => {
     const changeClass = signedClass(contract.change_percent);
     const premiumClass = signedClass(contract.premium_percent);
@@ -505,6 +557,10 @@ function renderRows(contracts) {
       : "—";
     const nearClass = contract.days_to_maturity <= 31 ? "is-near" : "";
     const unavailable = contract.status !== "available" ? " (unavailable)" : "";
+    const trade = trades.get(contract);
+    const staleTag = trade.stale
+      ? ' <span class="stale-tag">stale<span class="sr-only">, last traded before the market’s latest quote day</span></span>'
+      : "";
 
     return `
       <tr>
@@ -514,7 +570,12 @@ function renderRows(contracts) {
             <small>${escapeHtml(contract.code)}${index === 0 ? " · FRONT" : ""}${unavailable}</small>
           </span>
         </td>
-        <td class="numeric" data-label="Last"><span class="last-price">${formatPrice(contract.last)}</span></td>
+        <td class="numeric" data-label="Last">
+          <span class="last-cell">
+            <span class="last-price">${formatPrice(contract.last)}</span>
+            <small class="last-trade"><span class="sr-only">Last trade </span>${trade.text}${staleTag}</small>
+          </span>
+        </td>
         <td class="numeric ${changeClass}" data-label="Change">
           <span>${formatPercent(contract.change_percent)}</span>
         </td>
@@ -1011,8 +1072,7 @@ function selectMarket(marketKey, updateUrl = false) {
   renderRows(market.contracts);
   renderCarry(market);
   renderComparisonLegends();
-  renderChart();
-  renderYieldChart();
+  renderCharts();
 
   if (updateUrl) {
     const url = new URL(window.location.href);
@@ -1189,8 +1249,7 @@ function renderComparison() {
   elements.tooltip.hidden = true;
   elements.yieldTooltip.hidden = true;
   renderComparisonLegends();
-  renderChart();
-  renderYieldChart();
+  renderCharts();
 }
 
 // Overlay an archived close on both curves, or remove the overlay with null.
@@ -1336,10 +1395,7 @@ elements.marketButtons.forEach((button) => {
 
 window.addEventListener("resize", () => {
   window.clearTimeout(state.resizeTimer);
-  state.resizeTimer = window.setTimeout(() => {
-    renderChart();
-    renderYieldChart();
-  }, 120);
+  state.resizeTimer = window.setTimeout(renderCharts, 120);
 });
 
 elements.yieldPeriodButtons.forEach((button) => {
@@ -1353,24 +1409,81 @@ elements.yieldPeriodButtons.forEach((button) => {
     });
     elements.yieldTooltip.hidden = true;
     renderYieldChart();
+    syncKeyboardPoint(charts.yield);
   });
 });
 
 // Both days' values for one maturity month, and the change from the
 // comparison close to the view. A side without the contract reads "not listed".
-function comparisonTooltip(point, format, formatDelta) {
+function comparisonLines(point, format, formatDelta) {
   const value = (side) => point[side] ? format(point[side].value) : "not listed";
   const delta = point.current && point.compare
     ? `Δ ${formatDelta(point.current.value - point.compare.value)}`
     : "Δ —";
-  const contract = (point.current ?? point.compare).contract;
-  const daysLeft = point.current
-    ? `${escapeHtml(contract.days_to_maturity)} days left`
-    : "Not listed on the viewed day";
-  return `<strong>${escapeHtml(point.label)}</strong>` +
-    `${formatDay(referenceDate())}: ${value("current")}<br>` +
-    `${formatDay(state.compareDate)}: ${value("compare")}<br>` +
-    `<span class="tooltip-delta">${delta}</span><br>${daysLeft}`;
+  // Days left and the last trade describe only the day on screen.
+  return [
+    { text: `${formatDay(referenceDate())}: ${value("current")}` },
+    { text: `${formatDay(state.compareDate)}: ${value("compare")}` },
+    { text: delta, delta: true },
+    ...(point.current
+      ? [
+        { text: `${point.current.contract.days_to_maturity} days left` },
+        lastTradeLine(point.current.contract),
+      ]
+      : [{ text: "Not listed on the viewed day" }]),
+  ];
+}
+
+// One point's tooltip as plain text: its maturity label and the lines below
+// it. Pointer and keyboard both show it, and the live region reads it out.
+function priceTooltip(point) {
+  const unit = state.data.spot_unit;
+  return {
+    label: point.label,
+    lines: comparisonMarket()
+      ? comparisonLines(point, formatPrice, (delta) => `${formatSignedPrice(delta)} ${unit}`)
+      : [
+        { text: `${formatPrice(point.current.value)} · ${unit}` },
+        { text: `${point.current.contract.days_to_maturity} days left` },
+        lastTradeLine(point.current.contract),
+      ],
+  };
+}
+
+function yieldTooltip(point) {
+  const settings = YIELD_PERIODS[state.yieldPeriod];
+  const lines = comparisonMarket()
+    ? comparisonLines(
+      point,
+      (value) => `${formatYield(value)} ${settings.shortLabel}`,
+      (delta) => formatYieldDelta(delta),
+    )
+    : [
+      { text: `${formatYield(point.current.value)} ${settings.shortLabel}` },
+      { text: `${point.current.contract.days_to_maturity} days left` },
+      lastTradeLine(point.current.contract),
+    ];
+  if (point.isPeak) lines.push({ text: `Highest ${settings.label.toLowerCase()} yield` });
+  return { label: point.label, lines };
+}
+
+// Snapshot strings go in as text nodes, never as HTML.
+function fillTooltip(tooltip, { label, lines }) {
+  const title = document.createElement("strong");
+  title.textContent = label;
+  const nodes = [title];
+  lines.forEach(({ text, delta }, index) => {
+    if (index) nodes.push(document.createElement("br"));
+    if (delta) {
+      const span = document.createElement("span");
+      span.className = "tooltip-delta";
+      span.textContent = text;
+      nodes.push(span);
+    } else {
+      nodes.push(document.createTextNode(text));
+    }
+  });
+  tooltip.replaceChildren(...nodes);
 }
 
 function placeTooltip(tooltip, point, bounds, minX) {
@@ -1382,64 +1495,158 @@ function placeTooltip(tooltip, point, bounds, minX) {
   tooltip.style.top = `${tooltipY}px`;
 }
 
-elements.canvas.addEventListener("pointermove", (event) => {
-  if (!state.chartPoints.length) return;
-  const bounds = elements.canvas.getBoundingClientRect();
-  const x = event.clientX - bounds.left;
-  const nearest = state.chartPoints.reduce((best, point) =>
-    Math.abs(point.x - x) < Math.abs(best.x - x) ? point : best
-  );
+// Each chart's tooltip and keyboard state. The active point is the one the
+// arrow keys move from, kept by maturity across redraws; keyboard is true
+// while a keyboard-opened tooltip and its marker show.
+const charts = {
+  price: {
+    canvas: elements.canvas,
+    tooltip: elements.tooltip,
+    marker: elements.marker,
+    announcer: elements.announcer,
+    minX: 45,
+    points: () => state.chartPoints,
+    content: priceTooltip,
+    activeIndex: null,
+    activeKey: null,
+    keyboard: false,
+  },
+  yield: {
+    canvas: elements.yieldCanvas,
+    tooltip: elements.yieldTooltip,
+    marker: elements.yieldMarker,
+    announcer: elements.yieldAnnouncer,
+    minX: 60,
+    points: () => state.yieldChartPoints,
+    content: yieldTooltip,
+    activeIndex: null,
+    activeKey: null,
+    keyboard: false,
+  },
+};
 
-  if (Math.abs(nearest.x - x) > 35) {
-    elements.tooltip.hidden = true;
+function setActivePoint(chart, index) {
+  chart.activeIndex = index;
+  chart.activeKey = chart.points()[index].key;
+}
+
+function endKeyboardPoint(chart) {
+  chart.keyboard = false;
+  chart.marker.hidden = true;
+  chart.announcer.textContent = "";
+}
+
+function hideKeyboardPoint(chart) {
+  endKeyboardPoint(chart);
+  chart.tooltip.hidden = true;
+}
+
+// Show the point's tooltip and marker, and put its text in the live region.
+// The region only changes when the text does, so a redraw with the same
+// values isn't read out again.
+function showKeyboardPoint(chart, index) {
+  setActivePoint(chart, index);
+  chart.keyboard = true;
+  const point = chart.points()[index];
+  const content = chart.content(point);
+  fillTooltip(chart.tooltip, content);
+  placeTooltip(chart.tooltip, point, chart.canvas.getBoundingClientRect(), chart.minX);
+  chart.marker.style.left = `${chart.canvas.offsetLeft + point.x}px`;
+  chart.marker.style.top = `${chart.canvas.offsetTop + point.y}px`;
+  chart.marker.hidden = false;
+  const text = `${[content.label, ...content.lines.map((line) => line.text)].join(". ")}.`;
+  if (chart.announcer.textContent !== text) chart.announcer.textContent = text;
+}
+
+// After a redraw, keep the active maturity if it's still plotted, otherwise
+// clamp to the new points; a keyboard tooltip follows with fresh values.
+function syncKeyboardPoint(chart) {
+  const points = chart.points();
+  if (!points.length) {
+    chart.activeIndex = null;
+    chart.activeKey = null;
+    if (chart.keyboard) hideKeyboardPoint(chart);
     return;
   }
+  if (chart.activeIndex !== null) {
+    const same = points.findIndex((point) => point.key === chart.activeKey);
+    setActivePoint(chart, same >= 0 ? same : Math.min(chart.activeIndex, points.length - 1));
+  }
+  if (chart.keyboard) showKeyboardPoint(chart, chart.activeIndex);
+}
 
-  elements.tooltip.innerHTML = comparisonMarket()
-    ? comparisonTooltip(
-      nearest,
-      formatPrice,
-      (delta) => `${formatSignedPrice(delta)} ${escapeHtml(state.data.spot_unit)}`,
-    )
-    : `<strong>${escapeHtml(nearest.label)}</strong>` +
-      `${formatPrice(nearest.current.value)} · ${escapeHtml(state.data.spot_unit)}<br>` +
-      `${escapeHtml(nearest.current.contract.days_to_maturity)} days left`;
-  placeTooltip(elements.tooltip, nearest, bounds, 45);
-});
+function renderCharts() {
+  renderChart();
+  renderYieldChart();
+  syncKeyboardPoint(charts.price);
+  syncKeyboardPoint(charts.yield);
+}
 
-elements.canvas.addEventListener("pointerleave", () => {
-  elements.tooltip.hidden = true;
-});
+const KEY_STEPS = { ArrowLeft: -1, ArrowRight: 1 };
 
-elements.yieldCanvas.addEventListener("pointermove", (event) => {
-  if (!state.yieldChartPoints.length) return;
-  const bounds = elements.yieldCanvas.getBoundingClientRect();
-  const x = event.clientX - bounds.left;
-  const nearest = state.yieldChartPoints.reduce((best, point) =>
-    Math.abs(point.x - x) < Math.abs(best.x - x) ? point : best
-  );
-
-  if (Math.abs(nearest.x - x) > 35) {
-    elements.yieldTooltip.hidden = true;
+function handleChartKey(chart, event) {
+  if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+  const points = chart.points();
+  if (!points.length) return;
+  const last = points.length - 1;
+  let index;
+  if (event.key === "Escape") {
+    if (!chart.keyboard) return;
+    event.preventDefault();
+    hideKeyboardPoint(chart);
+    return;
+  } else if (event.key === "Home") {
+    index = 0;
+  } else if (event.key === "End") {
+    index = last;
+  } else if (event.key in KEY_STEPS) {
+    index = chart.activeIndex === null
+      ? 0
+      : Math.min(Math.max(chart.activeIndex + KEY_STEPS[event.key], 0), last);
+  } else {
     return;
   }
+  event.preventDefault();
+  showKeyboardPoint(chart, index);
+}
 
-  const settings = YIELD_PERIODS[state.yieldPeriod];
-  const peakNote = nearest.isPeak ? `<br>Highest ${settings.label.toLowerCase()} yield` : "";
-  elements.yieldTooltip.innerHTML = comparisonMarket()
-    ? comparisonTooltip(
-      nearest,
-      (value) => `${formatYield(value)} ${settings.shortLabel}`,
-      (delta) => formatYieldDelta(delta),
-    ) + peakNote
-    : `<strong>${escapeHtml(nearest.label)}</strong>` +
-      `${formatYield(nearest.current.value)} ${settings.shortLabel}<br>` +
-      `${escapeHtml(nearest.current.contract.days_to_maturity)} days left${peakNote}`;
-  placeTooltip(elements.yieldTooltip, nearest, bounds, 60);
-});
+Object.values(charts).forEach((chart) => {
+  chart.canvas.addEventListener("pointermove", (event) => {
+    const points = chart.points();
+    if (!points.length) return;
+    const bounds = chart.canvas.getBoundingClientRect();
+    const x = event.clientX - bounds.left;
+    const index = points.reduce((best, point, candidate) =>
+      Math.abs(point.x - x) < Math.abs(points[best].x - x) ? candidate : best, 0);
+    const nearest = points[index];
+    // The pointer takes over from the keyboard; arrow keys go on from its point.
+    if (chart.keyboard) endKeyboardPoint(chart);
 
-elements.yieldCanvas.addEventListener("pointerleave", () => {
-  elements.yieldTooltip.hidden = true;
+    if (Math.abs(nearest.x - x) > 35) {
+      chart.tooltip.hidden = true;
+      return;
+    }
+
+    setActivePoint(chart, index);
+    fillTooltip(chart.tooltip, chart.content(nearest));
+    placeTooltip(chart.tooltip, nearest, bounds, chart.minX);
+  });
+
+  chart.canvas.addEventListener("pointerleave", () => {
+    hideKeyboardPoint(chart);
+  });
+
+  chart.canvas.addEventListener("keydown", (event) => handleChartKey(chart, event));
+
+  // A click focuses the canvas too, but only keyboard focus opens a tooltip.
+  chart.canvas.addEventListener("focus", () => {
+    if (!chart.canvas.matches(":focus-visible") || !chart.points().length) return;
+    showKeyboardPoint(chart, chart.activeIndex ?? 0);
+  });
+
+  chart.canvas.addEventListener("blur", () => {
+    hideKeyboardPoint(chart);
+  });
 });
 
 async function init() {

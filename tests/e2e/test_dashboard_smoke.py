@@ -8,7 +8,7 @@ __init__.py, so `python -m unittest discover -s tests` never collects it.
 """
 
 import copy
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -80,6 +80,23 @@ AXE_FAILING_IMPACTS = ("serious", "critical")
 # Rules the audit turns off, each mapped to a one-line reason. None so far.
 AXE_DISABLED_RULES = {}
 MOBILE_VIEWPORT = {"width": 390, "height": 844}
+# Each chart's canvas, tooltip, keyboard marker, live region and the state
+# list app.js keeps its points in.
+KEYBOARD_CHARTS = (
+    ("#curve-chart", "#chart-tooltip", "#curve-marker", "#curve-announcer", "chartPoints"),
+    ("#yield-chart", "#yield-tooltip", "#yield-marker", "#yield-announcer", "yieldChartPoints"),
+)
+# The fixture's last trades that aren't on its newest quote day, 7 Oct, as the
+# contract table shows them; each is stale. Every other contract shows its
+# time alone, or "—" without one or with the old stand-in, the snapshot's own
+# generated_at. In Tokyo, 6 Oct 18:07 and 22:58 are already 7 Oct, so a
+# browser-zone day would wrongly clear those markers there.
+STALE_TRADES = {
+    "USDTRYN2027": "06 Oct 18:07",
+    "USDTRYF2028": "05 Oct 17:54",
+    "EURTRYZ2027": "06 Oct 22:58",
+}
+STALE_NOTE = ", last traded before the market’s latest quote day"
 
 
 def set_yields(contract, spot):
@@ -118,6 +135,9 @@ def derive_day(snapshot, day, factor):
                 if isinstance(contract.get(key), (int, float)):
                     contract[key] *= factor
             contract["days_to_maturity"] += gap
+            if contract.get("updated_at"):
+                traded = datetime.fromisoformat(contract["updated_at"]) - timedelta(days=gap)
+                contract["updated_at"] = traded.isoformat()
         if day == ROLLED_DAY:
             expired = copy.deepcopy(market["contracts"][0])
             expired["code"] = expired["code"].replace("1026", "0926")
@@ -565,7 +585,7 @@ class DashboardSmokeTests(unittest.TestCase):
             with self.subTest(rows=rows):
                 first = page.locator(f"{rows} > tr").first
                 expect(first.locator("strong")).to_have_text(front["label"])
-                expect(first.locator("small")).to_contain_text(front["code"])
+                expect(first.locator(".contract-name small")).to_contain_text(front["code"])
 
         tooltips = (("#curve-chart", "#chart-tooltip", "chartPoints"),
                     ("#yield-chart", "#yield-tooltip", "yieldChartPoints"))
@@ -579,12 +599,112 @@ class DashboardSmokeTests(unittest.TestCase):
         expect(page.locator("#curve-legend")).to_contain_text(f"no {usd['pair']} data")
         expect(page.locator("#yield-legend")).to_contain_text(f"no {usd['pair']} data")
 
+        for canvas, tooltip, _, announcer, _ in KEYBOARD_CHARTS:
+            with self.subTest(keyboard=canvas):
+                self.tab_to(canvas)
+                expect(page.locator(f"{tooltip} strong")).to_have_text(front["label"])
+                expect(page.locator(announcer)).to_contain_text(front["label"])
+
         containers = ("#contract-rows", "#carry-rows", "#chart-tooltip",
-                      "#yield-tooltip", "#curve-legend", "#yield-legend")
+                      "#yield-tooltip", "#curve-legend", "#yield-legend",
+                      "#curve-announcer", "#yield-announcer")
         for container in containers:
             with self.subTest(container=container):
                 expect(page.locator(f"{container} img")).to_have_count(0)
         self.assertIsNone(page.evaluate("() => window.__xss"))
+
+    # Last trade per contract
+
+    def expected_last_trades(self, snapshot, key, stale_trades=STALE_TRADES):
+        """Each row's last-trade text, with its screen-reader words, and the stale labels."""
+        texts, stale = [], []
+        for contract in snapshot["markets"][key]["contracts"]:
+            if contract["symbol"] in stale_trades:
+                texts.append(f"Last trade {stale_trades[contract['symbol']]} stale{STALE_NOTE}")
+                stale.append(contract["label"])
+            elif contract["updated_at"] in (None, snapshot["generated_at"]):
+                texts.append("Last trade —")
+            else:
+                # Every fixture time is stored in Istanbul time.
+                texts.append(f"Last trade {contract['updated_at'][11:16]}")
+        return texts, stale
+
+    def assert_last_trades(self, texts, stale):
+        rows = self.page.locator("#contract-rows > tr")
+        expect(rows.locator(".last-trade")).to_have_count(len(texts))
+        self.assertEqual(
+            [" ".join(text.split()) for text in rows.locator(".last-trade").all_text_contents()],
+            texts,
+        )
+        expect(rows.filter(has=self.page.locator(".stale-tag")).locator("strong")).to_have_text(stale)
+        tags = rows.locator(".stale-tag")
+        for index in range(tags.count()):
+            expect(tags.nth(index)).to_be_visible()
+            self.assertEqual(tags.nth(index).inner_text().split(",")[0].strip(), "STALE")
+
+    def test_table_shows_each_last_trade_and_flags_stale_rows(self):
+        usd = self.snapshot["markets"]["USDTRY"]["contracts"]
+        for stand_in in (None, self.snapshot["generated_at"]):
+            self.assertTrue(any(contract["updated_at"] == stand_in for contract in usd))
+        for timezone_id in (None, "America/New_York", "Asia/Tokyo"):
+            self.reopen_at(FIXTURE_DAY_TIME, timezone_id)
+            for key in self.snapshot["market_order"]:
+                with self.subTest(timezone=timezone_id, market=key):
+                    self.open_dashboard(f"?market={key}")
+                    self.assert_market(key)
+                    self.assert_last_trades(*self.expected_last_trades(self.snapshot, key))
+
+    def test_tooltips_and_live_region_give_the_last_trade(self):
+        self.reopen_at(FIXTURE_DAY_TIME, "Asia/Tokyo")
+        self.open_dashboard("?market=USDTRY")
+        tooltip = self.page.locator("#chart-tooltip")
+        self.hover_label("#curve-chart", "Jul 2027")
+        expect(tooltip).to_contain_text("Last trade 06 Oct 18:07 · stale")
+        self.hover_label("#curve-chart", "Oct 2026")
+        expect(tooltip).to_contain_text("Last trade 13:49")
+        expect(tooltip).not_to_contain_text("stale")
+        self.hover_label("#yield-chart", "Aug 2027", "yieldChartPoints")
+        expect(self.page.locator("#yield-tooltip")).to_contain_text("Last trade —")
+        # Clear of the charts, so a scroll can't put the pointer back on one.
+        self.page.mouse.move(0, 0)
+
+        for chart in KEYBOARD_CHARTS:
+            canvas, tooltip, _, announcer, _ = chart
+            with self.subTest(chart=canvas):
+                self.tab_to(canvas)
+                # The hovers above left each chart's active point elsewhere.
+                self.page.keyboard.press("Home")
+                self.assert_keyboard_point(chart, "Oct 2026")
+                expect(self.page.locator(announcer)).to_contain_text("23 days left. Last trade 13:49.")
+                self.page.keyboard.press("End")
+                self.assert_keyboard_point(chart, "Jan 2028")
+                expect(self.page.locator(tooltip)).to_contain_text("Last trade 05 Oct 17:54 · stale")
+                expect(self.page.locator(announcer)).to_contain_text("Last trade 05 Oct 17:54 · stale.")
+
+    def test_past_close_and_comparison_give_the_day_on_screen(self):
+        day = "2026-10-06"
+        self.open_day(day, "&market=USDTRY")
+        # The archived day's trades sit one day earlier, so the same rows are stale.
+        texts, stale = self.expected_last_trades(
+            self.history[day], "USDTRY",
+            {"USDTRYN2027": "05 Oct 18:07", "USDTRYF2028": "04 Oct 17:54"},
+        )
+        self.assertEqual(stale, ["Jul 2027", "Jan 2028"])
+        self.assert_last_trades(texts, stale)
+
+        self.compare_select().select_option("2026-09-30")
+        self.assert_comparing("2026-09-30", HISTORY_LABELS[day])
+        tooltip = self.page.locator("#chart-tooltip")
+        self.hover_label("#curve-chart", "Jul 2027")
+        expect(tooltip).to_contain_text("Last trade 05 Oct 18:07 · stale")
+        self.assertEqual(tooltip.inner_text().count("Last trade"), 1)
+
+        # A maturity not listed on the day on screen has no last trade to give.
+        self.compare_select().select_option(ROLLED_DAY)
+        self.assert_comparing(ROLLED_DAY, HISTORY_LABELS[day])
+        self.hover_label("#curve-chart", "Sep 2026")
+        expect(tooltip).to_contain_text("Not listed on the viewed day")
+        expect(tooltip).not_to_contain_text("Last trade")
 
     # Comparison overlay
 
@@ -1032,6 +1152,226 @@ class DashboardSmokeTests(unittest.TestCase):
             places=9,
         )
 
+    # Keyboard access to the chart points
+
+    def tab_to(self, selector, limit=60):
+        """Press Tab until selector has focus; return the ids focused on the way."""
+        visited = []
+        for _ in range(limit):
+            self.page.keyboard.press("Tab")
+            visited.append(self.page.evaluate("() => document.activeElement.id"))
+            if self.page.evaluate(
+                f"() => document.activeElement === document.querySelector('{selector}')"
+            ):
+                return visited
+        self.fail(f"Tab never reached {selector}: {visited}")
+
+    def watch_keys(self):
+        """Record each keydown that reaches the window and whether it was handled."""
+        self.page.evaluate(
+            """() => {
+                window.__keys = [];
+                window.addEventListener("keydown", (event) => {
+                    window.__keys.push([event.key, event.defaultPrevented]);
+                });
+            }"""
+        )
+
+    def handled_keys(self):
+        """Each key pressed since watch_keys, mapped to whether the page handled it."""
+        return [tuple(key) for key in self.page.evaluate("() => window.__keys.splice(0)")]
+
+    def assert_keyboard_point(self, chart, label):
+        """The chart's tooltip and marker show the maturity label; return the point."""
+        canvas, tooltip, marker, announcer, kind = chart
+        points = [point for point in self.chart_points(kind) if point["label"] == label]
+        self.assertEqual(len(points), 1, f"no single {label} point")
+        expect(self.page.locator(tooltip)).to_be_visible()
+        expect(self.page.locator(f"{tooltip} strong")).to_have_text(label)
+        expect(self.page.locator(marker)).to_be_visible()
+        expect(self.page.locator(announcer)).to_have_text(re.compile(rf"^{re.escape(label)}\. "))
+        # The marker is centred on the point it names. Both boxes are read at
+        # once, as the page may still be smooth-scrolling to the focused chart.
+        offset = self.page.evaluate(
+            f"""() => {{
+                const box = document.querySelector("{canvas}").getBoundingClientRect();
+                const ring = document.querySelector("{marker}").getBoundingClientRect();
+                return [ring.x + ring.width / 2 - box.x, ring.y + ring.height / 2 - box.y];
+            }}"""
+        )
+        self.assertAlmostEqual(offset[0], points[0]["x"], delta=1)
+        self.assertAlmostEqual(offset[1], points[0]["y"], delta=1)
+        return points[0]
+
+    def assert_no_keyboard_point(self, chart):
+        _, tooltip, marker, announcer, _ = chart
+        expect(self.page.locator(tooltip)).to_be_hidden()
+        expect(self.page.locator(marker)).to_be_hidden()
+        expect(self.page.locator(announcer)).to_have_text("")
+
+    def test_tab_reaches_both_charts_in_order_with_a_focus_indicator(self):
+        self.open_dashboard("?market=USDTRY")
+        before = self.tab_to("#curve-chart")
+        self.assertNotIn("yield-chart", before)
+        for chart in KEYBOARD_CHARTS:
+            with self.subTest(chart=chart[0]):
+                if chart is not KEYBOARD_CHARTS[0]:
+                    self.tab_to(chart[0])
+                outline = self.page.evaluate(
+                    f"""() => {{
+                        const style = getComputedStyle(document.querySelector("{chart[0]}"));
+                        return [style.outlineStyle, style.outlineWidth, style.outlineColor];
+                    }}"""
+                )
+                self.assertEqual(outline, ["solid", "3px", "rgb(0, 0, 238)"])
+                self.assert_keyboard_point(chart, self.chart_points(chart[4])[0]["label"])
+
+    def test_arrow_keys_step_through_each_chart_like_the_pointer(self):
+        self.open_dashboard("?market=USDTRY")
+        for chart in KEYBOARD_CHARTS:
+            canvas, tooltip, marker, _, kind = chart
+            with self.subTest(chart=canvas):
+                points = self.chart_points(kind)
+                self.tab_to(canvas)
+                keyboard = []
+                for index, point in enumerate(points):
+                    if index:
+                        self.page.keyboard.press("ArrowRight")
+                    self.assert_keyboard_point(chart, point["label"])
+                    keyboard.append(self.page.locator(tooltip).inner_text())
+                pointer = []
+                for point in points:
+                    self.hover(canvas, point)
+                    expect(self.page.locator(f"{tooltip} strong")).to_have_text(point["label"])
+                    pointer.append(self.page.locator(tooltip).inner_text())
+                self.assertEqual(keyboard, pointer)
+                # The pointer takes over from the keyboard marker.
+                expect(self.page.locator(marker)).to_be_hidden()
+
+    def test_home_end_escape_and_blur(self):
+        self.open_dashboard("?market=USDTRY")
+        chart = KEYBOARD_CHARTS[0]
+        labels = [point["label"] for point in self.chart_points()]
+        self.tab_to(chart[0])
+        self.watch_keys()
+        scroll = self.page.evaluate("() => window.scrollY")
+        for key, label in (("End", labels[-1]), ("ArrowRight", labels[-1]),
+                           ("Home", labels[0]), ("ArrowLeft", labels[0])):
+            with self.subTest(key=key):
+                self.page.keyboard.press(key)
+                self.assert_keyboard_point(chart, label)
+        self.assertEqual(self.page.evaluate("() => window.scrollY"), scroll)
+        self.assertEqual(
+            self.handled_keys(),
+            [("End", True), ("ArrowRight", True), ("Home", True), ("ArrowLeft", True)],
+        )
+
+        self.page.keyboard.press("Escape")
+        self.assert_no_keyboard_point(chart)
+        self.page.keyboard.press("ArrowRight")
+        self.assert_keyboard_point(chart, labels[1])
+        self.assertEqual(self.handled_keys(), [("Escape", True), ("ArrowRight", True)])
+
+        # Other keys pass through, and Tab still leaves the chart.
+        self.page.keyboard.press("ArrowDown")
+        self.page.keyboard.press("Tab")
+        self.assertEqual(self.handled_keys(), [("ArrowDown", False), ("Tab", False)])
+        self.assertNotEqual(self.page.evaluate("() => document.activeElement.id"), "curve-chart")
+        self.assert_no_keyboard_point(chart)
+
+    def test_announces_the_point_and_comparison_as_text(self):
+        self.open_dashboard("?market=USDTRY")
+        self.choose_compare("2026-09-30")
+        self.tab_to("#curve-chart")
+        announcer = self.page.locator("#curve-announcer")
+        expect(announcer).to_have_attribute("aria-live", "polite")
+        # The same hand-computed values as the pointer tooltip test.
+        expect(announcer).to_have_text(
+            f"Oct 2026. {LIVE_LABEL}: 50.0830. 30 Sept 2026: 48.5805. "
+            "Δ +1.5025 TRY per USD. 23 days left. Last trade 13:49."
+        )
+        self.assertEqual(self.page.evaluate("() => document.querySelector('#curve-announcer').children.length"), 0)
+        expect(self.page.locator("#chart-tooltip")).to_contain_text("Δ +1.5025 TRY per USD")
+
+    def test_yield_peak_note_is_shown_and_announced(self):
+        self.open_dashboard("?market=USDTRY")
+        chart = KEYBOARD_CHARTS[1]
+        peak = self.page.evaluate("() => state.yieldChartPoints.findIndex((point) => point.isPeak)")
+        points = self.chart_points("yieldChartPoints")
+        self.tab_to("#yield-chart")
+        for _ in range(peak):
+            self.page.keyboard.press("ArrowRight")
+        self.assert_keyboard_point(chart, points[peak]["label"])
+        expect(self.page.locator("#yield-tooltip")).to_contain_text("Highest daily yield")
+        expect(self.page.locator("#yield-announcer")).to_have_text(
+            re.compile(r"\. Highest daily yield\.$")
+        )
+        self.page.keyboard.press("ArrowLeft" if peak else "ArrowRight")
+        expect(self.page.locator("#yield-tooltip")).not_to_contain_text("Highest")
+        expect(self.page.locator("#yield-announcer")).not_to_contain_text("Highest")
+
+    def test_redraws_keep_the_keyboard_point_in_range(self):
+        self.open_dashboard("?market=USDTRY")
+        chart = KEYBOARD_CHARTS[1]
+        self.tab_to("#yield-chart")
+        self.page.keyboard.press("End")
+        self.assert_keyboard_point(chart, "Jan 2028")
+
+        # Leave for the period buttons just before the chart, and come back.
+        self.page.keyboard.press("Shift+Tab")
+        self.assert_no_keyboard_point(chart)
+        expect(self.page.locator('[data-yield-period="annualized"]')).to_be_focused()
+        self.page.keyboard.press("Enter")
+        expect(self.page.locator("#yield-period-label")).to_have_text("Annualized · 365D")
+        self.page.keyboard.press("Tab")
+        point = self.assert_keyboard_point(chart, "Jan 2028")
+        keyboard = self.page.locator("#yield-tooltip").inner_text()
+        self.assertIn("365D", keyboard)
+
+        # Redraws while the chart keeps focus: the same maturity stays active
+        # with fresh values, or the nearest one that's still plotted.
+        self.page.evaluate(f"() => setCompare('{ROLLED_DAY}')")
+        self.assert_comparing(ROLLED_DAY)
+        self.assert_keyboard_point(chart, "Jan 2028")
+        expect(self.page.locator("#yield-tooltip")).to_contain_text("07 Jul 2026: not listed")
+        self.page.evaluate("() => selectMarket('XAUTRY', true)")
+        self.assert_market("XAUTRY")
+        points = self.chart_points("yieldChartPoints")
+        self.assert_keyboard_point(chart, points[-1]["label"])
+        self.assertEqual(
+            self.page.evaluate("() => charts.yield.activeIndex"), len(points) - 1,
+        )
+        expect(self.page.locator("#yield-chart")).to_be_focused()
+        self.assertNotEqual(point, points[-1])
+
+    def test_market_without_prices_ignores_chart_keys(self):
+        snapshot = copy.deepcopy(self.snapshot)
+        for contract in snapshot["markets"]["XAUTRY"]["contracts"][1:]:
+            contract["last"] = None
+        self.reopen_at(datetime.fromisoformat("2026-10-31T12:00:00+03:00"))
+        self.serve_snapshot(re.compile(r"/data/market\.json"), snapshot)
+        self.open_dashboard("?market=USDTRY")
+        # A keyboard tooltip open when the market changes goes away with its points.
+        self.tab_to("#curve-chart")
+        self.page.keyboard.press("End")
+        self.assert_keyboard_point(KEYBOARD_CHARTS[0], "Jan 2028")
+        self.page.evaluate("() => selectMarket('XAUTRY', true)")
+        self.assertEqual(self.chart_points(), [])
+        self.assert_no_keyboard_point(KEYBOARD_CHARTS[0])
+
+        self.page.locator('.market-options [data-market="XAUTRY"]').focus()
+        self.watch_keys()
+        for chart in KEYBOARD_CHARTS:
+            with self.subTest(chart=chart[0]):
+                self.tab_to(chart[0])
+                for key in ("ArrowRight", "End", "Home", "ArrowLeft", "Escape"):
+                    self.page.keyboard.press(key)
+                    self.assert_no_keyboard_point(chart)
+        self.assertTrue(
+            all(not handled for key, handled in self.handled_keys() if key != "Tab"),
+            "a chart without points handled a key",
+        )
+
     # Accessibility: axe-core audit of each rendered state
 
     def assert_accessible(self, state):
@@ -1079,6 +1419,18 @@ class DashboardSmokeTests(unittest.TestCase):
         self.hover("#curve-chart", self.chart_points()[0])
         expect(self.page.locator("#chart-tooltip")).to_be_visible()
         self.assert_accessible(f"comparison with {compared}")
+
+    @unittest.skipIf(Axe is None, "axe-playwright-python is not installed")
+    def test_accessibility_of_a_keyboard_tooltip(self):
+        compared = "2026-09-30"
+        self.open_dashboard(f"?compare={compared}")
+        self.assert_comparing(compared)
+        for chart in KEYBOARD_CHARTS:
+            with self.subTest(chart=chart[0]):
+                self.tab_to(chart[0])
+                self.page.keyboard.press("ArrowRight")
+                self.assert_keyboard_point(chart, self.chart_points(chart[4])[1]["label"])
+                self.assert_accessible(f"keyboard tooltip on {chart[0]}")
 
     @unittest.skipIf(Axe is None, "axe-playwright-python is not installed")
     def test_accessibility_of_each_yield_period(self):

@@ -532,7 +532,6 @@ def normalize_contract(
     table_row: dict[str, Any] | None,
     spot_last: float,
     today: date,
-    generated_at: datetime,
     market: MarketConfig = DEFAULT_MARKET,
     trend_factor: float | None = None,
 ) -> dict[str, Any]:
@@ -597,8 +596,9 @@ def normalize_contract(
         "expected_short_profit_try": short_expected_profit(
             bid, expected_spot, market.contract_size
         ),
-        "updated_at": iso_timestamp(quote.get("timestamp"))
-        or generated_at.isoformat(timespec="seconds"),
+        # The quote's own trade time. A quote without one gets null, never the
+        # snapshot time, so an untraded contract can't pass as fresh.
+        "updated_at": iso_timestamp(quote.get("timestamp")),
         "status": "available" if last is not None else "unavailable",
         "source": source,
     }
@@ -656,7 +656,6 @@ def build_snapshot(now: datetime | None = None) -> dict[str, Any]:
                 table_rows[market.key].get(item["symbol"]),
                 spot["last"],
                 today,
-                generated_at,
                 market,
                 spot_trend["daily_factor"] if spot_trend else None,
             )
