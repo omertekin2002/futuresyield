@@ -585,6 +585,26 @@ canvas {
   width: 100%;
   height: 100%;
 }
+/* Drawn inside the canvas edge, over the frame colour, which the link blue
+   keeps 3:1 against (sky 4.4:1, periwinkle 3.5:1); outside it would run into
+   the strip below. The plot's margins keep it clear of the curve. */
+canvas:focus-visible {
+  outline: 3px solid var(--link);
+  outline-offset: -3px;
+}
+/* The keyboard's active point: a blue ring with white edges, so it stands
+   out from the curve's black markers and the yield chart's peak ring. */
+.chart-marker {
+  position: absolute;
+  z-index: 4;
+  width: 30px;
+  height: 30px;
+  margin: -15px 0 0 -15px;
+  border: 3px solid var(--link);
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--paper), inset 0 0 0 2px var(--paper);
+  pointer-events: none;
+}
 .curve-y-label,
 .yield-y-label {
   position: absolute;
