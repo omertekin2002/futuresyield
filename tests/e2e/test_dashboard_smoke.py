@@ -8,7 +8,7 @@ __init__.py, so `python -m unittest discover -s tests` never collects it.
 """
 
 import copy
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -86,6 +86,17 @@ KEYBOARD_CHARTS = (
     ("#curve-chart", "#chart-tooltip", "#curve-marker", "#curve-announcer", "chartPoints"),
     ("#yield-chart", "#yield-tooltip", "#yield-marker", "#yield-announcer", "yieldChartPoints"),
 )
+# The fixture's last trades that aren't on its newest quote day, 7 Oct, as the
+# contract table shows them; each is stale. Every other contract shows its
+# time alone, or "—" without one or with the old stand-in, the snapshot's own
+# generated_at. In Tokyo, 6 Oct 18:07 and 22:58 are already 7 Oct, so a
+# browser-zone day would wrongly clear those markers there.
+STALE_TRADES = {
+    "USDTRYN2027": "06 Oct 18:07",
+    "USDTRYF2028": "05 Oct 17:54",
+    "EURTRYZ2027": "06 Oct 22:58",
+}
+STALE_NOTE = ", last traded before the market’s latest quote day"
 
 
 def set_yields(contract, spot):
@@ -124,6 +135,9 @@ def derive_day(snapshot, day, factor):
                 if isinstance(contract.get(key), (int, float)):
                     contract[key] *= factor
             contract["days_to_maturity"] += gap
+            if contract.get("updated_at"):
+                traded = datetime.fromisoformat(contract["updated_at"]) - timedelta(days=gap)
+                contract["updated_at"] = traded.isoformat()
         if day == ROLLED_DAY:
             expired = copy.deepcopy(market["contracts"][0])
             expired["code"] = expired["code"].replace("1026", "0926")
@@ -571,7 +585,7 @@ class DashboardSmokeTests(unittest.TestCase):
             with self.subTest(rows=rows):
                 first = page.locator(f"{rows} > tr").first
                 expect(first.locator("strong")).to_have_text(front["label"])
-                expect(first.locator("small")).to_contain_text(front["code"])
+                expect(first.locator(".contract-name small")).to_contain_text(front["code"])
 
         tooltips = (("#curve-chart", "#chart-tooltip", "chartPoints"),
                     ("#yield-chart", "#yield-tooltip", "yieldChartPoints"))
@@ -598,6 +612,99 @@ class DashboardSmokeTests(unittest.TestCase):
             with self.subTest(container=container):
                 expect(page.locator(f"{container} img")).to_have_count(0)
         self.assertIsNone(page.evaluate("() => window.__xss"))
+
+    # Last trade per contract
+
+    def expected_last_trades(self, snapshot, key, stale_trades=STALE_TRADES):
+        """Each row's last-trade text, with its screen-reader words, and the stale labels."""
+        texts, stale = [], []
+        for contract in snapshot["markets"][key]["contracts"]:
+            if contract["symbol"] in stale_trades:
+                texts.append(f"Last trade {stale_trades[contract['symbol']]} stale{STALE_NOTE}")
+                stale.append(contract["label"])
+            elif contract["updated_at"] in (None, snapshot["generated_at"]):
+                texts.append("Last trade —")
+            else:
+                # Every fixture time is stored in Istanbul time.
+                texts.append(f"Last trade {contract['updated_at'][11:16]}")
+        return texts, stale
+
+    def assert_last_trades(self, texts, stale):
+        rows = self.page.locator("#contract-rows > tr")
+        expect(rows.locator(".last-trade")).to_have_count(len(texts))
+        self.assertEqual(
+            [" ".join(text.split()) for text in rows.locator(".last-trade").all_text_contents()],
+            texts,
+        )
+        expect(rows.filter(has=self.page.locator(".stale-tag")).locator("strong")).to_have_text(stale)
+        tags = rows.locator(".stale-tag")
+        for index in range(tags.count()):
+            expect(tags.nth(index)).to_be_visible()
+            self.assertEqual(tags.nth(index).inner_text().split(",")[0].strip(), "STALE")
+
+    def test_table_shows_each_last_trade_and_flags_stale_rows(self):
+        usd = self.snapshot["markets"]["USDTRY"]["contracts"]
+        for stand_in in (None, self.snapshot["generated_at"]):
+            self.assertTrue(any(contract["updated_at"] == stand_in for contract in usd))
+        for timezone_id in (None, "America/New_York", "Asia/Tokyo"):
+            self.reopen_at(FIXTURE_DAY_TIME, timezone_id)
+            for key in self.snapshot["market_order"]:
+                with self.subTest(timezone=timezone_id, market=key):
+                    self.open_dashboard(f"?market={key}")
+                    self.assert_market(key)
+                    self.assert_last_trades(*self.expected_last_trades(self.snapshot, key))
+
+    def test_tooltips_and_live_region_give_the_last_trade(self):
+        self.reopen_at(FIXTURE_DAY_TIME, "Asia/Tokyo")
+        self.open_dashboard("?market=USDTRY")
+        tooltip = self.page.locator("#chart-tooltip")
+        self.hover_label("#curve-chart", "Jul 2027")
+        expect(tooltip).to_contain_text("Last trade 06 Oct 18:07 · stale")
+        self.hover_label("#curve-chart", "Oct 2026")
+        expect(tooltip).to_contain_text("Last trade 13:49")
+        expect(tooltip).not_to_contain_text("stale")
+        self.hover_label("#yield-chart", "Aug 2027", "yieldChartPoints")
+        expect(self.page.locator("#yield-tooltip")).to_contain_text("Last trade —")
+        # Clear of the charts, so a scroll can't put the pointer back on one.
+        self.page.mouse.move(0, 0)
+
+        for chart in KEYBOARD_CHARTS:
+            canvas, tooltip, _, announcer, _ = chart
+            with self.subTest(chart=canvas):
+                self.tab_to(canvas)
+                # The hovers above left each chart's active point elsewhere.
+                self.page.keyboard.press("Home")
+                self.assert_keyboard_point(chart, "Oct 2026")
+                expect(self.page.locator(announcer)).to_contain_text("23 days left. Last trade 13:49.")
+                self.page.keyboard.press("End")
+                self.assert_keyboard_point(chart, "Jan 2028")
+                expect(self.page.locator(tooltip)).to_contain_text("Last trade 05 Oct 17:54 · stale")
+                expect(self.page.locator(announcer)).to_contain_text("Last trade 05 Oct 17:54 · stale.")
+
+    def test_past_close_and_comparison_give_the_day_on_screen(self):
+        day = "2026-10-06"
+        self.open_day(day, "&market=USDTRY")
+        # The archived day's trades sit one day earlier, so the same rows are stale.
+        texts, stale = self.expected_last_trades(
+            self.history[day], "USDTRY",
+            {"USDTRYN2027": "05 Oct 18:07", "USDTRYF2028": "04 Oct 17:54"},
+        )
+        self.assertEqual(stale, ["Jul 2027", "Jan 2028"])
+        self.assert_last_trades(texts, stale)
+
+        self.compare_select().select_option("2026-09-30")
+        self.assert_comparing("2026-09-30", HISTORY_LABELS[day])
+        tooltip = self.page.locator("#chart-tooltip")
+        self.hover_label("#curve-chart", "Jul 2027")
+        expect(tooltip).to_contain_text("Last trade 05 Oct 18:07 · stale")
+        self.assertEqual(tooltip.inner_text().count("Last trade"), 1)
+
+        # A maturity not listed on the day on screen has no last trade to give.
+        self.compare_select().select_option(ROLLED_DAY)
+        self.assert_comparing(ROLLED_DAY, HISTORY_LABELS[day])
+        self.hover_label("#curve-chart", "Sep 2026")
+        expect(tooltip).to_contain_text("Not listed on the viewed day")
+        expect(tooltip).not_to_contain_text("Last trade")
 
     # Comparison overlay
 
@@ -1181,7 +1288,7 @@ class DashboardSmokeTests(unittest.TestCase):
         # The same hand-computed values as the pointer tooltip test.
         expect(announcer).to_have_text(
             f"Oct 2026. {LIVE_LABEL}: 50.0830. 30 Sept 2026: 48.5805. "
-            "Δ +1.5025 TRY per USD. 23 days left."
+            "Δ +1.5025 TRY per USD. 23 days left. Last trade 13:49."
         )
         self.assertEqual(self.page.evaluate("() => document.querySelector('#curve-announcer').children.length"), 0)
         expect(self.page.locator("#chart-tooltip")).to_contain_text("Δ +1.5025 TRY per USD")

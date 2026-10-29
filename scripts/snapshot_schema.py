@@ -285,10 +285,16 @@ class Checker:
             self.fail(
                 f"{path}.days_to_maturity", f"must be an integer >= 0, got {days!r}"
             )
-        if "updated_at" not in missing and not is_iso_timestamp(contract["updated_at"]):
+        # A contract's last trade time; null when its quote carried none.
+        updated_at = contract.get("updated_at")
+        if (
+            "updated_at" not in missing
+            and updated_at is not None
+            and not is_iso_timestamp(updated_at)
+        ):
             self.fail(
                 f"{path}.updated_at",
-                f"must be an ISO timestamp with offset, got {contract['updated_at']!r}",
+                f"must be an ISO timestamp with offset or null, got {updated_at!r}",
             )
 
         status = contract.get("status")
