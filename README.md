@@ -279,13 +279,20 @@ without a browser.
 [axe-core](https://github.com/dequelabs/axe-core), bundled with
 `axe-playwright-python`, against the WCAG 2.1 A and AA rules. It audits the
 live view of each market, a past close with its banner, a comparison overlay
-with both legends and a tooltip showing, each yield period, a 390×844 mobile
-viewport and the load-error state. It fails on any serious or critical
-violation and lists each one's rule, impact, element and help text. The audit
-doesn't cover keyboard access to the chart points, which isn't there yet: the
-charts are labelled images, and the contract table is their full text
-alternative. As an automated check, it also can't judge everything WCAG asks
-for, such as whether labels make sense.
+with both legends and a tooltip showing, a tooltip opened from the keyboard on
+each chart, each yield period, a 390×844 mobile viewport and the load-error
+state. It fails on any serious or critical violation and lists each one's
+rule, impact, element and help text. As an automated check, it can't judge
+everything WCAG asks for, such as whether labels make sense.
+
+Each chart is one Tab stop, with a labelled summary and the contract table as
+its full text alternative. On a focused chart, Left and Right arrow step
+through the maturities, Home and End jump to the first and last, and Escape
+hides the tooltip; Tab moves on as usual. The tooltip matches the pointer's,
+a ring marks the active point, and a polite live region reads out the same
+text: the maturity, its price or yield, days left, the peak note and, with a
+comparison on, both days' values and the change. Separate smoke-test cases
+cover these keys on both charts.
 
 ## Continuous integration
 
