@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 import json
 from pathlib import Path
 import tempfile
@@ -176,7 +176,6 @@ class NormalizationTests(unittest.TestCase):
             {"code": "F_USDTRY0826", "turnover_try": 123_000},
             spot_last=47.0,
             today=now.date(),
-            generated_at=now,
         )
 
         self.assertEqual(result["maturity_date"], "2026-08-31")
@@ -193,6 +192,30 @@ class NormalizationTests(unittest.TestCase):
         self.assertIsNone(result["expected_spot_at_maturity"])
         self.assertIsNone(result["expected_short_profit_try"])
 
+    def test_keeps_the_quote_trade_time(self):
+        result = normalize_contract(
+            {"symbol": "USDTRYQ2026"},
+            {"last": 48.0, "timestamp": datetime(2026, 7, 17, 18, 7, tzinfo=timezone.utc)},
+            None,
+            spot_last=47.0,
+            today=date(2026, 7, 20),
+        )
+
+        self.assertEqual(result["updated_at"], "2026-07-17T21:07:00+03:00")
+
+    def test_quote_without_a_trade_time_has_null_updated_at(self):
+        # Neither the stream quote nor the VİOP table row carries a time.
+        for quote in ({"last": 48.0}, {"last": 48.0, "timestamp": None}, None):
+            with self.subTest(quote=quote):
+                result = normalize_contract(
+                    {"symbol": "USDTRYQ2026"},
+                    quote,
+                    {"code": "F_USDTRY0826", "last": 48.1},
+                    spot_last=47.0,
+                    today=date(2026, 7, 20),
+                )
+                self.assertIsNone(result["updated_at"])
+
     def test_projects_usdtry_short_at_bid(self):
         now = datetime(2026, 7, 20, 12, tzinfo=ZoneInfo("Europe/Istanbul"))
         result = normalize_contract(
@@ -201,7 +224,6 @@ class NormalizationTests(unittest.TestCase):
             None,
             spot_last=47.0,
             today=now.date(),
-            generated_at=now,
             trend_factor=1.0005,
         )
 
@@ -223,7 +245,6 @@ class NormalizationTests(unittest.TestCase):
             None,
             spot_last=47.0,
             today=now.date(),
-            generated_at=now,
             trend_factor=1.0005,
         )
 
@@ -238,7 +259,6 @@ class NormalizationTests(unittest.TestCase):
             None,
             spot_last=54.0,
             today=now.date(),
-            generated_at=now,
             market=MARKETS["EURTRY"],
             trend_factor=1.0005,
         )
@@ -254,7 +274,6 @@ class NormalizationTests(unittest.TestCase):
             None,
             spot_last=6_100.0,
             today=now.date(),
-            generated_at=now,
             market=MARKETS["XAUTRY"],
         )
 

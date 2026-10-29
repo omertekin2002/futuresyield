@@ -34,6 +34,14 @@ class ValidSnapshotTests(unittest.TestCase):
         contract["status"] = "unavailable"
         validate_snapshot(snapshot)
 
+    def test_accepts_contract_without_a_trade_time(self):
+        snapshot = load(FIXTURE)
+        contracts = snapshot["markets"]["USDTRY"]["contracts"]
+        contracts[0]["updated_at"] = None
+        contracts[1]["updated_at"] = "2026-10-06T22:58:00+03:00"
+        contracts[2]["updated_at"] = "2026-10-07T10:58:00Z"
+        validate_snapshot(snapshot)
+
     def test_accepts_contract_on_maturity_day(self):
         snapshot = load(FIXTURE)
         snapshot["markets"]["EURTRY"]["contracts"][0]["days_to_maturity"] = 0
@@ -74,6 +82,12 @@ class InvalidSnapshotTests(unittest.TestCase):
             "markets.USDTRY.contracts[0].maturity_date",
             "markets.USDTRY.contracts[0].updated_at",
         )
+
+    def test_trade_time_needs_an_offset(self):
+        for value in (1_760_000_000, "2026-10-07T13:49:00", "2026-10-07", "", True):
+            with self.subTest(value=value):
+                self.front["updated_at"] = value
+                self.assert_rejected("markets.USDTRY.contracts[0].updated_at")
 
     def test_market_order_missing_a_market(self):
         self.snapshot["market_order"] = ["USDTRY", "EURTRY"]

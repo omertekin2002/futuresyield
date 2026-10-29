@@ -848,6 +848,23 @@ tbody tr:last-child td {
 .last-price {
   font-weight: 700;
 }
+/* The last trade sits under the price, so the mobile card stays one row. */
+.last-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+.last-trade {
+  font-size: 10px;
+}
+.stale-tag {
+  padding: 0 3px;
+  border: 1px solid var(--ink);
+  background: var(--paper);
+  font-weight: 700;
+  text-transform: uppercase;
+}
 .days-badge {
   display: inline-block;
   min-width: 28px;
@@ -1199,6 +1216,9 @@ footer p {
   }
   .contract-name small {
     font-size: 12px;
+  }
+  .last-trade {
+    font-size: 11px;
   }
   .loading-row,
   .empty-row {
