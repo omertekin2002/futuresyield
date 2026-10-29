@@ -334,9 +334,11 @@ accessibility audit.
   when the quote carried no time. A contract is **stale** when its last trade
   falls on an earlier Istanbul day than the newest last trade of any contract in
   the same market and snapshot, so holidays and weekends need no special case.
-  A contract without a time is never marked stale. Chart tooltips and the
-  keyboard read-out include the same line; with a comparison on, it describes
-  only the day on screen.
+  A contract without a time is never marked stale. Snapshots written before
+  `updated_at` could be null filled a missing time in with the snapshot's own
+  `generated_at`, so a contract time equal to it also shows "—". Chart
+  tooltips and the keyboard read-out include the same line; with a comparison
+  on, it describes only the day on screen.
 
 This project is for personal and educational use only. It is not investment
 advice. Review borsapy's upstream data-license disclaimer before use; commercial

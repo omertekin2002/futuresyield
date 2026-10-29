@@ -88,8 +88,9 @@ KEYBOARD_CHARTS = (
 )
 # The fixture's last trades that aren't on its newest quote day, 7 Oct, as the
 # contract table shows them; each is stale. Every other contract shows its
-# time alone, or "—" without one. EURTRYZ2027's 22:58 is already 8 Oct in
-# Tokyo, so a browser-zone day would wrongly clear its marker there.
+# time alone, or "—" without one or with the old stand-in, the snapshot's own
+# generated_at. In Tokyo, 6 Oct 18:07 and 22:58 are already 7 Oct, so a
+# browser-zone day would wrongly clear those markers there.
 STALE_TRADES = {
     "USDTRYN2027": "06 Oct 18:07",
     "USDTRYF2028": "05 Oct 17:54",
@@ -614,14 +615,14 @@ class DashboardSmokeTests(unittest.TestCase):
 
     # Last trade per contract
 
-    def expected_last_trades(self, market, stale_trades=STALE_TRADES):
+    def expected_last_trades(self, snapshot, key, stale_trades=STALE_TRADES):
         """Each row's last-trade text, with its screen-reader words, and the stale labels."""
         texts, stale = [], []
-        for contract in market["contracts"]:
+        for contract in snapshot["markets"][key]["contracts"]:
             if contract["symbol"] in stale_trades:
                 texts.append(f"Last trade {stale_trades[contract['symbol']]} stale{STALE_NOTE}")
                 stale.append(contract["label"])
-            elif contract["updated_at"] is None:
+            elif contract["updated_at"] in (None, snapshot["generated_at"]):
                 texts.append("Last trade —")
             else:
                 # Every fixture time is stored in Istanbul time.
@@ -642,15 +643,16 @@ class DashboardSmokeTests(unittest.TestCase):
             self.assertEqual(tags.nth(index).inner_text().split(",")[0].strip(), "STALE")
 
     def test_table_shows_each_last_trade_and_flags_stale_rows(self):
-        self.assertTrue(any(contract["updated_at"] is None
-                            for contract in self.snapshot["markets"]["USDTRY"]["contracts"]))
+        usd = self.snapshot["markets"]["USDTRY"]["contracts"]
+        for stand_in in (None, self.snapshot["generated_at"]):
+            self.assertTrue(any(contract["updated_at"] == stand_in for contract in usd))
         for timezone_id in (None, "America/New_York", "Asia/Tokyo"):
             self.reopen_at(FIXTURE_DAY_TIME, timezone_id)
             for key in self.snapshot["market_order"]:
                 with self.subTest(timezone=timezone_id, market=key):
                     self.open_dashboard(f"?market={key}")
                     self.assert_market(key)
-                    self.assert_last_trades(*self.expected_last_trades(self.snapshot["markets"][key]))
+                    self.assert_last_trades(*self.expected_last_trades(self.snapshot, key))
 
     def test_tooltips_and_live_region_give_the_last_trade(self):
         self.reopen_at(FIXTURE_DAY_TIME, "Asia/Tokyo")
@@ -663,6 +665,8 @@ class DashboardSmokeTests(unittest.TestCase):
         expect(tooltip).not_to_contain_text("stale")
         self.hover_label("#yield-chart", "Aug 2027", "yieldChartPoints")
         expect(self.page.locator("#yield-tooltip")).to_contain_text("Last trade —")
+        # Clear of the charts, so a scroll can't put the pointer back on one.
+        self.page.mouse.move(0, 0)
 
         for chart in KEYBOARD_CHARTS:
             canvas, tooltip, _, announcer, _ = chart
@@ -682,7 +686,7 @@ class DashboardSmokeTests(unittest.TestCase):
         self.open_day(day, "&market=USDTRY")
         # The archived day's trades sit one day earlier, so the same rows are stale.
         texts, stale = self.expected_last_trades(
-            self.history[day]["markets"]["USDTRY"],
+            self.history[day], "USDTRY",
             {"USDTRYN2027": "05 Oct 18:07", "USDTRYF2028": "04 Oct 17:54"},
         )
         self.assertEqual(stale, ["Jul 2027", "Jan 2028"])

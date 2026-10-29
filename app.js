@@ -323,36 +323,35 @@ function istanbulWallClock(date) {
   return Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
 }
 
-// When the contract last traded, or null if its quote carried no time.
-function lastTradeTime(contract) {
-  if (typeof contract.updated_at !== "string") return null;
-  const time = new Date(contract.updated_at);
-  return Number.isNaN(time.getTime()) ? null : time;
+// Each contract's last trade, mapped from the contract, against the newest one
+// in its market and snapshot: the time alone on that Istanbul day, the date
+// and time on an earlier day, which makes it stale, and "—" without a time,
+// which is never stale. Older snapshots filled a missing time in with their
+// own generated_at, so that exact time counts as none.
+function lastTrades(contracts, generatedAt) {
+  const standIn = Date.parse(generatedAt);
+  const times = contracts.map((contract) => {
+    const time = typeof contract.updated_at === "string" ? Date.parse(contract.updated_at) : NaN;
+    return Number.isNaN(time) || time === standIn ? null : new Date(time);
+  });
+  const days = times.map((time) => time && istanbulToday(time));
+  const newestDay = days.reduce(
+    (newest, day) => day && (!newest || day > newest) ? day : newest,
+    null,
+  );
+  return new Map(contracts.map((contract, index) => {
+    const time = times[index];
+    if (!time) return [contract, { text: "—", stale: false }];
+    const clock = tradeTimeFormat.format(time);
+    return [contract, days[index] === newestDay
+      ? { text: clock, stale: false }
+      : { text: `${tradeDayFormat.format(time)} ${clock}`, stale: true }];
+  }));
 }
 
-// The Istanbul day of the newest of these quotes, or null if none has a time.
-function newestTradeDay(contracts) {
-  return contracts.reduce((newest, contract) => {
-    const time = lastTradeTime(contract);
-    const day = time ? istanbulToday(time) : null;
-    return day && (!newest || day > newest) ? day : newest;
-  }, null);
-}
-
-// A contract's last trade, against its market's newest quote day: the time
-// alone on that day, the date and time on an earlier one, which makes it
-// stale, and "—" without a time, which is never stale.
-function lastTrade(contract, newestDay) {
-  const time = lastTradeTime(contract);
-  if (!time) return { text: "—", stale: false };
-  const clock = tradeTimeFormat.format(time);
-  return istanbulToday(time) === newestDay
-    ? { text: clock, stale: false }
-    : { text: `${tradeDayFormat.format(time)} ${clock}`, stale: true };
-}
-
-function lastTradeLine(contract, newestDay) {
-  const trade = lastTrade(contract, newestDay);
+// The tooltip line for a contract of the day on screen.
+function lastTradeLine(contract) {
+  const trade = lastTrades(state.data.contracts, state.snapshot.generated_at).get(contract);
   return { text: `Last trade ${trade.text}${trade.stale ? " · stale" : ""}` };
 }
 
@@ -544,7 +543,7 @@ function renderRows(contracts) {
     return;
   }
 
-  const newestDay = newestTradeDay(contracts);
+  const trades = lastTrades(contracts, state.snapshot.generated_at);
   elements.rows.innerHTML = contracts.map((contract, index) => {
     const changeClass = signedClass(contract.change_percent);
     const premiumClass = signedClass(contract.premium_percent);
@@ -558,7 +557,7 @@ function renderRows(contracts) {
       : "—";
     const nearClass = contract.days_to_maturity <= 31 ? "is-near" : "";
     const unavailable = contract.status !== "available" ? " (unavailable)" : "";
-    const trade = lastTrade(contract, newestDay);
+    const trade = trades.get(contract);
     const staleTag = trade.stale
       ? ' <span class="stale-tag">stale<span class="sr-only">, last traded before the market’s latest quote day</span></span>'
       : "";
@@ -1429,7 +1428,7 @@ function comparisonLines(point, format, formatDelta) {
     ...(point.current
       ? [
         { text: `${point.current.contract.days_to_maturity} days left` },
-        lastTradeLine(point.current.contract, newestTradeDay(state.data.contracts)),
+        lastTradeLine(point.current.contract),
       ]
       : [{ text: "Not listed on the viewed day" }]),
   ];
@@ -1446,7 +1445,7 @@ function priceTooltip(point) {
       : [
         { text: `${formatPrice(point.current.value)} · ${unit}` },
         { text: `${point.current.contract.days_to_maturity} days left` },
-        lastTradeLine(point.current.contract, newestTradeDay(state.data.contracts)),
+        lastTradeLine(point.current.contract),
       ],
   };
 }
@@ -1462,7 +1461,7 @@ function yieldTooltip(point) {
     : [
       { text: `${formatYield(point.current.value)} ${settings.shortLabel}` },
       { text: `${point.current.contract.days_to_maturity} days left` },
-      lastTradeLine(point.current.contract, newestTradeDay(state.data.contracts)),
+      lastTradeLine(point.current.contract),
     ];
   if (point.isPeak) lines.push({ text: `Highest ${settings.label.toLowerCase()} yield` });
   return { label: point.label, lines };
