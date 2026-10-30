@@ -1498,6 +1498,16 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assert_keyboard_point(yields, "Jan 2028")
         self.assert_selected("Jan 2028")
 
+        # A held key toggles once; its repeats are still handled but ignored.
+        self.watch_keys()
+        for key, check in (("Enter", self.assert_no_selection),
+                           (" ", lambda: self.assert_selected("Jan 2028"))):
+            for _ in range(3):
+                self.page.keyboard.down(key)
+            self.page.keyboard.up(key)
+            check()
+        self.assertEqual(self.handled_keys(), [("Enter", True)] * 3 + [(" ", True)] * 3)
+
     def test_tap_selects_a_point_on_a_phone(self):
         self.reopen_at(
             FIXTURE_DAY_TIME, viewport=MOBILE_VIEWPORT, has_touch=True, is_mobile=True,
@@ -1532,6 +1542,8 @@ class DashboardSmokeTests(unittest.TestCase):
         self.page.wait_for_function("() => !document.querySelector('#contract-rows tr').__old")
         self.assertEqual(len(live_requests), 2)
         self.assert_selected("Dec 2026")
+        # The new row's button takes over the focus of the one it replaced.
+        expect(self.select_button("Dec 2026")).to_be_focused()
 
         self.page.locator('[data-yield-period="monthly"]').click()
         expect(self.page.locator("#yield-period-label")).to_have_text("Monthly · 30D")
