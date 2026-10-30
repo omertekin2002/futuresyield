@@ -169,11 +169,20 @@
               </small>
             </div>
 
+            <div class="selection-line" id="selection-line" hidden>
+              <p>
+                <strong>Selected:</strong>
+                <span id="selection-label"></span>
+              </p>
+              <button type="button" id="selection-clear">Clear selection</button>
+            </div>
+            <p class="sr-only" id="selection-announcer" aria-live="polite"></p>
+
             <section class="curve-section" aria-labelledby="curve-title">
               <div class="section-heading">
                 <div>
                   <p class="eyebrow">Forward view</p>
-                  <h2 id="curve-title">The futures curve</h2>
+                  <h2 id="curve-title" tabindex="-1">The futures curve</h2>
                 </div>
                 <p class="section-note" id="curve-summary">
                   Plotting every available dated USD/TRY contract.
@@ -200,8 +209,9 @@
               </div>
               <p class="sr-only" id="chart-keys">
                 Use the left and right arrow keys to step through the maturities,
-                Home and End to jump to the first and last, and Escape to hide
-                the details.
+                Home and End to jump to the first and last, Enter or Space to
+                select or clear that maturity across the page, and Escape to
+                hide the details.
               </p>
               <p class="sr-only" id="curve-announcer" aria-live="polite"></p>
 
