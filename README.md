@@ -285,8 +285,8 @@ without a browser.
 `axe-playwright-python`, against the WCAG 2.1 A and AA rules. It audits the
 live view of each market, a past close with its banner, a comparison overlay
 with both legends and a tooltip showing, a tooltip opened from the keyboard on
-each chart, each yield period, a 390×844 mobile viewport and the load-error
-state. It fails on any serious or critical violation and lists each one's
+each chart, each yield period, a 390×844 mobile viewport, a selected maturity
+on desktop and on that mobile viewport, and the load-error state. It fails on any serious or critical violation and lists each one's
 rule, impact, element and help text. As an automated check, it can't judge
 everything WCAG asks for, such as whether labels make sense.
 
@@ -298,6 +298,19 @@ a ring marks the active point, and a polite live region reads out the same
 text: the maturity, its price or yield, days left, the peak note and, with a
 comparison on, both days' values and the change. Separate smoke-test cases
 cover these keys on both charts.
+
+**Selecting a maturity.** Click or tap a point on either chart, press Enter or
+Space on a focused chart's active point, or press a contract's Select button
+in the contract board to select that maturity across the page. Both charts
+mark it with a solid vertical guide and an outlined diamond, its board row and
+its USD/TRY carry row are highlighted, and a line above the charts names it
+with a Clear selection button. A polite live region announces each change.
+Selecting the same maturity again, or Clear selection, clears it. The
+selection stays through the one-minute refresh, yield-period changes and
+comparisons, and clears when you switch market or when the maturity is no
+longer listed, for example after it matures. A chart that can't plot the
+selected maturity, such as the yield chart on its last day, shows no mark. The
+selection isn't kept in the URL.
 
 ## Continuous integration
 
