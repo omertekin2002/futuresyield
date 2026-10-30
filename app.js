@@ -550,6 +550,10 @@ function renderRows(contracts) {
     return;
   }
 
+  // Redrawing replaces every row, so note a focused Select button to refocus.
+  const focusedKey = elements.rows.contains(document.activeElement)
+    ? document.activeElement.closest("tr[data-key]")?.dataset.key
+    : undefined;
   const trades = lastTrades(contracts, state.snapshot.generated_at);
   elements.rows.innerHTML = contracts.map((contract, index) => {
     const changeClass = signedClass(contract.change_percent);
@@ -615,6 +619,12 @@ function renderRows(contracts) {
         <td class="numeric" data-label="Volume">${volume}</td>
       </tr>`;
   }).join("");
+
+  if (focusedKey === undefined) return;
+  [...elements.rows.querySelectorAll("tr[data-key]")]
+    .find((row) => row.dataset.key === focusedKey)
+    ?.querySelector(".select-button")
+    ?.focus({ preventScroll: true });
 }
 
 function renderCarry(data) {
@@ -1732,7 +1742,9 @@ function handleChartKey(chart, event) {
       : Math.min(Math.max(chart.activeIndex + KEY_STEPS[event.key], 0), last);
   } else if (event.key === "Enter" || event.key === " ") {
     // Select the active point, after opening it if no point is active yet.
+    // A held key repeats; only its first press toggles the selection.
     event.preventDefault();
+    if (event.repeat) return;
     showKeyboardPoint(chart, chart.activeIndex ?? 0);
     selectPoint(points[chart.activeIndex]);
     return;
