@@ -586,6 +586,11 @@ class DashboardSmokeTests(unittest.TestCase):
                 first = page.locator(f"{rows} > tr").first
                 expect(first.locator("strong")).to_have_text(front["label"])
                 expect(first.locator(".contract-name small")).to_contain_text(front["code"])
+        page.locator("#contract-rows .select-button").first.click()
+        expect(page.locator("#selection-label")).to_have_text(f"{front['label']} · {front['code']}")
+        expect(page.locator("#selection-announcer")).to_have_text(
+            f"Selected {front['label']}, {front['code']}."
+        )
 
         tooltips = (("#curve-chart", "#chart-tooltip", "chartPoints"),
                     ("#yield-chart", "#yield-tooltip", "yieldChartPoints"))
@@ -607,7 +612,8 @@ class DashboardSmokeTests(unittest.TestCase):
 
         containers = ("#contract-rows", "#carry-rows", "#chart-tooltip",
                       "#yield-tooltip", "#curve-legend", "#yield-legend",
-                      "#curve-announcer", "#yield-announcer")
+                      "#curve-announcer", "#yield-announcer", "#selection-line",
+                      "#selection-announcer")
         for container in containers:
             with self.subTest(container=container):
                 expect(page.locator(f"{container} img")).to_have_count(0)
@@ -1372,6 +1378,199 @@ class DashboardSmokeTests(unittest.TestCase):
             "a chart without points handled a key",
         )
 
+    # One selected maturity across the charts, the board and the carry table
+
+    def contract(self, label, key="USDTRY"):
+        return next(
+            c for c in self.snapshot["markets"][key]["contracts"] if c["label"] == label
+        )
+
+    def point_position(self, label, kind="chartPoints"):
+        points = [point for point in self.chart_points(kind) if point["label"] == label]
+        self.assertEqual(len(points), 1, f"no single {label} point")
+        return {"x": points[0]["x"], "y": points[0]["y"]}
+
+    def click_point(self, canvas, label, kind="chartPoints"):
+        self.page.locator(canvas).click(position=self.point_position(label, kind))
+
+    def select_button(self, label, key="USDTRY"):
+        code = self.contract(label, key)["code"]
+        return self.page.get_by_role("button", name=f"Select {label} · {code}", exact=True)
+
+    def selected_points(self, kind):
+        return self.page.evaluate(
+            f"() => state.{kind}.filter((point) => point.isSelected).map((point) => point.label)"
+        )
+
+    def assert_selected(self, label, key="USDTRY", price=True, yields=True):
+        """label is selected everywhere; price and yields say which charts plot it."""
+        page = self.page
+        code = self.contract(label, key)["code"]
+        rows = page.locator("#contract-rows > tr.is-selected")
+        expect(rows).to_have_count(1)
+        expect(rows.locator("strong")).to_have_text(label)
+        pressed = page.locator('#contract-rows .select-button[aria-pressed="true"]')
+        expect(pressed).to_have_count(1)
+        expect(pressed).to_have_accessible_name(f"Select {label} · {code}")
+        expect(page.locator('#contract-rows .select-button[aria-pressed="false"]')).to_have_count(
+            len(self.snapshot["markets"][key]["contracts"]) - 1
+        )
+        expect(page.locator("#selection-line")).to_be_visible()
+        expect(page.locator("#selection-line")).to_contain_text(f"Selected: {label} · {code}")
+        expect(page.locator("#selection-announcer")).to_have_text(f"Selected {label}, {code}.")
+        if isinstance(self.snapshot["markets"][key].get("contract_size"), (int, float)):
+            carry = page.locator("#carry-rows > tr.is-selected")
+            expect(carry).to_have_count(1)
+            expect(carry.locator("strong")).to_have_text(label)
+        self.assertEqual(self.selected_points("chartPoints"), [label] if price else [])
+        self.assertEqual(self.selected_points("yieldChartPoints"), [label] if yields else [])
+
+    def assert_no_selection(self):
+        page = self.page
+        expect(page.locator("tr.is-selected")).to_have_count(0)
+        expect(page.locator('.select-button[aria-pressed="true"]')).to_have_count(0)
+        expect(page.locator("#selection-line")).to_be_hidden()
+        self.assertEqual(self.selected_points("chartPoints"), [])
+        self.assertEqual(self.selected_points("yieldChartPoints"), [])
+
+    def test_clicking_a_price_point_selects_it_everywhere(self):
+        self.open_dashboard("?market=USDTRY")
+        self.assert_no_selection()
+        self.click_point("#curve-chart", "Dec 2026")
+        self.assert_selected("Dec 2026")
+        # A click away from every point leaves the selection alone.
+        self.page.locator("#curve-chart").click(position={"x": 5, "y": 5})
+        self.assert_selected("Dec 2026")
+        self.click_point("#curve-chart", "Dec 2026")
+        self.assert_no_selection()
+        expect(self.page.locator("#selection-announcer")).to_have_text("Selection cleared.")
+
+    def test_clicking_a_yield_point_selects_it_and_moves_the_selection(self):
+        self.open_dashboard("?market=USDTRY")
+        self.click_point("#yield-chart", "Mar 2027", "yieldChartPoints")
+        self.assert_selected("Mar 2027")
+        self.click_point("#yield-chart", "Jan 2028", "yieldChartPoints")
+        self.assert_selected("Jan 2028")
+
+    def test_board_button_selects_and_clear_button_clears(self):
+        self.open_dashboard("?market=USDTRY")
+        button = self.select_button("Dec 2026")
+        expect(button).to_have_attribute("aria-pressed", "false")
+        button.click()
+        self.assert_selected("Dec 2026")
+        expect(button).to_be_focused()
+        button.click()
+        self.assert_no_selection()
+        self.select_button("Jul 2027").click()
+        self.assert_selected("Jul 2027")
+        clear = self.page.get_by_role("button", name="Clear selection", exact=True)
+        clear.click()
+        self.assert_no_selection()
+        # The line hides with its button, so focus moves to the charts' heading.
+        expect(self.page.locator("#curve-title")).to_be_focused()
+
+    def test_enter_and_space_on_a_focused_chart_select_the_active_point(self):
+        self.open_dashboard("?market=USDTRY")
+        price, yields = KEYBOARD_CHARTS
+        self.tab_to("#curve-chart")
+        self.watch_keys()
+        self.page.keyboard.press("ArrowRight")
+        self.page.keyboard.press("ArrowRight")
+        self.assert_keyboard_point(price, "Dec 2026")
+        self.page.keyboard.press("Enter")
+        self.assert_selected("Dec 2026")
+        # Escape still only hides the keyboard tooltip.
+        self.page.keyboard.press("Escape")
+        self.assert_no_keyboard_point(price)
+        self.assert_selected("Dec 2026")
+        self.page.keyboard.press(" ")
+        self.assert_keyboard_point(price, "Dec 2026")
+        self.assert_no_selection()
+        self.assertEqual(
+            self.handled_keys(),
+            [("ArrowRight", True), ("ArrowRight", True), ("Enter", True),
+             ("Escape", True), (" ", True)],
+        )
+
+        self.tab_to("#yield-chart")
+        self.page.keyboard.press("End")
+        self.page.keyboard.press(" ")
+        self.assert_keyboard_point(yields, "Jan 2028")
+        self.assert_selected("Jan 2028")
+
+    def test_tap_selects_a_point_on_a_phone(self):
+        self.reopen_at(
+            FIXTURE_DAY_TIME, viewport=MOBILE_VIEWPORT, has_touch=True, is_mobile=True,
+        )
+        self.open_dashboard("?market=USDTRY")
+        for canvas, kind, label in (("#curve-chart", "chartPoints", "Nov 2026"),
+                                    ("#yield-chart", "yieldChartPoints", "Apr 2027")):
+            with self.subTest(chart=canvas):
+                self.page.locator(canvas).scroll_into_view_if_needed()
+                self.page.locator(canvas).tap(position=self.point_position(label, kind))
+                self.assert_selected(label)
+        self.page.locator("#yield-chart").tap(
+            position=self.point_position("Apr 2027", "yieldChartPoints")
+        )
+        self.assert_no_selection()
+
+    def test_selection_survives_refreshes_and_toggles_until_the_market_changes(self):
+        live_requests = []
+        self.page.on(
+            "request",
+            lambda request: "data/market.json" in request.url
+            and live_requests.append(request.url),
+        )
+        self.page.clock.install()
+        self.open_dashboard("?market=USDTRY")
+        self.select_button("Dec 2026").click()
+        self.assert_selected("Dec 2026")
+
+        # The poll redraws the board with fresh rows and keeps the selection.
+        self.page.evaluate("() => { document.querySelector('#contract-rows tr').__old = true; }")
+        self.page.clock.run_for("01:01")
+        self.page.wait_for_function("() => !document.querySelector('#contract-rows tr').__old")
+        self.assertEqual(len(live_requests), 2)
+        self.assert_selected("Dec 2026")
+
+        self.page.locator('[data-yield-period="monthly"]').click()
+        expect(self.page.locator("#yield-period-label")).to_have_text("Monthly · 30D")
+        self.assert_selected("Dec 2026")
+        self.choose_compare(ROLLED_DAY)
+        self.assert_selected("Dec 2026")
+        # A maturity listed only on the comparison day can't be selected.
+        self.click_point("#curve-chart", "Sep 2026")
+        self.assert_selected("Dec 2026")
+        self.compare_select().select_option("")
+        self.assert_not_comparing()
+        self.assert_selected("Dec 2026")
+
+        self.page.locator('.market-options [data-market="EURTRY"]').click()
+        self.assert_market("EURTRY")
+        self.assert_no_selection()
+        expect(self.page.locator("#selection-announcer")).to_have_text("Selection cleared.")
+        self.page.locator('.market-options [data-market="USDTRY"]').click()
+        self.assert_market("USDTRY")
+        self.assert_no_selection()
+
+    def test_selection_without_a_yield_and_after_it_matures(self):
+        # Oct 2026 matures today: it has a price but no yield to plot.
+        self.reopen_at(datetime.fromisoformat("2026-10-30T12:00:00+03:00"))
+        self.page.clock.install()
+        self.open_dashboard("?market=USDTRY")
+        self.select_button("Oct 2026").click()
+        self.assert_selected("Oct 2026", yields=False)
+        self.page.locator('[data-yield-period="annualized"]').click()
+        self.assert_selected("Oct 2026", yields=False)
+
+        # The next day's poll rolls the snapshot forward and drops it.
+        self.page.clock.set_fixed_time(datetime.fromisoformat("2026-10-31T12:00:00+03:00"))
+        self.page.clock.run_for("01:01")
+        self.assert_note("31 Oct 2026")
+        expect(self.page.locator("#contract-rows strong").first).to_have_text("Nov 2026")
+        self.assert_no_selection()
+        expect(self.page.locator("#selection-announcer")).to_have_text("Selection cleared.")
+
     # Accessibility: axe-core audit of each rendered state
 
     def assert_accessible(self, state):
@@ -1449,6 +1648,17 @@ class DashboardSmokeTests(unittest.TestCase):
         self.open_dashboard("?market=USDTRY")
         self.assert_market("USDTRY")
         self.assert_accessible("USDTRY at 390x844")
+
+    @unittest.skipIf(Axe is None, "axe-playwright-python is not installed")
+    def test_accessibility_with_a_selected_maturity(self):
+        for viewport in (None, MOBILE_VIEWPORT):
+            with self.subTest(viewport=viewport):
+                if viewport:
+                    self.reopen_at(FIXTURE_DAY_TIME, viewport=viewport)
+                self.open_dashboard("?market=USDTRY")
+                self.select_button("Dec 2026").click()
+                self.assert_selected("Dec 2026")
+                self.assert_accessible(f"selection at {viewport or 'desktop'}")
 
     @unittest.skipIf(Axe is None, "axe-playwright-python is not installed")
     def test_accessibility_of_the_load_error(self):

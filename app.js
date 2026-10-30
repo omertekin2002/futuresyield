@@ -67,6 +67,11 @@ const elements = {
   marker: document.querySelector("#curve-marker"),
   announcer: document.querySelector("#curve-announcer"),
   footerMarketCopy: document.querySelector("#footer-market-copy"),
+  curveTitle: document.querySelector("#curve-title"),
+  selectionLine: document.querySelector("#selection-line"),
+  selectionLabel: document.querySelector("#selection-label"),
+  selectionClear: document.querySelector("#selection-clear"),
+  selectionAnnouncer: document.querySelector("#selection-announcer"),
 };
 
 const state = {
@@ -93,6 +98,8 @@ const state = {
   compareReference: null,
   // The Istanbul day the live snapshot's days left were moved to, or null.
   adjustedDay: null,
+  // The maturity selected across the charts and tables, by maturityKey(), or null.
+  selectedKey: null,
 };
 
 // Quick comparison picks: the archived close nearest each target, if one is
@@ -562,12 +569,23 @@ function renderRows(contracts) {
       ? ' <span class="stale-tag">stale<span class="sr-only">, last traded before the market’s latest quote day</span></span>'
       : "";
 
+    const key = maturityKey(contract);
+    const selected = key === state.selectedKey;
+
     return `
-      <tr>
+      <tr data-key="${escapeHtml(key)}"${selected ? ' class="is-selected"' : ""}>
         <td data-label="Contract">
-          <span class="contract-name">
-            <strong>${escapeHtml(contract.label)}</strong>
-            <small>${escapeHtml(contract.code)}${index === 0 ? " · FRONT" : ""}${unavailable}</small>
+          <span class="contract-cell">
+            <span class="contract-name">
+              <strong>${escapeHtml(contract.label)}</strong>
+              <small>${escapeHtml(contract.code)}${index === 0 ? " · FRONT" : ""}${unavailable}</small>
+            </span>
+            <button
+              type="button"
+              class="select-button"
+              aria-pressed="${selected}"
+              aria-label="Select ${escapeHtml(contract.label)} · ${escapeHtml(contract.code)}"
+            >Select</button>
           </span>
         </td>
         <td class="numeric" data-label="Last">
@@ -657,9 +675,10 @@ function renderCarry(data) {
     const profit = contract.expected_short_profit_try;
     const nearClass = contract.days_to_maturity <= 31 ? "is-near" : "";
     const bidNote = hasNumber(contract.bid) ? "" : " · NO BID";
+    const key = maturityKey(contract);
 
     return `
-      <tr>
+      <tr data-key="${escapeHtml(key)}"${key === state.selectedKey ? ' class="is-selected"' : ""}>
         <td data-label="Contract">
           <span class="contract-name">
             <strong>${escapeHtml(contract.label)}</strong>
@@ -712,6 +731,55 @@ function alignSeries(current, compare) {
     : aligned;
 }
 
+// The listed contract of the selected maturity, or null.
+function selectedContract() {
+  if (!state.selectedKey || !state.data) return null;
+  return state.data.contracts.find((contract) => maturityKey(contract) === state.selectedKey) ?? null;
+}
+
+// Change the selection and announce it once in the live region. Doesn't
+// redraw; the caller renders next.
+function updateSelection(key) {
+  if (key === state.selectedKey) return;
+  state.selectedKey = key;
+  const contract = selectedContract();
+  elements.selectionAnnouncer.textContent = contract
+    ? `Selected ${contract.label}, ${contract.code}.`
+    : "Selection cleared.";
+}
+
+// Mark the selection outside the charts: the line naming it, and its rows in
+// the contract board and the carry table. Snapshot strings go in as text.
+function renderSelection() {
+  const contract = selectedContract();
+  elements.selectionLine.hidden = !contract;
+  elements.selectionLabel.textContent = contract ? `${contract.label} · ${contract.code}` : "";
+  [elements.rows, elements.carryRows].forEach((body) => {
+    body.querySelectorAll("tr[data-key]").forEach((row) => {
+      const selected = row.dataset.key === state.selectedKey;
+      row.classList.toggle("is-selected", selected);
+      row.querySelector(".select-button")?.setAttribute("aria-pressed", String(selected));
+    });
+  });
+}
+
+function setSelection(key) {
+  if (key === state.selectedKey) return;
+  updateSelection(key);
+  renderSelection();
+  renderCharts();
+}
+
+// Selecting the selected maturity again clears it. Only a maturity listed on
+// the day on screen can be selected.
+function toggleSelection(key) {
+  if (key === state.selectedKey) {
+    setSelection(null);
+  } else if (state.data?.contracts.some((contract) => maturityKey(contract) === key)) {
+    setSelection(key);
+  }
+}
+
 // Blank a chart that has nothing to plot, so the previous view's curve doesn't linger.
 function clearChart(canvas, label) {
   const context = canvas.getContext("2d");
@@ -745,6 +813,40 @@ function drawComparison(context, points) {
     context.fillRect(x - 4, y - 4, 8, 8);
     context.strokeRect(x - 4, y - 4, 8, 8);
   });
+  context.restore();
+}
+
+// The selected maturity: a solid guide behind the curve and an outlined
+// diamond over its point, so it differs from the keyboard ring, the round
+// markers and the yield peak's dashed guide and circle in more than colour.
+function drawSelectionGuide(context, point, top, bottom) {
+  if (!point) return;
+  context.save();
+  context.strokeStyle = "#000000";
+  context.lineWidth = 2;
+  context.beginPath();
+  context.moveTo(point.x, top);
+  context.lineTo(point.x, bottom);
+  context.stroke();
+  context.restore();
+}
+
+function drawSelectionMarker(context, point) {
+  if (!point) return;
+  const size = 13;
+  context.save();
+  context.beginPath();
+  context.moveTo(point.x, point.y - size);
+  context.lineTo(point.x + size, point.y);
+  context.lineTo(point.x, point.y + size);
+  context.lineTo(point.x - size, point.y);
+  context.closePath();
+  context.strokeStyle = "#ffffff";
+  context.lineWidth = 6;
+  context.stroke();
+  context.strokeStyle = "#000000";
+  context.lineWidth = 2.5;
+  context.stroke();
   context.restore();
 }
 
@@ -806,9 +908,10 @@ function renderChart() {
   const xAt = (index) => margin.left + (slots.length === 1 ? chartWidth / 2 : index * chartWidth / (slots.length - 1));
   const yAt = (value) => margin.top + (max - value) / (max - min) * chartHeight;
   const seriesPoints = (side) => slots.flatMap((slot, index) =>
-    slot[side] ? [{ x: xAt(index), y: yAt(slot[side].value) }] : []
+    slot[side] ? [{ key: slot.key, x: xAt(index), y: yAt(slot[side].value) }] : []
   );
   const currentPoints = seriesPoints("current");
+  const selectedPoint = currentPoints.find((point) => point.key === state.selectedKey);
 
   context.font = '11px Helvetica, Arial, sans-serif';
   context.textBaseline = "middle";
@@ -836,6 +939,8 @@ function renderChart() {
   context.closePath();
   context.fillStyle = "#c0d4a7";
   context.fill();
+
+  drawSelectionGuide(context, selectedPoint, margin.top, height - margin.bottom);
 
   const spotY = yAt(state.data.spot.last);
   context.save();
@@ -866,12 +971,14 @@ function renderChart() {
     context.lineWidth = 2;
     context.stroke();
   });
+  drawSelectionMarker(context, selectedPoint);
 
   drawAxisLabels(context, slots, xAt, width, height);
   state.chartPoints = slots.map((slot, index) => ({
     ...slot,
     x: xAt(index),
     y: yAt((slot.current ?? slot.compare).value),
+    isSelected: slot.key === selectedPoint?.key,
   }));
   canvas.setAttribute(
     "aria-label",
@@ -938,6 +1045,7 @@ function renderYieldChart() {
     slot[side] ? [{ ...slot[side], key: slot.key, x: xAt(index), y: yAt(slot[side].value) }] : []
   );
   const currentPoints = seriesPoints("current");
+  const selectedPoint = currentPoints.find((point) => point.key === state.selectedKey);
 
   context.font = '11px Helvetica, Arial, sans-serif';
   context.textBaseline = "middle";
@@ -974,6 +1082,7 @@ function renderYieldChart() {
   context.fillStyle = "#a5b8c0";
   context.fill();
 
+  drawSelectionGuide(context, selectedPoint, margin.top, height - margin.bottom);
   drawComparison(context, seriesPoints("compare"));
 
   tracePath(context, currentPoints);
@@ -1013,6 +1122,7 @@ function renderYieldChart() {
       context.stroke();
     }
   });
+  drawSelectionMarker(context, selectedPoint);
 
   drawAxisLabels(context, slots, xAt, width, height);
   state.yieldChartPoints = slots.map((slot, index) => ({
@@ -1020,6 +1130,7 @@ function renderYieldChart() {
     x: xAt(index),
     y: yAt((slot.current ?? slot.compare).value),
     isPeak: slot.key === peak.key,
+    isSelected: slot.key === selectedPoint?.key,
   }));
 
   const peakTag = `HIGHEST ${settings.label.toUpperCase()} · ${formatYield(peak.value)}`;
@@ -1059,8 +1170,12 @@ function selectMarket(marketKey, updateUrl = false) {
   const market = state.snapshot?.markets?.[marketKey];
   if (!market) return;
 
+  // A selection is kept across redraws of the same market while its maturity
+  // is still listed.
+  const switched = marketKey !== state.marketKey;
   state.marketKey = marketKey;
   state.data = market;
+  if (switched || !selectedContract()) updateSelection(null);
   state.chartPoints = [];
   state.yieldChartPoints = [];
   elements.tooltip.hidden = true;
@@ -1071,6 +1186,7 @@ function selectMarket(marketKey, updateUrl = false) {
   renderStats(market);
   renderRows(market.contracts);
   renderCarry(market);
+  renderSelection();
   renderComparisonLegends();
   renderCharts();
 
@@ -1393,6 +1509,17 @@ elements.marketButtons.forEach((button) => {
   });
 });
 
+elements.rows.addEventListener("click", (event) => {
+  const button = event.target.closest(".select-button");
+  if (button) toggleSelection(button.closest("tr").dataset.key);
+});
+
+// The line hides with the selection, so focus moves on to the charts' heading.
+elements.selectionClear.addEventListener("click", () => {
+  setSelection(null);
+  elements.curveTitle.focus();
+});
+
 window.addEventListener("resize", () => {
   window.clearTimeout(state.resizeTimer);
   state.resizeTimer = window.setTimeout(renderCharts, 120);
@@ -1603,6 +1730,12 @@ function handleChartKey(chart, event) {
     index = chart.activeIndex === null
       ? 0
       : Math.min(Math.max(chart.activeIndex + KEY_STEPS[event.key], 0), last);
+  } else if (event.key === "Enter" || event.key === " ") {
+    // Select the active point, after opening it if no point is active yet.
+    event.preventDefault();
+    showKeyboardPoint(chart, chart.activeIndex ?? 0);
+    selectPoint(points[chart.activeIndex]);
+    return;
   } else {
     return;
   }
@@ -1610,26 +1743,46 @@ function handleChartKey(chart, event) {
   showKeyboardPoint(chart, index);
 }
 
+// A point plotted from the day on screen selects its maturity; one listed
+// only on the comparison day can't be selected.
+function selectPoint(point) {
+  if (point?.current) toggleSelection(point.key);
+}
+
+// The index of the point nearest the pointer across, or null when none is
+// within 35px of it.
+function nearestPointIndex(chart, event) {
+  const points = chart.points();
+  if (!points.length) return null;
+  const x = event.clientX - chart.canvas.getBoundingClientRect().left;
+  const index = points.reduce((best, point, candidate) =>
+    Math.abs(point.x - x) < Math.abs(points[best].x - x) ? candidate : best, 0);
+  return Math.abs(points[index].x - x) > 35 ? null : index;
+}
+
 Object.values(charts).forEach((chart) => {
   chart.canvas.addEventListener("pointermove", (event) => {
     const points = chart.points();
     if (!points.length) return;
-    const bounds = chart.canvas.getBoundingClientRect();
-    const x = event.clientX - bounds.left;
-    const index = points.reduce((best, point, candidate) =>
-      Math.abs(point.x - x) < Math.abs(points[best].x - x) ? candidate : best, 0);
-    const nearest = points[index];
+    const index = nearestPointIndex(chart, event);
     // The pointer takes over from the keyboard; arrow keys go on from its point.
     if (chart.keyboard) endKeyboardPoint(chart);
 
-    if (Math.abs(nearest.x - x) > 35) {
+    if (index === null) {
       chart.tooltip.hidden = true;
       return;
     }
 
+    const nearest = points[index];
     setActivePoint(chart, index);
     fillTooltip(chart.tooltip, chart.content(nearest));
-    placeTooltip(chart.tooltip, nearest, bounds, chart.minX);
+    placeTooltip(chart.tooltip, nearest, chart.canvas.getBoundingClientRect(), chart.minX);
+  });
+
+  // A click or tap on a point selects its maturity, or clears it if selected.
+  chart.canvas.addEventListener("click", (event) => {
+    const index = nearestPointIndex(chart, event);
+    if (index !== null) selectPoint(chart.points()[index]);
   });
 
   chart.canvas.addEventListener("pointerleave", () => {
