@@ -13,7 +13,8 @@ redeployed by GitHub Actions every hour during VİOP trading hours on weekdays,
 - Automatic discovery of new dated contracts across all three VİOP families
 - Last price, daily change, bid/ask, volume, and premium to spot
 - Each contract's last-trade time, with a **stale** tag on contracts that
-  didn't trade on the market's latest quote day
+  didn't trade on the market's latest quote day, and a dotted marker for them
+  on both curves
 - Official contract maturity date and calendar days remaining
 - Responsive price and implied-yield curves plus the full contract board
 - Daily, 30-day monthly, and 365-day annualized yields in the chart and contract table
@@ -286,7 +287,8 @@ without a browser.
 live view of each market, a past close with its banner, a comparison overlay
 with both legends and a tooltip showing, a tooltip opened from the keyboard on
 each chart, each yield period, a 390×844 mobile viewport, a selected maturity
-on desktop and on that mobile viewport with its inspector open, and the
+on desktop and on that mobile viewport with its inspector open, the stale-point
+key on desktop and mobile, a market whose charts are empty, and the
 load-error state. It fails on any serious or critical violation and lists each one's
 rule, impact, element and help text. As an automated check, it can't judge
 everything WCAG asks for, such as whether labels make sense.
@@ -298,7 +300,13 @@ hides the tooltip; Tab moves on as usual. The tooltip matches the pointer's,
 a ring marks the active point, and a polite live region reads out the same
 text: the maturity, its price or yield, days left, the peak note and, with a
 comparison on, both days' values and the change. Separate smoke-test cases
-cover these keys on both charts.
+cover these keys on both charts. Each chart's label also counts its stale
+points, for example "2 of 16 maturities last traded before the latest quote
+day.", and the yield chart's label and summary say when the highest yield is
+stale. A chart with nothing to plot shows why inside its frame, for example
+"No priced maturities to plot." or "No maturities with a yield to plot: every
+listed contract matures today or has no price."; its label says the same, and
+it stays a single Tab stop.
 
 **Selecting a maturity.** Click or tap a point on either chart, press Enter or
 Space on a focused chart's active point, or press a contract's Select button
@@ -378,6 +386,16 @@ accessibility audit.
   `generated_at`, so a contract time equal to it also shows "—". Chart
   tooltips and the keyboard read-out include the same line; with a comparison
   on, it describes only the day on screen.
+- **Stale points on the charts.** Both curves draw a stale contract as a
+  larger, hollow point with a dotted outline instead of the solid round
+  marker, and the line still passes through it. Points without a trade time
+  ("—") are never stale and are drawn normally. Stale points stay plotted and
+  count towards the peak and the averages. When the day on screen has a stale
+  point, a key under the chart reads, for example, "Stale: 2 of 16 maturities
+  last traded before the latest quote day."; otherwise it is hidden. A stale
+  yield peak keeps its ring, and its tag ends in **STALE**, for example
+  `HIGHEST ANNUALIZED · 52.10% · STALE`. Only the day on screen is marked: the
+  comparison line keeps its hollow squares.
 
 This project is for personal and educational use only. It is not investment
 advice. Review borsapy's upstream data-license disclaimer before use; commercial

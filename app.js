@@ -24,6 +24,10 @@ const elements = {
   compareSelect: document.querySelector("#compare-select"),
   curveLegend: document.querySelector("#curve-legend"),
   yieldLegend: document.querySelector("#yield-legend"),
+  curveKey: document.querySelector("#curve-key"),
+  yieldKey: document.querySelector("#yield-key"),
+  curveEmpty: document.querySelector("#curve-empty"),
+  yieldEmpty: document.querySelector("#yield-empty"),
   spotTag: document.querySelector("#spot-tag"),
   spotValue: document.querySelector("#spot-value"),
   spotChange: document.querySelector("#spot-change"),
@@ -1010,13 +1014,58 @@ function toggleSelection(key) {
   }
 }
 
-// Blank a chart that has nothing to plot, so the previous view's curve doesn't linger.
-function clearChart(canvas, label) {
+// Blank a chart that has nothing to plot, so the previous view's curve doesn't
+// linger, and say why inside its frame. The canvas label carries the same
+// words for screen readers, so the visible message is hidden from them.
+function clearChart(canvas, label, { empty, key, message }) {
   const context = canvas.getContext("2d");
   // The last render left the context scaled by the pixel ratio.
   context.setTransform(1, 0, 0, 1, 0, 0);
   context.clearRect(0, 0, canvas.width, canvas.height);
   canvas.setAttribute("aria-label", label);
+  empty.textContent = message;
+  empty.hidden = false;
+  key.hidden = true;
+}
+
+// The plotted contracts of the day on screen that are stale, by the board's
+// lastTrades() rule. Comparison points are never in it.
+function staleContracts(contracts) {
+  const trades = lastTrades(state.data.contracts, state.snapshot.generated_at);
+  return new Set(contracts.filter((contract) => trades.get(contract)?.stale));
+}
+
+function staleCountText(staleCount, total) {
+  return `${staleCount} of ${total} ${total === 1 ? "maturity" : "maturities"} ` +
+    "last traded before the latest quote day.";
+}
+
+// The key under a chart, shown only when the day on screen plots a stale point.
+function renderChartKey(key, staleCount, total) {
+  key.hidden = !staleCount;
+  if (!staleCount) return;
+  const swatch = document.createElement("span");
+  swatch.className = "stale-swatch";
+  swatch.setAttribute("aria-hidden", "true");
+  const name = document.createElement("strong");
+  name.textContent = "Stale:";
+  key.replaceChildren(swatch, name, ` ${staleCountText(staleCount, total)}`);
+}
+
+// A round point marker. A stale one is hollow with a dotted outline and at
+// least 5.5px across, so it differs in more than colour; the line still
+// passes through it. Points without a trade time are drawn normally.
+function drawPointMarker(context, { x, y }, { radius, filled, lineWidth = 2, stale = false }) {
+  context.save();
+  context.beginPath();
+  context.arc(x, y, stale ? Math.max(radius, 5.5) : radius, 0, Math.PI * 2);
+  context.fillStyle = filled && !stale ? "#000000" : "#ffffff";
+  context.fill();
+  context.strokeStyle = "#000000";
+  context.lineWidth = lineWidth;
+  if (stale) context.setLineDash([2.5, 2.5]);
+  context.stroke();
+  context.restore();
 }
 
 function tracePath(context, points) {
@@ -1111,9 +1160,18 @@ function renderChart() {
   const canvas = elements.canvas;
   if (current.length < 1) {
     state.chartPoints = [];
-    clearChart(canvas, `${state.data.pair} futures price curve: no priced maturities.`);
+    clearChart(canvas, `${state.data.pair} futures price curve: no priced maturities.`, {
+      empty: elements.curveEmpty,
+      key: elements.curveKey,
+      message: state.data.contracts.length
+        ? "No priced maturities to plot."
+        : "No listed maturities to plot.",
+    });
     return;
   }
+  elements.curveEmpty.hidden = true;
+  const stale = staleContracts(current.map((point) => point.contract));
+  renderChartKey(elements.curveKey, stale.size, current.length);
   const bounds = canvas.getBoundingClientRect();
   if (!bounds.width || !bounds.height) return;
 
@@ -1138,7 +1196,7 @@ function renderChart() {
   const xAt = (index) => margin.left + (slots.length === 1 ? chartWidth / 2 : index * chartWidth / (slots.length - 1));
   const yAt = (value) => margin.top + (max - value) / (max - min) * chartHeight;
   const seriesPoints = (side) => slots.flatMap((slot, index) =>
-    slot[side] ? [{ key: slot.key, x: xAt(index), y: yAt(slot[side].value) }] : []
+    slot[side] ? [{ ...slot[side], key: slot.key, x: xAt(index), y: yAt(slot[side].value) }] : []
   );
   const currentPoints = seriesPoints("current");
   const selectedPoint = currentPoints.find((point) => point.key === state.selectedKey);
@@ -1192,14 +1250,12 @@ function renderChart() {
   context.lineWidth = 2;
   context.stroke();
 
-  currentPoints.forEach(({ x, y }, index) => {
-    context.beginPath();
-    context.arc(x, y, index === 0 ? 5 : 3.5, 0, Math.PI * 2);
-    context.fillStyle = index === 0 ? "#000000" : "#ffffff";
-    context.fill();
-    context.strokeStyle = "#000000";
-    context.lineWidth = 2;
-    context.stroke();
+  currentPoints.forEach((point, index) => {
+    drawPointMarker(context, point, {
+      radius: index === 0 ? 5 : 3.5,
+      filled: index === 0,
+      stale: stale.has(point.contract),
+    });
   });
   drawSelectionMarker(context, selectedPoint);
 
@@ -1209,12 +1265,14 @@ function renderChart() {
     x: xAt(index),
     y: yAt((slot.current ?? slot.compare).value),
     isSelected: slot.key === selectedPoint?.key,
+    stale: Boolean(slot.current && stale.has(slot.current.contract)),
   }));
+  const staleNote = stale.size ? ` ${staleCountText(stale.size, current.length)}` : "";
   canvas.setAttribute(
     "aria-label",
     `${state.data.pair} futures price curve across ${current.length} maturities, ` +
     `from ${formatPrice(current[0].value)} to ` +
-    `${formatPrice(current.at(-1).value)} ${state.data.spot_unit}.${comparisonNote()}`,
+    `${formatPrice(current.at(-1).value)} ${state.data.spot_unit}.${staleNote}${comparisonNote()}`,
   );
 }
 
@@ -1230,7 +1288,18 @@ function renderYieldChart() {
   const canvas = elements.yieldCanvas;
   if (contracts.length < 1) {
     state.yieldChartPoints = [];
-    clearChart(canvas, `${state.data.pair} futures net yield: no maturities with a yield.`);
+    const spot = state.data.spot?.last;
+    clearChart(canvas, `${state.data.pair} futures net yield: no maturities with a yield.`, {
+      empty: elements.yieldEmpty,
+      key: elements.yieldKey,
+      message: !state.data.contracts.length
+        ? "No listed maturities to plot."
+        : state.data.contracts.some((contract) => hasNumber(contract.last)) &&
+          (!hasNumber(spot) || spot <= 0)
+          ? "No maturities with a yield to plot: the spot reference is missing."
+          : "No maturities with a yield to plot: every listed contract matures today " +
+            "or has no price.",
+    });
     elements.yieldPeriodLabel.textContent = `${settings.label} · ${settings.shortLabel}`;
     [elements.yieldFrontValue, elements.yieldAverageValue].forEach((element) => {
       element.textContent = "—";
@@ -1239,6 +1308,9 @@ function renderYieldChart() {
     elements.yieldSummary.textContent = "No maturity has a yield to plot.";
     return;
   }
+  elements.yieldEmpty.hidden = true;
+  const stale = staleContracts(contracts.map((point) => point.contract));
+  renderChartKey(elements.yieldKey, stale.size, contracts.length);
   const bounds = canvas.getBoundingClientRect();
   if (!bounds.width || !bounds.height) {
     state.yieldChartPoints = [];
@@ -1336,13 +1408,12 @@ function renderYieldChart() {
 
   currentPoints.forEach((point, index) => {
     const isPeak = point === peak;
-    context.beginPath();
-    context.arc(point.x, point.y, isPeak ? 7 : index === 0 ? 5 : 3.5, 0, Math.PI * 2);
-    context.fillStyle = isPeak || index === 0 ? "#000000" : "#ffffff";
-    context.fill();
-    context.strokeStyle = "#000000";
-    context.lineWidth = isPeak ? 3 : 2;
-    context.stroke();
+    drawPointMarker(context, point, {
+      radius: isPeak ? 7 : index === 0 ? 5 : 3.5,
+      filled: isPeak || index === 0,
+      lineWidth: isPeak ? 3 : 2,
+      stale: stale.has(point.contract),
+    });
 
     if (isPeak) {
       context.beginPath();
@@ -1361,9 +1432,12 @@ function renderYieldChart() {
     y: yAt((slot.current ?? slot.compare).value),
     isPeak: slot.key === peak.key,
     isSelected: slot.key === selectedPoint?.key,
+    stale: Boolean(slot.current && stale.has(slot.current.contract)),
   }));
 
-  const peakTag = `HIGHEST ${settings.label.toUpperCase()} · ${formatYield(peak.value)}`;
+  const peakStale = stale.has(peak.contract);
+  const peakTag = `HIGHEST ${settings.label.toUpperCase()} · ${formatYield(peak.value)}` +
+    (peakStale ? " · STALE" : "");
   context.font = '700 11px Helvetica, Arial, sans-serif';
   const peakTagWidth = context.measureText(peakTag).width + 18;
   const peakTagX = Math.min(
@@ -1384,15 +1458,18 @@ function renderYieldChart() {
   elements.yieldFrontValue.className = signedClass(front.value);
   elements.yieldAverageValue.textContent = formatYield(average);
   elements.yieldAverageValue.className = signedClass(average);
-  elements.yieldSummary.textContent =
+  const peakText =
     `Highest ${settings.label.toLowerCase()} yield is ${formatYield(peak.value)} at ` +
-    `${peak.contract.label}. ${settings.label} net yield ranges from ` +
+    `${peak.contract.label}` +
+    (peakStale ? ", which is stale: it last traded before the latest quote day." : ".");
+  elements.yieldSummary.textContent =
+    `${peakText} ${settings.label} net yield ranges from ` +
     `${formatYield(Math.min(...values))} to ${formatYield(Math.max(...values))}.`;
+  const staleNote = stale.size ? ` ${staleCountText(stale.size, contracts.length)}` : "";
   canvas.setAttribute(
     "aria-label",
     `${settings.label} compounded ${state.data.pair} futures net yield by maturity. ` +
-    `Highest ${settings.label.toLowerCase()} yield is ${formatYield(peak.value)} at ` +
-    `${peak.contract.label}.${comparisonNote()}`,
+    `${peakText}${staleNote}${comparisonNote()}`,
   );
 }
 

@@ -719,6 +719,45 @@ canvas:focus-visible {
   box-shadow: 0 0 0 2px var(--paper), inset 0 0 0 2px var(--paper);
   pointer-events: none;
 }
+/* Why a chart is empty, over its blank canvas. */
+.chart-empty {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 3;
+  width: max-content;
+  max-width: calc(100% - 48px);
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--ink);
+  background: var(--paper);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  text-align: center;
+  font: 700 13px/1.4 var(--sans);
+}
+/* The stale-point key under a chart, drawn like the canvas's dotted marker. */
+.chart-key {
+  margin: 0;
+  padding: 6px 16px;
+  border-top: 1px solid var(--ink);
+  background: var(--paper);
+  font: 12px/1.4 var(--serif);
+}
+.chart-key strong {
+  font: 700 12px/1.4 var(--sans);
+}
+.stale-swatch {
+  display: inline-block;
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border: 2px dotted var(--ink);
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--paper);
+  vertical-align: -1px;
+}
 .curve-y-label,
 .yield-y-label {
   position: absolute;
@@ -1179,7 +1218,8 @@ footer p {
   .compare-control select {
     flex: 1 1 100%;
   }
-  .chart-legend {
+  .chart-legend,
+  .chart-key {
     padding: 6px 12px;
   }
   .history-banner {
