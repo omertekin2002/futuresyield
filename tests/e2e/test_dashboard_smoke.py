@@ -97,6 +97,16 @@ STALE_TRADES = {
     "EURTRYZ2027": "06 Oct 22:58",
 }
 STALE_NOTE = ", last traded before the market’s latest quote day"
+# Each chart's canvas, its stale-point key, its empty-chart message and the
+# state list app.js keeps its points in.
+STALE_CHARTS = (
+    ("#curve-chart", "#curve-key", "#curve-empty", "chartPoints"),
+    ("#yield-chart", "#yield-key", "#yield-empty", "yieldChartPoints"),
+)
+NO_PRICE_MESSAGE = "No priced maturities to plot."
+NO_YIELD_MESSAGE = (
+    "No maturities with a yield to plot: every listed contract matures today or has no price."
+)
 
 
 def set_yields(contract, spot):
@@ -231,6 +241,8 @@ class DashboardSmokeTests(unittest.TestCase):
             }
         )
         self.page = self.context.new_page()
+        # A test that installs fake timers passes its time again: install()
+        # without one starts from the real clock.
         self.page.clock.set_fixed_time(now)
         self.page.on(
             "console",
@@ -475,7 +487,7 @@ class DashboardSmokeTests(unittest.TestCase):
             lambda request: "data/market.json" in request.url
             and live_requests.append(request.url),
         )
-        self.page.clock.install()
+        self.page.clock.install(time=FIXTURE_DAY_TIME)
         day = max(HISTORY_FIXTURE)
         self.open_day(day)
         self.page.clock.run_for("03:00")
@@ -711,6 +723,192 @@ class DashboardSmokeTests(unittest.TestCase):
         self.hover_label("#curve-chart", "Sep 2026")
         expect(tooltip).to_contain_text("Not listed on the viewed day")
         expect(tooltip).not_to_contain_text("Last trade")
+
+    # Stale and empty charts
+
+    def stale_points(self, kind):
+        """The labels of the slots app.js flags stale, and of every compare-only slot."""
+        return self.page.evaluate(
+            f"""() => [
+                state.{kind}.filter((point) => point.stale).map((point) => point.label),
+                state.{kind}.filter((point) => !point.current).map((point) => point.stale),
+            ]"""
+        )
+
+    def assert_stale_charts(self, market, stale_trades=STALE_TRADES):
+        """Both charts flag exactly the stale contracts, with the key and labels to match."""
+        stale = [c["label"] for c in market["contracts"] if c["symbol"] in stale_trades]
+        plotted = len(market["contracts"])
+        count = f"{len(stale)} of {plotted} maturities last traded before the latest quote day."
+        for canvas, key, empty, kind in STALE_CHARTS:
+            with self.subTest(chart=canvas):
+                expect(self.page.locator(empty)).to_be_hidden()
+                flagged, compare_only = self.stale_points(kind)
+                self.assertEqual(flagged, stale)
+                self.assertEqual(len(self.chart_points(kind)) - len(compare_only), plotted)
+                self.assertFalse(any(compare_only), "a compare-only point is flagged stale")
+                if stale:
+                    expect(self.page.locator(key)).to_be_visible()
+                    expect(self.page.locator(key)).to_have_text(f"Stale: {count}")
+                    expect(self.page.locator(canvas)).to_have_attribute(
+                        "aria-label", re.compile(re.escape(count)),
+                    )
+                else:
+                    expect(self.page.locator(key)).to_be_hidden()
+                    expect(self.page.locator(canvas)).not_to_have_attribute(
+                        "aria-label", re.compile("last traded before"),
+                    )
+
+    def test_charts_flag_exactly_the_stale_points(self):
+        # Tokyo puts 6 Oct 18:07 and 22:58 on 7 Oct; the flags must not move.
+        for timezone_id in (None, "Asia/Tokyo"):
+            self.reopen_at(FIXTURE_DAY_TIME, timezone_id)
+            for key in self.snapshot["market_order"]:
+                with self.subTest(timezone=timezone_id, market=key):
+                    self.open_dashboard(f"?market={key}")
+                    self.assert_market(key)
+                    self.assert_stale_charts(self.snapshot["markets"][key])
+
+    def test_stale_flags_follow_the_day_on_screen_never_the_comparison(self):
+        day = "2026-10-06"
+        self.open_day(day, "&market=USDTRY")
+        self.assert_stale_charts(self.history[day]["markets"]["USDTRY"])
+        # The comparison line keeps its squares: its slots are never flagged,
+        # including the Sep 2026 contract listed only on the compared day.
+        self.compare_select().select_option(ROLLED_DAY)
+        self.assert_comparing(ROLLED_DAY, HISTORY_LABELS[day])
+        self.assertIn("Sep 2026", [point["label"] for point in self.chart_points()])
+        self.assert_stale_charts(self.history[day]["markets"]["USDTRY"])
+        # The selection mark and the keyboard still reach a stale point.
+        self.page.evaluate("() => setSelection('2027-07')")
+        self.assertEqual(
+            self.page.evaluate("() => state.chartPoints.find((point) => point.isSelected)?.label"),
+            "Jul 2027",
+        )
+        self.tab_to("#curve-chart")
+        self.page.keyboard.press("End")
+        self.assert_keyboard_point(KEYBOARD_CHARTS[0], "Jan 2028")
+        expect(self.page.locator("#chart-tooltip")).to_contain_text("· stale")
+
+    def record_canvas_text(self):
+        """Keep every string drawn on a canvas in window.__canvasText."""
+        self.page.add_init_script(
+            """(() => {
+                window.__canvasText = [];
+                const fillText = CanvasRenderingContext2D.prototype.fillText;
+                CanvasRenderingContext2D.prototype.fillText = function (text, ...rest) {
+                    window.__canvasText.push(String(text));
+                    return fillText.call(this, text, ...rest);
+                };
+            })()"""
+        )
+
+    def peak_tag(self):
+        """The yield chart's last drawn peak tag."""
+        return self.page.evaluate(
+            "() => window.__canvasText.filter((text) => text.startsWith('HIGHEST ')).at(-1)"
+        )
+
+    def test_stale_yield_peak_is_named_in_the_tag_summary_and_label(self):
+        self.record_canvas_text()
+        self.open_dashboard("?market=USDTRY")
+        # The fixture's peak, Dec 2026, traded on the latest quote day.
+        self.assertEqual(self.peak_tag(), "HIGHEST DAILY · +0.0792%")
+        fresh = "Highest daily yield is +0.0792% at Dec 2026."
+        expect(self.page.locator("#yield-summary")).to_contain_text(fresh)
+        expect(self.page.locator("#yield-summary")).not_to_contain_text("stale")
+        label = self.page.locator("#yield-chart").get_attribute("aria-label")
+        self.assertIn(fresh, label)
+        self.assertNotIn("which is stale", label)
+
+        # Make the stale Jul 2027 contract the highest yield.
+        snapshot = copy.deepcopy(self.snapshot)
+        market = snapshot["markets"]["USDTRY"]
+        july = next(c for c in market["contracts"] if c["symbol"] == "USDTRYN2027")
+        july["last"] *= 1.15
+        set_yields(july, market["spot"]["last"])
+        self.serve_snapshot(re.compile(r"/data/market\.json"), snapshot)
+        self.open_dashboard("?market=USDTRY")
+        peak = self.page.evaluate(
+            "() => state.yieldChartPoints.find((point) => point.isPeak)"
+        )
+        self.assertEqual(peak["label"], "Jul 2027")
+        self.assertTrue(peak["stale"])
+        daily = f"{july['daily_yield_percent']:+.4f}%"
+        self.assertEqual(self.peak_tag(), f"HIGHEST DAILY · {daily} · STALE")
+        note = (
+            f"Highest daily yield is {daily} at Jul 2027, which is stale: "
+            "it last traded before the latest quote day."
+        )
+        expect(self.page.locator("#yield-summary")).to_contain_text(note)
+        expect(self.page.locator("#yield-chart")).to_have_attribute(
+            "aria-label", re.compile(re.escape(note)),
+        )
+
+        self.page.locator('[data-yield-period="annualized"]').click()
+        annualized = f"{july['annualized_yield_percent']:+.2f}%"
+        self.assertEqual(self.peak_tag(), f"HIGHEST ANNUALIZED · {annualized} · STALE")
+        expect(self.page.locator("#yield-summary")).to_contain_text(
+            f"Highest annualized yield is {annualized} at Jul 2027, which is stale"
+        )
+
+    def unpriced_market(self, snapshot, key="XAUTRY"):
+        """A copy of snapshot whose market key has no prices, and so no yields."""
+        unpriced = copy.deepcopy(snapshot)
+        market = unpriced["markets"][key]
+        for contract in market["contracts"]:
+            contract["last"] = None
+            set_yields(contract, market["spot"]["last"])
+        return unpriced
+
+    def assert_empty_charts(self, empty=True):
+        for canvas, key, message, _ in STALE_CHARTS:
+            with self.subTest(chart=canvas, empty=empty):
+                if empty:
+                    expect(self.page.locator(message)).to_be_visible()
+                    expect(self.page.locator(key)).to_be_hidden()
+                    expect(self.page.locator(canvas)).to_have_attribute(
+                        "aria-label", re.compile(r"XAU/TRY.*: no "),
+                    )
+                else:
+                    expect(self.page.locator(message)).to_be_hidden()
+        if empty:
+            expect(self.page.locator("#curve-empty")).to_have_text(NO_PRICE_MESSAGE)
+            expect(self.page.locator("#yield-empty")).to_have_text(NO_YIELD_MESSAGE)
+
+    def test_empty_charts_say_why_and_clear_when_data_returns(self):
+        self.serve_snapshot(re.compile(r"/data/market\.json"), self.unpriced_market(self.snapshot))
+        self.open_dashboard("?market=XAUTRY")
+        self.assert_empty_charts()
+        # Each empty chart is still one Tab stop that Tab leaves.
+        for canvas, *_ in STALE_CHARTS:
+            self.tab_to(canvas)
+            self.page.keyboard.press("Tab")
+            self.assertFalse(self.page.evaluate(
+                f"() => document.activeElement === document.querySelector('{canvas}')"
+            ))
+        self.page.locator('.market-options [data-market="USDTRY"]').click()
+        self.assert_market("USDTRY")
+        self.assert_empty_charts(empty=False)
+        expect(self.page.locator("#curve-key")).to_be_visible()
+        self.page.locator('.market-options [data-market="XAUTRY"]').click()
+        self.assert_empty_charts()
+
+        # With a comparison on, the message stays until the day on screen has data.
+        self.page.evaluate("() => setCompare('2026-09-30')")
+        expect(self.page.locator("#curve-legend")).to_be_visible()
+        self.assert_empty_charts()
+
+    def test_empty_chart_message_on_an_archived_close(self):
+        day = "2026-10-06"
+        self.serve_snapshot(
+            re.compile(rf"/data/history/{day}\.json"), self.unpriced_market(self.history[day]),
+        )
+        self.open_day(day, "&market=XAUTRY")
+        self.assert_empty_charts()
+        self.page.locator('.market-options [data-market="EURTRY"]').click()
+        self.assert_market("EURTRY", self.history[day])
+        self.assert_empty_charts(empty=False)
 
     # Comparison overlay
 
@@ -1094,6 +1292,8 @@ class DashboardSmokeTests(unittest.TestCase):
             "No maturity has a yield to plot."
         )
         expect(self.page.locator("#yield-front-value")).to_have_text("—")
+        expect(self.page.locator("#curve-empty")).to_have_text(NO_PRICE_MESSAGE)
+        expect(self.page.locator("#yield-empty")).to_have_text(NO_YIELD_MESSAGE)
         for canvas in ("#curve-chart", "#yield-chart"):
             expect(self.page.locator(canvas)).to_have_attribute(
                 "aria-label", re.compile("XAU/TRY.*no "),
@@ -1424,6 +1624,9 @@ class DashboardSmokeTests(unittest.TestCase):
         expect(page.locator("#selection-line")).to_be_visible()
         expect(page.locator("#selection-line")).to_contain_text(f"Selected: {label} · {code}")
         expect(page.locator("#selection-announcer")).to_have_text(f"Selected {label}, {code}.")
+        expect(page.locator("#inspector")).to_be_visible()
+        expect(page.locator("#inspector-name")).to_have_text(label)
+        expect(page.locator('#inspector [data-item="code"] .inspector-value')).to_have_text(code)
         if isinstance(self.snapshot["markets"][key].get("contract_size"), (int, float)):
             carry = page.locator("#carry-rows > tr.is-selected")
             expect(carry).to_have_count(1)
@@ -1436,6 +1639,7 @@ class DashboardSmokeTests(unittest.TestCase):
         expect(page.locator("tr.is-selected")).to_have_count(0)
         expect(page.locator('.select-button[aria-pressed="true"]')).to_have_count(0)
         expect(page.locator("#selection-line")).to_be_hidden()
+        expect(page.locator("#inspector")).to_be_hidden()
         self.assertEqual(self.selected_points("chartPoints"), [])
         self.assertEqual(self.selected_points("yieldChartPoints"), [])
 
@@ -1539,17 +1743,26 @@ class DashboardSmokeTests(unittest.TestCase):
             lambda request: "data/market.json" in request.url
             and live_requests.append(request.url),
         )
-        self.page.clock.install()
+        self.page.clock.install(time=FIXTURE_DAY_TIME)
         self.open_dashboard("?market=USDTRY")
         self.select_button("Dec 2026").click()
         self.assert_selected("Dec 2026")
 
         # The poll redraws the board with fresh rows and keeps the selection.
-        self.page.evaluate("() => { document.querySelector('#contract-rows tr').__old = true; }")
+        self.page.evaluate(
+            "() => { document.querySelector('#contract-rows tr').__old = true;"
+            " document.querySelector('#inspector').__old = true;"
+            " document.querySelector('#inspector dl > div').__old = true; }"
+        )
         self.page.clock.run_for("01:01")
         self.page.wait_for_function("() => !document.querySelector('#contract-rows tr').__old")
         self.assertEqual(len(live_requests), 2)
         self.assert_selected("Dec 2026")
+        # The inspector stays in place and its rows are refilled.
+        self.assertTrue(self.page.evaluate(
+            "() => document.querySelector('#inspector').__old === true"
+            " && !document.querySelector('#inspector dl > div').__old"
+        ))
         # The new row's button takes over the focus of the one it replaced.
         expect(self.select_button("Dec 2026")).to_be_focused()
 
@@ -1575,8 +1788,9 @@ class DashboardSmokeTests(unittest.TestCase):
 
     def test_selection_without_a_yield_and_after_it_matures(self):
         # Oct 2026 matures today: it has a price but no yield to plot.
-        self.reopen_at(datetime.fromisoformat("2026-10-30T12:00:00+03:00"))
-        self.page.clock.install()
+        maturity_day = datetime.fromisoformat("2026-10-30T12:00:00+03:00")
+        self.reopen_at(maturity_day)
+        self.page.clock.install(time=maturity_day)
         self.open_dashboard("?market=USDTRY")
         self.select_button("Oct 2026").click()
         self.assert_selected("Oct 2026", yields=False)
@@ -1590,6 +1804,270 @@ class DashboardSmokeTests(unittest.TestCase):
         expect(self.page.locator("#contract-rows strong").first).to_have_text("Nov 2026")
         self.assert_no_selection()
         expect(self.page.locator("#selection-announcer")).to_have_text("Selection cleared.")
+
+    # The inspector for the selected maturity
+
+    def inspector(self):
+        """Each inspector row by data-item: its term, value text, stale flag and detail."""
+        return self.page.evaluate(
+            """() => Object.fromEntries(
+                [...document.querySelectorAll('#inspector [data-item]')].map((row) => {
+                    const value = row.querySelector('.inspector-value');
+                    return [row.dataset.item, {
+                        term: row.querySelector('dt').firstChild.textContent,
+                        tag: row.querySelector('.inspector-tag')?.textContent ?? '',
+                        value: value.firstChild?.textContent ?? '',
+                        stale: Boolean(value.querySelector('.stale-tag')),
+                        detail: row.querySelector('.inspector-detail')?.textContent ?? '',
+                    }];
+                }))"""
+        )
+
+    def inspector_values(self):
+        return {key: row["value"] for key, row in self.inspector().items()}
+
+    def assert_no_sideways_scroll(self):
+        self.assertLessEqual(
+            self.page.evaluate("() => document.documentElement.scrollWidth"),
+            self.page.evaluate("() => window.innerWidth"),
+        )
+
+    def expected_inspector(self, contract, spot, days, trend=None, size=None, digits=4):
+        """The inspector values and formulas, hand-computed from snapshot inputs."""
+        price, spot_text = f"{contract['last']:,.{digits}f}", f"{spot:,.{digits}f}"
+        factor = (contract["last"] / spot) ** (1 / days)
+        values = {
+            "days": str(days),
+            "last": price,
+            "spot": spot_text,
+            "premium": f"{(contract['last'] / spot - 1) * 100:+.2f}%",
+            "factor": f"{factor:.8f}",
+            "yield-daily": f"{(factor - 1) * 100:+.4f}%",
+            "yield-monthly": f"{(factor ** 30 - 1) * 100:+.2f}%",
+            "yield-annualized": f"{(factor ** 365 - 1) * 100:+.2f}%",
+        }
+        details = {
+            "premium": f"({price} / {spot_text} − 1) × 100",
+            "factor": f"({price} / {spot_text})^(1 / {days})",
+            "yield-daily": f"({factor:.8f}^1 − 1) × 100",
+            "yield-monthly": f"({factor:.8f}^30 − 1) × 100",
+            "yield-annualized": f"({factor:.8f}^365 − 1) × 100",
+        }
+        if trend:
+            expected_spot = spot * trend["daily_factor"] ** days
+            profit = (contract["bid"] - expected_spot) * size
+            values["trend-factor"] = f"{trend['daily_factor']:.8f}"
+            values["expected-spot"] = f"{expected_spot:,.4f}"
+            values["profit"] = f"{profit:+,.0f} TRY"
+            details["expected-spot"] = f"{spot_text} × {trend['daily_factor']:.8f}^{days}"
+            details["profit"] = f"({contract['bid']:,.4f} − {expected_spot:,.4f}) × {size:,}"
+        return values, details
+
+    def assert_inspector(self, values, details):
+        rows = self.inspector()
+        for key, value in values.items():
+            with self.subTest(item=key):
+                self.assertEqual(rows[key]["value"], value)
+        for key, detail in details.items():
+            with self.subTest(detail=key):
+                self.assertEqual(rows[key]["detail"], detail)
+
+    def test_inspector_fills_in_the_usdtry_arithmetic(self):
+        self.open_dashboard("?market=USDTRY")
+        expect(self.page.locator("#inspector")).to_be_hidden()
+        self.select_button("Oct 2026").click()
+        self.assert_selected("Oct 2026")
+        market = self.snapshot["markets"]["USDTRY"]
+        contract = self.contract("Oct 2026")
+        values, details = self.expected_inspector(
+            contract, market["spot"]["last"], 23, market["spot_trend"], market["contract_size"],
+        )
+        # Hand-computed from tests/fixtures/market.json at the displayed precision.
+        self.assertEqual(values, {
+            "days": "23", "last": "50.0830", "spot": "49.1949", "premium": "+1.81%",
+            "factor": "1.00077824", "yield-daily": "+0.0778%", "yield-monthly": "+2.36%",
+            "yield-annualized": "+32.84%", "trend-factor": "1.00054111",
+            "expected-spot": "49.8108", "profit": "+271 TRY",
+        })
+        self.assert_inspector({
+            **values,
+            "label": "Oct 2026",
+            "symbol": "USDTRYV2026",
+            "code": "F_USDTRY1026",
+            "maturity": "30 Oct 2026",
+            "bid-ask": "50.0820 / 50.0830",
+            "last-trade": "13:49",
+            "spot-time": "07 Oct, 14:00 TRT",
+            "spot-source": "TradingView intraday via borsapy FX",
+            "trend-window": "10 Apr 2026 → 07 Oct 2026",
+        }, {
+            **details,
+            "days": "Calendar days from 07 Oct 2026",
+            "spot": "TRY per USD",
+            "trend-window": "180 days",
+            "trend-factor": "(49.1949 / 44.6304)^(1 / 180)",
+        })
+        expect(self.page.locator("#inspector-day")).to_have_text(f"Live · {LIVE_LABEL}")
+        expect(self.page.locator("#inspector-note")).to_be_hidden()
+        self.assertFalse(self.inspector()["last-trade"]["stale"])
+
+        # The yield period shown in the chart is marked, and follows the toggle.
+        def tagged():
+            return [key for key, row in self.inspector().items() if row["tag"]]
+        self.assertEqual(tagged(), ["yield-daily"])
+        self.page.locator('[data-yield-period="annualized"]').click()
+        self.assertEqual(tagged(), ["yield-annualized"])
+        self.assertEqual(self.inspector()["yield-annualized"]["tag"], "In chart")
+
+        # The region is labelled by its heading, with one list per group.
+        region = self.page.get_by_role("region", name="Inspector · Oct 2026")
+        expect(region).to_be_visible()
+        expect(region.locator("dl")).to_have_count(5)
+
+    def test_inspector_agrees_with_the_board_and_tooltips(self):
+        self.open_dashboard("?market=USDTRY")
+        market = self.snapshot["markets"]["USDTRY"]
+        labels = [c["label"] for c in market["contracts"]]
+        for label in ("Dec 2026", "Jul 2027", "Aug 2027", "Jan 2028"):
+            with self.subTest(contract=label):
+                self.select_button(label).click()
+                self.assert_selected(label)
+                rows = self.inspector()
+                index = labels.index(label)
+                row = self.page.locator("#contract-rows > tr").nth(index)
+                cell = lambda name: row.locator(f'td[data-label="{name}"]').inner_text().strip()
+                self.assertEqual(rows["last"]["value"], row.locator(".last-price").inner_text())
+                self.assertEqual(rows["bid-ask"]["value"], cell("Bid / Ask"))
+                self.assertEqual(rows["days"]["value"], cell("Days left"))
+                self.assertEqual(rows["premium"]["value"], cell("vs. spot"))
+                self.assertEqual(rows["yield-daily"]["value"], cell("Daily yield · 1D"))
+                self.assertEqual(rows["yield-monthly"]["value"], cell("Monthly yield · 30D"))
+                self.assertEqual(rows["yield-annualized"]["value"], cell("Annualized · 365D"))
+                code = market["contracts"][index]["symbol"]
+                self.assertEqual(rows["last-trade"]["stale"], code in STALE_TRADES)
+                if code in STALE_TRADES:
+                    self.assertEqual(rows["last-trade"]["value"], STALE_TRADES[code])
+
+                carry = self.page.locator("#carry-rows > tr").nth(index)
+                carry_cell = lambda name: carry.locator(f'td[data-label="{name}"]').inner_text().strip()
+                self.assertEqual(rows["expected-spot"]["value"], carry_cell("Exp. spot at maturity"))
+                profit = carry_cell("Exp. profit · TRY")
+                self.assertEqual(rows["profit"]["value"], "—" if profit == "—" else f"{profit} TRY")
+
+                # Each chart's tooltip shows the same price and yield.
+                self.hover_label("#curve-chart", label)
+                expect(self.page.locator("#chart-tooltip")).to_contain_text(
+                    f"{rows['last']['value']} · TRY per USD"
+                )
+                expect(self.page.locator("#chart-tooltip")).to_contain_text(
+                    f"{rows['days']['value']} days left"
+                )
+                self.hover_label("#yield-chart", label, "yieldChartPoints")
+                expect(self.page.locator("#yield-tooltip")).to_contain_text(
+                    f"{rows['yield-daily']['value']} 1D"
+                )
+
+        self.page.locator('[data-yield-period="monthly"]').click()
+        self.hover_label("#yield-chart", "Jan 2028", "yieldChartPoints")
+        expect(self.page.locator("#yield-tooltip")).to_contain_text(
+            f"{self.inspector()['yield-monthly']['value']} 30D"
+        )
+
+    def test_inspector_states_why_values_are_missing(self):
+        self.open_dashboard("?market=USDTRY")
+        self.select_button("Aug 2027").click()
+        rows = self.inspector()
+        self.assertEqual(rows["bid-ask"]["value"], "—")
+        self.assertEqual(rows["last-trade"]["value"], "—")
+        self.assertFalse(rows["last-trade"]["stale"])
+        self.assertEqual(rows["profit"]["value"], "—")
+        self.assertEqual(
+            rows["profit"]["detail"], "No profit: the contract has no bid in this snapshot."
+        )
+        # The expected spot doesn't need a bid, so it is still shown.
+        contract = self.contract("Aug 2027")
+        self.assertEqual(rows["expected-spot"]["value"], f"{contract['expected_spot_at_maturity']:,.4f}")
+
+        # On its maturity day a contract has 0 days left and no yield.
+        self.reopen_at(datetime.fromisoformat("2026-10-30T12:00:00+03:00"))
+        self.open_dashboard("?market=USDTRY")
+        self.select_button("Oct 2026").click()
+        self.assert_selected("Oct 2026", yields=False)
+        rows = self.inspector()
+        self.assertEqual(rows["days"]["value"], "0")
+        self.assertEqual(rows["factor"]["value"], "—")
+        self.assertEqual(
+            rows["factor"]["detail"], "No yield: the contract matures today, with 0 days left."
+        )
+        for period in ("daily", "monthly", "annualized"):
+            self.assertEqual(rows[f"yield-{period}"]["value"], "—")
+            self.assertEqual(rows[f"yield-{period}"]["detail"], "No yield without a daily factor.")
+        # The premium needs no days left.
+        self.assertEqual(rows["premium"]["value"], "+1.81%")
+
+    def test_inspector_on_a_later_istanbul_day_uses_the_adjusted_days(self):
+        self.reopen_at(NEXT_DAY_TIME)
+        self.open_dashboard("?market=USDTRY")
+        self.assert_note("08 Oct 2026")
+        self.select_button("Oct 2026").click()
+        self.assert_selected("Oct 2026")
+        market = self.snapshot["markets"]["USDTRY"]
+        values, details = self.expected_inspector(
+            self.contract("Oct 2026"), market["spot"]["last"], 22,
+            market["spot_trend"], market["contract_size"],
+        )
+        self.assert_inspector(values, {
+            **details, "days": "Calendar days from 08 Oct 2026, adjusted",
+        })
+        note = self.page.locator("#inspector-note")
+        expect(note).to_be_visible()
+        expect(note).to_have_text(
+            f"Days left and yields adjusted to 08 Oct 2026; prices are from the {LIVE_LABEL} snapshot."
+        )
+
+    def test_inspector_of_an_archived_close_shows_its_stored_values(self):
+        day = "2026-10-06"
+        self.open_day(day, "&market=USDTRY")
+        self.select_button("Dec 2026").click()
+        self.assert_selected("Dec 2026")
+        market = self.history[day]["markets"]["USDTRY"]
+        contract = next(c for c in market["contracts"] if c["label"] == "Dec 2026")
+        expect(self.page.locator("#inspector-day")).to_have_text(f"Close · {HISTORY_LABELS[day]}")
+        expect(self.page.locator("#inspector-note")).to_be_hidden()
+        self.assert_inspector({
+            "days": str(contract["days_to_maturity"]),
+            "last": f"{contract['last']:,.4f}",
+            "spot": f"{market['spot']['last']:,.4f}",
+            "premium": f"{contract['premium_percent']:+.2f}%",
+            "factor": f"{contract['daily_yield_factor']:.8f}",
+            "yield-daily": f"{contract['daily_yield_percent']:+.4f}%",
+            "yield-monthly": f"{contract['monthly_yield_percent']:+.2f}%",
+            "yield-annualized": f"{contract['annualized_yield_percent']:+.2f}%",
+            "expected-spot": f"{contract['expected_spot_at_maturity']:,.4f}",
+            "profit": f"{contract['expected_short_profit_try']:+,.0f} TRY",
+        }, {"days": f"Calendar days from {HISTORY_LABELS[day]}"})
+
+    def test_inspector_labels_each_market_spot(self):
+        cases = (
+            ("EURTRY", "Dec 2026", "TradingView intraday via borsapy FX", "TRY per EUR"),
+            ("XAUTRY", "Dec 2026", "Synthetic XAU/USD × USD/TRY gram reference", "TRY per gram"),
+        )
+        for key, label, source, unit in cases:
+            with self.subTest(market=key):
+                self.open_dashboard(f"?market={key}")
+                self.select_button(label, key).click()
+                self.assert_selected(label, key)
+                rows = self.inspector()
+                self.assertEqual(rows["spot-source"]["value"], source)
+                self.assertEqual(rows["spot"]["detail"], unit)
+                expect(self.page.locator("#inspector-carry-group")).to_be_hidden()
+                self.assertNotIn("profit", rows)
+                market = self.snapshot["markets"][key]
+                contract = self.contract(label, key)
+                self.assert_inspector(*self.expected_inspector(
+                    contract, market["spot"]["last"], contract["days_to_maturity"],
+                    digits=market["price_digits"],
+                ))
 
     # Accessibility: axe-core audit of each rendered state
 
@@ -1678,7 +2156,23 @@ class DashboardSmokeTests(unittest.TestCase):
                 self.open_dashboard("?market=USDTRY")
                 self.select_button("Dec 2026").click()
                 self.assert_selected("Dec 2026")
+                self.assert_no_sideways_scroll()
                 self.assert_accessible(f"selection at {viewport or 'desktop'}")
+
+    @unittest.skipIf(Axe is None, "axe-playwright-python is not installed")
+    def test_accessibility_of_the_stale_key_and_empty_charts(self):
+        for viewport in (None, MOBILE_VIEWPORT):
+            with self.subTest(viewport=viewport):
+                if viewport:
+                    self.reopen_at(FIXTURE_DAY_TIME, viewport=viewport)
+                self.open_dashboard("?market=USDTRY")
+                expect(self.page.locator("#curve-key")).to_be_visible()
+                expect(self.page.locator("#yield-key")).to_be_visible()
+                self.assert_accessible(f"stale key at {viewport or 'desktop'}")
+        self.serve_snapshot(re.compile(r"/data/market\.json"), self.unpriced_market(self.snapshot))
+        self.open_dashboard("?market=XAUTRY")
+        self.assert_empty_charts()
+        self.assert_accessible("empty charts")
 
     @unittest.skipIf(Axe is None, "axe-playwright-python is not installed")
     def test_accessibility_of_the_load_error(self):

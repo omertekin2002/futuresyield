@@ -555,6 +555,81 @@ h2 {
   color: var(--paper);
   background: var(--ink);
 }
+/* The selected maturity's inputs and arithmetic, one group per column where
+   the width allows and stacked on a phone. */
+.inspector {
+  margin-top: 8px;
+  border: 1px solid var(--ink);
+  background: var(--paper);
+}
+.inspector-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--ink);
+  background: var(--market-tint);
+}
+.inspector-heading p {
+  margin: 0;
+  font: 12px/1.4 var(--serif);
+}
+.inspector-note {
+  margin: 0;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--ink);
+  background: var(--sky);
+  font: 12px/1.4 var(--serif);
+}
+.inspector-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr));
+}
+.inspector-group {
+  min-width: 0;
+  padding: 10px 16px 12px;
+  border-right: 1px solid var(--ink);
+  border-bottom: 1px solid var(--ink);
+  margin: 0 -1px -1px 0;
+}
+.inspector-group h3 {
+  margin: 0 0 6px;
+  font: 700 12px/1.2 var(--sans);
+  text-transform: uppercase;
+}
+.inspector-group dl {
+  margin: 0;
+}
+.inspector-group dl > div + div {
+  margin-top: 6px;
+}
+.inspector-group dt {
+  font: 11px/1.3 var(--sans);
+  text-transform: uppercase;
+}
+.inspector-group dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.inspector-value {
+  font: 700 13px/1.35 var(--sans);
+  font-variant-numeric: tabular-nums;
+}
+.inspector-detail {
+  display: block;
+  font: 12px/1.35 var(--serif);
+}
+.inspector-tag {
+  padding: 0 3px;
+  color: var(--paper);
+  background: var(--ink);
+  font-weight: 700;
+}
+.inspector .stale-tag {
+  font: 700 10px/1.2 var(--sans);
+}
 .curve-section h2:focus {
   outline: none;
 }
@@ -643,6 +718,45 @@ canvas:focus-visible {
   border-radius: 50%;
   box-shadow: 0 0 0 2px var(--paper), inset 0 0 0 2px var(--paper);
   pointer-events: none;
+}
+/* Why a chart is empty, over its blank canvas. */
+.chart-empty {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 3;
+  width: max-content;
+  max-width: calc(100% - 48px);
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--ink);
+  background: var(--paper);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  text-align: center;
+  font: 700 13px/1.4 var(--sans);
+}
+/* The stale-point key under a chart, drawn like the canvas's dotted marker. */
+.chart-key {
+  margin: 0;
+  padding: 6px 16px;
+  border-top: 1px solid var(--ink);
+  background: var(--paper);
+  font: 12px/1.4 var(--serif);
+}
+.chart-key strong {
+  font: 700 12px/1.4 var(--sans);
+}
+.stale-swatch {
+  display: inline-block;
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border: 2px dotted var(--ink);
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--paper);
+  vertical-align: -1px;
 }
 .curve-y-label,
 .yield-y-label {
@@ -1091,6 +1205,12 @@ footer p {
     margin-top: 12px;
     padding: 8px 12px;
   }
+  .inspector-heading,
+  .inspector-note,
+  .inspector-group {
+    padding-right: 12px;
+    padding-left: 12px;
+  }
   .selection-line button,
   .select-button {
     min-height: 32px;
@@ -1098,7 +1218,8 @@ footer p {
   .compare-control select {
     flex: 1 1 100%;
   }
-  .chart-legend {
+  .chart-legend,
+  .chart-key {
     padding: 6px 12px;
   }
   .history-banner {
