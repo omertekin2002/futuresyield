@@ -286,7 +286,8 @@ without a browser.
 live view of each market, a past close with its banner, a comparison overlay
 with both legends and a tooltip showing, a tooltip opened from the keyboard on
 each chart, each yield period, a 390×844 mobile viewport, a selected maturity
-on desktop and on that mobile viewport, and the load-error state. It fails on any serious or critical violation and lists each one's
+on desktop and on that mobile viewport with its inspector open, and the
+load-error state. It fails on any serious or critical violation and lists each one's
 rule, impact, element and help text. As an automated check, it can't judge
 everything WCAG asks for, such as whether labels make sense.
 
@@ -311,6 +312,31 @@ comparisons, and clears when you switch market or when the maturity is no
 longer listed, for example after it matures. A chart that can't plot the
 selected maturity, such as the yield chart on its last day, shows no mark. The
 selection isn't kept in the URL.
+
+**Inspector.** Below that line, an inspector shows the selected maturity's
+inputs and arithmetic for the day on screen, live or an archived close, so an
+unusual point can be checked without reading across the board:
+
+- **Contract:** its label, VİOP symbol, table code, maturity date and days left.
+- **Quote:** last price, bid / ask, and the last trade time with the board's
+  **stale** tag and "—" rule.
+- **Spot denominator:** the market's spot reference, its unit and time, and
+  its source. XAU/TRY's is labelled as the synthetic XAU/USD × USD/TRY gram
+  reference.
+- **Yield arithmetic,** with the values filled in: premium
+  `(price / spot − 1) × 100`, daily factor `(price / spot)^(1 / days left)`,
+  and the 1D, 30D and 365D yields `(factor^n − 1) × 100`, with the period the
+  yield chart shows marked **In chart**.
+- **Short carry,** USD/TRY only: the 180-day trend's window and daily
+  appreciation, expected spot `spot × daily appreciation^(days left)` and
+  expected profit `(bid − expected spot) × 1,000` TRY.
+
+Every value is the one the board, the carry table and the chart tooltips show.
+Nothing missing is filled in: without a bid there is no profit, a contract
+maturing today has no daily factor or yield, and each says why. When the live
+snapshot has been rolled forward to a later Istanbul day, the inspector shows
+the adjusted days left and yields and repeats the note saying so. It updates in
+place on the one-minute refresh and hides with the selection.
 
 ## Continuous integration
 

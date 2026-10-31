@@ -72,6 +72,16 @@ const elements = {
   selectionLabel: document.querySelector("#selection-label"),
   selectionClear: document.querySelector("#selection-clear"),
   selectionAnnouncer: document.querySelector("#selection-announcer"),
+  inspector: document.querySelector("#inspector"),
+  inspectorName: document.querySelector("#inspector-name"),
+  inspectorDay: document.querySelector("#inspector-day"),
+  inspectorNote: document.querySelector("#inspector-note"),
+  inspectorContract: document.querySelector("#inspector-contract"),
+  inspectorQuote: document.querySelector("#inspector-quote"),
+  inspectorSpot: document.querySelector("#inspector-spot"),
+  inspectorYield: document.querySelector("#inspector-yield"),
+  inspectorCarryGroup: document.querySelector("#inspector-carry-group"),
+  inspectorCarry: document.querySelector("#inspector-carry"),
 };
 
 const state = {
@@ -144,6 +154,12 @@ const percentFormat = new Intl.NumberFormat("en-US", {
 const profitFormat = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 0,
   signDisplay: "always",
+});
+
+// Gross daily factors, such as 1.00077824.
+const factorFormat = new Intl.NumberFormat("en-US", {
+  minimumFractionDigits: 8,
+  maximumFractionDigits: 8,
 });
 
 const compactFormat = new Intl.NumberFormat("en-US", {
@@ -223,25 +239,18 @@ function formatPercent(value) {
   return hasNumber(value) ? `${percentFormat.format(value)}%` : "—";
 }
 
+// The gross daily factor a contract's yields compound: the snapshot's own, or
+// the updater's rule applied to its price, spot and days left.
+function yieldFactor(contract, spot = state.data?.spot?.last) {
+  return hasNumber(contract.daily_yield_factor)
+    ? contract.daily_yield_factor
+    : dailyYieldFactor(contract.last, spot, contract.days_to_maturity);
+}
+
 function yieldValue(contract, period = state.yieldPeriod, spot = state.data?.spot?.last) {
   const settings = YIELD_PERIODS[period];
   if (hasNumber(contract[settings.field])) return contract[settings.field];
-
-  let factor = contract.daily_yield_factor;
-  if (
-    !hasNumber(factor) &&
-    hasNumber(contract.last) &&
-    hasNumber(spot) &&
-    contract.last > 0 &&
-    spot > 0 &&
-    contract.days_to_maturity > 0
-  ) {
-    factor = Math.pow(contract.last / spot, 1 / contract.days_to_maturity);
-  }
-
-  return hasNumber(factor)
-    ? (Math.pow(factor, settings.days) - 1) * 100
-    : null;
+  return compoundedYieldPercent(yieldFactor(contract, spot), settings.days);
 }
 
 function formatYield(value, period = state.yieldPeriod) {
@@ -267,6 +276,17 @@ function formatYieldDelta(value, period = state.yieldPeriod) {
 
 function formatProfit(value) {
   return hasNumber(value) ? profitFormat.format(value) : "—";
+}
+
+function formatFactor(value) {
+  return hasNumber(value) ? factorFormat.format(value) : "—";
+}
+
+// A contract's bid and ask as the board shows them.
+function formatBidAsk(contract) {
+  return hasNumber(contract.bid) || hasNumber(contract.ask)
+    ? `${formatPrice(contract.bid)} / ${formatPrice(contract.ask)}`
+    : "—";
 }
 
 function parseMarketDate(value) {
@@ -355,6 +375,8 @@ function lastTrades(contracts, generatedAt) {
       : { text: `${tradeDayFormat.format(time)} ${clock}`, stale: true }];
   }));
 }
+
+const STALE_DESCRIPTION = ", last traded before the market’s latest quote day";
 
 // The tooltip line for a contract of the day on screen.
 function lastTradeLine(contract) {
@@ -563,14 +585,12 @@ function renderRows(contracts) {
     const annualizedYield = yieldValue(contract, "annualized");
     const maturity = dateFormat.format(parseMarketDate(contract.maturity_date));
     const volume = hasNumber(contract.volume) ? compactFormat.format(contract.volume) : "—";
-    const spread = hasNumber(contract.bid) || hasNumber(contract.ask)
-      ? `${formatPrice(contract.bid)} / ${formatPrice(contract.ask)}`
-      : "—";
+    const spread = formatBidAsk(contract);
     const nearClass = contract.days_to_maturity <= 31 ? "is-near" : "";
     const unavailable = contract.status !== "available" ? " (unavailable)" : "";
     const trade = trades.get(contract);
     const staleTag = trade.stale
-      ? ' <span class="stale-tag">stale<span class="sr-only">, last traded before the market’s latest quote day</span></span>'
+      ? ` <span class="stale-tag">stale<span class="sr-only">${STALE_DESCRIPTION}</span></span>`
       : "";
 
     const key = maturityKey(contract);
@@ -771,6 +791,206 @@ function renderSelection() {
       row.querySelector(".select-button")?.setAttribute("aria-pressed", String(selected));
     });
   });
+  renderInspector(contract);
+}
+
+// One inspector row: a term, its value, and an optional line under the value
+// with the formula filled in or the reason the value is missing. Snapshot
+// strings go in as text.
+function inspectorRow({ key, term, value, detail, className = "", tag = "", stale = false }) {
+  const row = document.createElement("div");
+  row.dataset.item = key;
+  const termNode = document.createElement("dt");
+  termNode.textContent = term;
+  if (tag) {
+    const tagNode = document.createElement("span");
+    tagNode.className = "inspector-tag";
+    tagNode.textContent = tag;
+    termNode.append(" ", tagNode);
+  }
+  const valueNode = document.createElement("span");
+  valueNode.className = `inspector-value ${className}`.trim();
+  valueNode.textContent = value;
+  if (stale) {
+    const staleTag = document.createElement("span");
+    staleTag.className = "stale-tag";
+    staleTag.textContent = "stale";
+    const note = document.createElement("span");
+    note.className = "sr-only";
+    note.textContent = STALE_DESCRIPTION;
+    staleTag.append(note);
+    valueNode.append(" ", staleTag);
+  }
+  const description = document.createElement("dd");
+  description.append(valueNode);
+  if (detail) {
+    const detailNode = document.createElement("small");
+    detailNode.className = "inspector-detail";
+    detailNode.textContent = detail;
+    description.append(detailNode);
+  }
+  row.append(termNode, description);
+  return row;
+}
+
+function fillInspectorList(list, rows) {
+  list.replaceChildren(...rows.map(inspectorRow));
+}
+
+// Why a contract has no daily factor, and so no yield.
+function noYieldReason(contract, spot) {
+  if (!hasNumber(contract.last)) return "No yield: the contract has no last price.";
+  if (!hasNumber(spot) || spot <= 0) return "No yield: the spot reference is missing.";
+  if (contract.days_to_maturity <= 0) {
+    return "No yield: the contract matures today, with 0 days left.";
+  }
+  return "No yield: the price and spot give no daily factor.";
+}
+
+// The selected maturity's inputs and the README's formulas with them filled
+// in, for the day on screen. Every value is the one the board, the carry
+// table and the chart tooltips show; nothing missing is filled in.
+function renderInspector(contract) {
+  elements.inspector.hidden = !contract;
+  if (!contract) return;
+  const data = state.data;
+  const spot = data.spot.last;
+  const days = contract.days_to_maturity;
+  const price = formatPrice(contract.last);
+  const trade = lastTrades(data.contracts, state.snapshot.generated_at).get(contract);
+  const countedFrom = state.adjustedDay ?? state.snapshot.market_date;
+
+  elements.inspectorName.textContent = contract.label;
+  elements.inspectorDay.textContent =
+    `${state.renderedDate ? "Close" : "Live"} · ${formatDay(referenceDate())}`;
+  elements.inspectorNote.hidden = !state.adjustedDay;
+  elements.inspectorNote.textContent = daysNoteText(state.snapshot);
+
+  fillInspectorList(elements.inspectorContract, [
+    { key: "label", term: "Label", value: contract.label },
+    { key: "symbol", term: "VİOP symbol", value: contract.symbol },
+    { key: "code", term: "Table code", value: contract.code },
+    { key: "maturity", term: "Maturity", value: formatDay(contract.maturity_date) },
+    {
+      key: "days",
+      term: "Days left",
+      value: String(days),
+      detail: `Calendar days from ${formatDay(countedFrom)}${state.adjustedDay ? ", adjusted" : ""}`,
+    },
+  ]);
+
+  fillInspectorList(elements.inspectorQuote, [
+    {
+      key: "last",
+      term: "Last price",
+      value: price,
+      detail: hasNumber(contract.last) ? data.spot_unit : "No last price in this snapshot.",
+    },
+    { key: "bid-ask", term: "Bid / Ask", value: formatBidAsk(contract) },
+    { key: "last-trade", term: "Last trade", value: trade.text, stale: trade.stale },
+  ]);
+
+  const spotUpdated = typeof data.spot.updated_at === "string" ? Date.parse(data.spot.updated_at) : NaN;
+  const spotTime = Number.isNaN(spotUpdated) ? "—" : `${dateTimeFormat.format(spotUpdated)} TRT`;
+  const synthetic = /^synthetic/i.test(data.spot.source ?? "");
+  fillInspectorList(elements.inspectorSpot, [
+    { key: "spot", term: "Spot", value: formatPrice(spot), detail: data.spot_unit },
+    { key: "spot-time", term: "Spot time", value: spotTime },
+    {
+      key: "spot-source",
+      term: "Reference",
+      value: synthetic
+        ? `Synthetic ${data.base_asset}/USD × USD/${data.quote_asset} gram reference`
+        : data.spot.source ?? "—",
+    },
+  ]);
+
+  const factor = yieldFactor(contract, spot);
+  const canDivide = hasNumber(contract.last) && hasNumber(spot);
+  fillInspectorList(elements.inspectorYield, [
+    {
+      key: "premium",
+      term: "Premium",
+      value: formatPercent(contract.premium_percent),
+      className: signedClass(contract.premium_percent),
+      detail: canDivide && hasNumber(contract.premium_percent)
+        ? `(${price} / ${formatPrice(spot)} − 1) × 100`
+        : hasNumber(contract.last)
+          ? "No premium in this snapshot."
+          : "No premium: the contract has no last price.",
+    },
+    {
+      key: "factor",
+      term: "Daily factor",
+      value: formatFactor(factor),
+      detail: hasNumber(factor)
+        ? `(${price} / ${formatPrice(spot)})^(1 / ${days})`
+        : noYieldReason(contract, spot),
+    },
+    ...Object.entries(YIELD_PERIODS).map(([period, settings]) => {
+      const value = yieldValue(contract, period, spot);
+      return {
+        key: `yield-${period}`,
+        term: `${settings.label} yield · ${settings.shortLabel}`,
+        tag: period === state.yieldPeriod ? "In chart" : "",
+        value: formatYield(value, period),
+        className: signedClass(value),
+        detail: hasNumber(factor)
+          ? `(${formatFactor(factor)}^${settings.days} − 1) × 100`
+          : hasNumber(value) ? "" : "No yield without a daily factor.",
+      };
+    }),
+  ]);
+
+  elements.inspectorCarryGroup.hidden = !hasNumber(data.contract_size);
+  if (elements.inspectorCarryGroup.hidden) {
+    elements.inspectorCarry.replaceChildren();
+    return;
+  }
+  const trend = data.spot_trend;
+  const trendFactor = trend?.daily_factor;
+  const expectedSpot = contract.expected_spot_at_maturity;
+  const profit = contract.expected_short_profit_try;
+  const contractSize = data.contract_size.toLocaleString("en-US");
+  const noProjection =
+    `No projection: the ${trend?.lookback_days ?? 180}-day spot history was unavailable for this snapshot.`;
+  fillInspectorList(elements.inspectorCarry, [
+    {
+      key: "trend-window",
+      term: "Trend window",
+      value: trend
+        ? `${formatDay(trend.start_date)} → ${formatDay(trend.end_date)}`
+        : "Unavailable",
+      detail: trend ? `${trend.days} days` : noProjection,
+    },
+    {
+      key: "trend-factor",
+      term: "Daily appreciation",
+      value: formatFactor(trendFactor),
+      detail: trend && hasNumber(trend.start_spot) && hasNumber(trend.end_spot)
+        ? `(${formatPrice(trend.end_spot)} / ${formatPrice(trend.start_spot)})^(1 / ${trend.days})`
+        : "",
+    },
+    {
+      key: "expected-spot",
+      term: "Expected spot at maturity",
+      value: formatPrice(expectedSpot),
+      detail: hasNumber(expectedSpot) && hasNumber(trendFactor)
+        ? `${formatPrice(spot)} × ${formatFactor(trendFactor)}^${days}`
+        : noProjection,
+    },
+    {
+      key: "profit",
+      term: "Expected profit",
+      value: hasNumber(profit) ? `${formatProfit(profit)} TRY` : "—",
+      className: signedClass(profit),
+      detail: hasNumber(profit)
+        ? `(${formatPrice(contract.bid)} − ${formatPrice(expectedSpot)}) × ${contractSize}`
+        : !hasNumber(contract.bid)
+          ? "No profit: the contract has no bid in this snapshot."
+          : "No profit: there is no expected spot to compare the bid with.",
+    },
+  ]);
 }
 
 function setSelection(key) {
@@ -1232,12 +1452,16 @@ function renderSnapshot(snapshot) {
 }
 
 // Days left that no longer match the snapshot's own date are never silent.
-function renderDaysNote(snapshot) {
-  elements.daysNote.hidden = !state.adjustedDay;
-  elements.daysNote.textContent = state.adjustedDay
+function daysNoteText(snapshot) {
+  return state.adjustedDay
     ? `Days left and yields adjusted to ${formatDay(state.adjustedDay)}; ` +
       `prices are from the ${formatDay(snapshot.market_date)} snapshot.`
     : "";
+}
+
+function renderDaysNote(snapshot) {
+  elements.daysNote.hidden = !state.adjustedDay;
+  elements.daysNote.textContent = daysNoteText(snapshot);
 }
 
 async function fetchSnapshot(url, options) {
@@ -1547,6 +1771,7 @@ elements.yieldPeriodButtons.forEach((button) => {
     elements.yieldTooltip.hidden = true;
     renderYieldChart();
     syncKeyboardPoint(charts.yield);
+    renderInspector(selectedContract());
   });
 });
 
