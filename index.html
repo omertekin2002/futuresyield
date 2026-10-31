@@ -178,6 +178,43 @@
             </div>
             <p class="sr-only" id="selection-announcer" aria-live="polite"></p>
 
+            <section
+              class="inspector"
+              id="inspector"
+              aria-labelledby="inspector-title"
+              hidden
+            >
+              <div class="inspector-heading">
+                <h2 id="inspector-title">
+                  Inspector · <span id="inspector-name"></span>
+                </h2>
+                <p id="inspector-day"></p>
+              </div>
+              <p class="inspector-note" id="inspector-note" hidden></p>
+              <div class="inspector-groups">
+                <div class="inspector-group">
+                  <h3>Contract</h3>
+                  <dl id="inspector-contract"></dl>
+                </div>
+                <div class="inspector-group">
+                  <h3>Quote</h3>
+                  <dl id="inspector-quote"></dl>
+                </div>
+                <div class="inspector-group">
+                  <h3>Spot denominator</h3>
+                  <dl id="inspector-spot"></dl>
+                </div>
+                <div class="inspector-group">
+                  <h3>Yield arithmetic</h3>
+                  <dl id="inspector-yield"></dl>
+                </div>
+                <div class="inspector-group" id="inspector-carry-group">
+                  <h3>Short carry</h3>
+                  <dl id="inspector-carry"></dl>
+                </div>
+              </div>
+            </section>
+
             <section class="curve-section" aria-labelledby="curve-title">
               <div class="section-heading">
                 <div>
