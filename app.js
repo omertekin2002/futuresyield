@@ -1022,7 +1022,7 @@ function clearChart(canvas, label, { empty, key, message }) {
   // The last render left the context scaled by the pixel ratio.
   context.setTransform(1, 0, 0, 1, 0, 0);
   context.clearRect(0, 0, canvas.width, canvas.height);
-  canvas.setAttribute("aria-label", label);
+  canvas.setAttribute("aria-label", `${label} ${message}`);
   empty.textContent = message;
   empty.hidden = false;
   key.hidden = true;

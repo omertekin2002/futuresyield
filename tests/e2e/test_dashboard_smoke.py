@@ -870,6 +870,9 @@ class DashboardSmokeTests(unittest.TestCase):
                     expect(self.page.locator(canvas)).to_have_attribute(
                         "aria-label", re.compile(r"XAU/TRY.*: no "),
                     )
+                    expect(self.page.locator(canvas)).to_have_attribute(
+                        "aria-label", re.compile(re.escape(self.page.locator(message).inner_text())),
+                    )
                 else:
                     expect(self.page.locator(message)).to_be_hidden()
         if empty:
