@@ -178,6 +178,43 @@
             </div>
             <p class="sr-only" id="selection-announcer" aria-live="polite"></p>
 
+            <section
+              class="inspector"
+              id="inspector"
+              aria-labelledby="inspector-title"
+              hidden
+            >
+              <div class="inspector-heading">
+                <h2 id="inspector-title">
+                  Inspector · <span id="inspector-name"></span>
+                </h2>
+                <p id="inspector-day"></p>
+              </div>
+              <p class="inspector-note" id="inspector-note" hidden></p>
+              <div class="inspector-groups">
+                <div class="inspector-group">
+                  <h3>Contract</h3>
+                  <dl id="inspector-contract"></dl>
+                </div>
+                <div class="inspector-group">
+                  <h3>Quote</h3>
+                  <dl id="inspector-quote"></dl>
+                </div>
+                <div class="inspector-group">
+                  <h3>Spot denominator</h3>
+                  <dl id="inspector-spot"></dl>
+                </div>
+                <div class="inspector-group">
+                  <h3>Yield arithmetic</h3>
+                  <dl id="inspector-yield"></dl>
+                </div>
+                <div class="inspector-group" id="inspector-carry-group">
+                  <h3>Short carry</h3>
+                  <dl id="inspector-carry"></dl>
+                </div>
+              </div>
+            </section>
+
             <section class="curve-section" aria-labelledby="curve-title">
               <div class="section-heading">
                 <div>
@@ -206,7 +243,9 @@
                 ></canvas>
                 <div class="chart-marker" id="curve-marker" aria-hidden="true" hidden></div>
                 <div class="chart-tooltip" id="chart-tooltip" hidden></div>
+                <p class="chart-empty" id="curve-empty" aria-hidden="true" hidden></p>
               </div>
+              <p class="chart-key" id="curve-key" hidden></p>
               <p class="sr-only" id="chart-keys">
                 Use the left and right arrow keys to step through the maturities,
                 Home and End to jump to the first and last, Enter or Space to
@@ -302,7 +341,9 @@
                   id="yield-tooltip"
                   hidden
                 ></div>
+                <p class="chart-empty" id="yield-empty" aria-hidden="true" hidden></p>
               </div>
+              <p class="chart-key" id="yield-key" hidden></p>
               <p class="sr-only" id="yield-announcer" aria-live="polite"></p>
 
               <div class="yield-readouts" aria-live="polite">
