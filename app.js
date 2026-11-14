@@ -3,6 +3,9 @@ const DATA_URL = "data/market.json";
 const SNAPSHOT_SCHEMA_VERSION = 4;
 const HISTORY_URL = "data/history";
 const HISTORY_DATE = /^\d{4}-\d{2}-\d{2}$/;
+// A maturity in a shared link: its month, as maturityKey() gives it.
+const MATURITY_MONTH = /^\d{4}-(0[1-9]|1[0-2])$/;
+const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const ISTANBUL_TIMEZONE = "Europe/Istanbul";
 
 const elements = {
@@ -86,6 +89,11 @@ const elements = {
   inspectorYield: document.querySelector("#inspector-yield"),
   inspectorCarryGroup: document.querySelector("#inspector-carry-group"),
   inspectorCarry: document.querySelector("#inspector-carry"),
+  inspectorCompareGroup: document.querySelector("#inspector-compare-group"),
+  inspectorCompareNote: document.querySelector("#inspector-compare-note"),
+  inspectorCompareTable: document.querySelector("#inspector-compare-table"),
+  inspectorCompareHead: document.querySelector("#inspector-compare-head"),
+  inspectorCompareRows: document.querySelector("#inspector-compare-rows"),
 };
 
 const state = {
@@ -114,6 +122,9 @@ const state = {
   adjustedDay: null,
   // The maturity selected across the charts and tables, by maturityKey(), or null.
   selectedKey: null,
+  // A ?maturity= from the link the page was opened with, applied once to the
+  // first view that renders, so a later poll can't bring back a cleared one.
+  requestedMaturity: null,
 };
 
 // Quick comparison picks: the archived close nearest each target, if one is
@@ -276,6 +287,24 @@ function formatYieldDelta(value, period = state.yieldPeriod) {
     maximumFractionDigits: digits,
     signDisplay: "always",
   }).format(value)} pp`;
+}
+
+// A change in a percentage, such as the premium, in percentage points.
+function formatPointDelta(value) {
+  return hasNumber(value) ? `${percentFormat.format(value)} pp` : "—";
+}
+
+const dayCountFormat = new Intl.NumberFormat("en-US", { signDisplay: "always" });
+
+// A change in days left, such as "-7 days".
+function formatDayDelta(value) {
+  return `${dayCountFormat.format(value)} ${Math.abs(value) === 1 ? "day" : "days"}`;
+}
+
+// The change from a compared value to the day on screen's, or null when
+// either is missing.
+function difference(current, compared) {
+  return hasNumber(current) && hasNumber(compared) ? current - compared : null;
 }
 
 function formatProfit(value) {
@@ -780,6 +809,36 @@ function updateSelection(key) {
   elements.selectionAnnouncer.textContent = contract
     ? `Selected ${contract.label}, ${contract.code}.`
     : "Selection cleared.";
+  updateUrlParam("maturity", key);
+}
+
+// "Dec 2026" for the maturity key "2026-12"; anything else as given.
+function formatMaturityMonth(key) {
+  if (!MATURITY_MONTH.test(key)) return key;
+  const [year, month] = key.split("-");
+  return `${MONTH_NAMES[Number(month) - 1]} ${year}`;
+}
+
+// Select the maturity a shared link asked for, once the first view has
+// rendered. One that isn't listed on the day on screen, or isn't a month, is
+// dropped from the URL with a notice.
+function applyRequestedMaturity() {
+  const key = state.requestedMaturity;
+  if (key === null || !state.data) return;
+  state.requestedMaturity = null;
+  const listed = MATURITY_MONTH.test(key) &&
+    state.data.contracts.some((contract) => maturityKey(contract) === key);
+  if (listed) {
+    setSelection(key);
+    return;
+  }
+  updateUrlParam("maturity", null);
+  const day = state.renderedDate ?? state.adjustedDay ?? state.snapshot.market_date;
+  addNotice(
+    MATURITY_MONTH.test(key)
+      ? `No ${formatMaturityMonth(key)} maturity listed for ${state.data.pair} on ${formatDay(day)}.`
+      : "That maturity link is not a month, so nothing is selected.",
+  );
 }
 
 // Mark the selection outside the charts: the line naming it, and its rows in
@@ -798,6 +857,26 @@ function renderSelection() {
   renderInspector(contract);
 }
 
+// The board's stale tag, with its description for screen readers.
+function staleTagNode() {
+  const staleTag = document.createElement("span");
+  staleTag.className = "stale-tag";
+  staleTag.textContent = "stale";
+  const note = document.createElement("span");
+  note.className = "sr-only";
+  note.textContent = STALE_DESCRIPTION;
+  staleTag.append(note);
+  return staleTag;
+}
+
+// The inspector's "In chart" tag for a term or row header.
+function inChartTag(tag) {
+  const tagNode = document.createElement("span");
+  tagNode.className = "inspector-tag";
+  tagNode.textContent = tag;
+  return tagNode;
+}
+
 // One inspector row: a term, its value, and an optional line under the value
 // with the formula filled in or the reason the value is missing. Snapshot
 // strings go in as text.
@@ -806,25 +885,11 @@ function inspectorRow({ key, term, value, detail, className = "", tag = "", stal
   row.dataset.item = key;
   const termNode = document.createElement("dt");
   termNode.textContent = term;
-  if (tag) {
-    const tagNode = document.createElement("span");
-    tagNode.className = "inspector-tag";
-    tagNode.textContent = tag;
-    termNode.append(" ", tagNode);
-  }
+  if (tag) termNode.append(" ", inChartTag(tag));
   const valueNode = document.createElement("span");
   valueNode.className = `inspector-value ${className}`.trim();
   valueNode.textContent = value;
-  if (stale) {
-    const staleTag = document.createElement("span");
-    staleTag.className = "stale-tag";
-    staleTag.textContent = "stale";
-    const note = document.createElement("span");
-    note.className = "sr-only";
-    note.textContent = STALE_DESCRIPTION;
-    staleTag.append(note);
-    valueNode.append(" ", staleTag);
-  }
+  if (stale) valueNode.append(" ", staleTagNode());
   const description = document.createElement("dd");
   description.append(valueNode);
   if (detail) {
@@ -839,6 +904,12 @@ function inspectorRow({ key, term, value, detail, className = "", tag = "", stal
 
 function fillInspectorList(list, rows) {
   list.replaceChildren(...rows.map(inspectorRow));
+}
+
+// A spot reference's time, in Istanbul time, or "—" without one.
+function formatSpotTime(spot) {
+  const updated = typeof spot?.updated_at === "string" ? Date.parse(spot.updated_at) : NaN;
+  return Number.isNaN(updated) ? "—" : `${dateTimeFormat.format(updated)} TRT`;
 }
 
 // Why a contract has no daily factor, and so no yield.
@@ -856,7 +927,10 @@ function noYieldReason(contract, spot) {
 // table and the chart tooltips show; nothing missing is filled in.
 function renderInspector(contract) {
   elements.inspector.hidden = !contract;
-  if (!contract) return;
+  if (!contract) {
+    renderInspectorComparison(null);
+    return;
+  }
   const data = state.data;
   const spot = data.spot.last;
   const days = contract.days_to_maturity;
@@ -894,8 +968,7 @@ function renderInspector(contract) {
     { key: "last-trade", term: "Last trade", value: trade.text, stale: trade.stale },
   ]);
 
-  const spotUpdated = typeof data.spot.updated_at === "string" ? Date.parse(data.spot.updated_at) : NaN;
-  const spotTime = Number.isNaN(spotUpdated) ? "—" : `${dateTimeFormat.format(spotUpdated)} TRT`;
+  const spotTime = formatSpotTime(data.spot);
   const synthetic = /^synthetic/i.test(data.spot.source ?? "");
   fillInspectorList(elements.inspectorSpot, [
     { key: "spot", term: "Spot", value: formatPrice(spot), detail: data.spot_unit },
@@ -946,6 +1019,8 @@ function renderInspector(contract) {
     }),
   ]);
 
+  renderInspectorComparison(contract);
+
   elements.inspectorCarryGroup.hidden = !hasNumber(data.contract_size);
   if (elements.inspectorCarryGroup.hidden) {
     elements.inspectorCarry.replaceChildren();
@@ -995,6 +1070,208 @@ function renderInspector(contract) {
           : "No profit: there is no expected spot to compare the bid with.",
     },
   ]);
+}
+
+// One side of the comparison: a contract's inputs and the in-chart yield, as
+// its own snapshot gives them. Nothing missing is filled in.
+function comparisonSide(contract, market, generatedAt) {
+  const spot = market.spot?.last;
+  return {
+    contract,
+    spot,
+    trade: lastTrades(market.contracts, generatedAt).get(contract),
+    yield: yieldValue(contract, state.yieldPeriod, spot),
+  };
+}
+
+// The cells a side shows for each comparison row, keyed like the rows.
+function comparisonCells({ contract, spot, trade, yield: value }) {
+  const priced = hasNumber(contract.last);
+  return {
+    last: {
+      value: formatPrice(contract.last),
+      detail: priced ? "" : "No last price in this snapshot.",
+    },
+    "bid-ask": { value: formatBidAsk(contract) },
+    "last-trade": { value: trade.text, stale: trade.stale },
+    spot: { value: formatPrice(spot), detail: hasNumber(spot) ? "" : "No spot reference." },
+    premium: {
+      value: formatPercent(contract.premium_percent),
+      className: signedClass(contract.premium_percent),
+      detail: hasNumber(contract.premium_percent)
+        ? ""
+        : priced
+          ? "No premium in this snapshot."
+          : "No premium: the contract has no last price.",
+    },
+    days: { value: String(contract.days_to_maturity) },
+    yield: {
+      value: formatYield(value),
+      className: signedClass(value),
+      detail: hasNumber(value) ? "" : noYieldReason(contract, spot),
+    },
+  };
+}
+
+// One comparison cell: a value, an optional stale tag and an optional line
+// under it saying why the value is missing. Snapshot strings go in as text.
+function comparisonCell({ value = "", detail = "", stale = false, className = "" } = {}) {
+  const cell = document.createElement("td");
+  const valueNode = document.createElement("span");
+  valueNode.className = `inspector-value ${className}`.trim();
+  valueNode.textContent = value;
+  if (stale) valueNode.append(" ", staleTagNode());
+  cell.append(valueNode);
+  if (detail) {
+    const detailNode = document.createElement("small");
+    detailNode.className = "inspector-detail";
+    detailNode.textContent = detail;
+    cell.append(detailNode);
+  }
+  return cell;
+}
+
+function comparisonRow({ key, term, tag = "", current, compared, change }) {
+  const row = document.createElement("tr");
+  row.dataset.compareItem = key;
+  const header = document.createElement("th");
+  header.scope = "row";
+  header.textContent = term;
+  if (tag) header.append(" ", inChartTag(tag));
+  const changeCell = comparisonCell(change);
+  changeCell.className = "inspector-change";
+  row.append(header, comparisonCell(current), comparisonCell(compared), changeCell);
+  return row;
+}
+
+function columnHeader(text) {
+  const header = document.createElement("th");
+  header.scope = "col";
+  header.textContent = text;
+  return header;
+}
+
+// The selected maturity on the comparison close next to the day on screen,
+// with the change between them. The compared contract is matched by
+// maturity month, as the chart overlay matches it, and keeps the values its
+// own snapshot stored: it is never rolled forward.
+function renderInspectorComparison(contract) {
+  const group = elements.inspectorCompareGroup;
+  group.hidden = !contract || !state.compareSnapshot || !state.compareDate;
+  const table = elements.inspectorCompareTable;
+  if (group.hidden) {
+    elements.inspectorCompareHead.replaceChildren();
+    elements.inspectorCompareRows.replaceChildren();
+    return;
+  }
+  const data = state.data;
+  const comparedDay = formatDay(state.compareDate);
+  const market = comparisonMarket();
+  const compared = market?.contracts.find((candidate) =>
+    maturityKey(candidate) === maturityKey(contract)
+  );
+  table.hidden = !compared;
+  if (!compared) {
+    elements.inspectorCompareNote.textContent = market
+      ? `Not listed on ${comparedDay}: ${contract.label} was not listed yet on that close, ` +
+        "so no changes are shown."
+      : `No ${data.pair} data in the close of ${comparedDay}, so no changes are shown.`;
+    elements.inspectorCompareHead.replaceChildren();
+    elements.inspectorCompareRows.replaceChildren();
+    return;
+  }
+  elements.inspectorCompareNote.textContent =
+    `Change is the day on screen minus the close of ${comparedDay}, ` +
+    "whose values are shown as that close stored them.";
+
+  const currentDay = referenceDate();
+  const current = comparisonSide(contract, data, state.snapshot.generated_at);
+  const past = comparisonSide(compared, market, state.compareSnapshot.generated_at);
+  const now = comparisonCells(current);
+  const then = comparisonCells(past);
+  const settings = YIELD_PERIODS[state.yieldPeriod];
+  const apart = daysUntil(state.compareDate, currentDay);
+  const priceDelta = difference(contract.last, compared.last);
+  const spotDelta = difference(current.spot, past.spot);
+  const premiumDelta = difference(contract.premium_percent, compared.premium_percent);
+  const yieldDelta = difference(current.yield, past.yield);
+  const withUnit = (text, unit) => text === "—" ? text : `${text} ${unit}`;
+
+  elements.inspectorCompareHead.replaceChildren(
+    columnHeader("Input"),
+    columnHeader(`${state.renderedDate ? "Close" : "Live"} · ${formatDay(currentDay)}`),
+    columnHeader(`Close · ${comparedDay}`),
+    columnHeader("Change"),
+  );
+  elements.inspectorCompareRows.replaceChildren(...[
+    {
+      key: "date",
+      term: "Date",
+      current: {
+        value: formatDay(currentDay),
+        detail: state.adjustedDay ? `Days left from ${formatDay(state.adjustedDay)}, adjusted` : "",
+      },
+      compared: { value: comparedDay },
+      change: { value: `${apart} calendar ${apart === 1 ? "day" : "days"} apart` },
+    },
+    {
+      key: "last",
+      term: "Last price",
+      current: now.last,
+      compared: then.last,
+      change: {
+        value: withUnit(formatSignedPrice(priceDelta), data.spot_unit),
+        className: signedClass(priceDelta),
+      },
+    },
+    { key: "bid-ask", term: "Bid / Ask", current: now["bid-ask"], compared: then["bid-ask"] },
+    {
+      key: "last-trade",
+      term: "Last trade",
+      current: now["last-trade"],
+      compared: then["last-trade"],
+    },
+    {
+      key: "spot",
+      term: "Spot",
+      current: now.spot,
+      compared: then.spot,
+      change: {
+        value: withUnit(formatSignedPrice(spotDelta), data.spot_unit),
+        className: signedClass(spotDelta),
+      },
+    },
+    {
+      key: "spot-time",
+      term: "Spot time",
+      current: { value: formatSpotTime(data.spot) },
+      compared: { value: formatSpotTime(market.spot) },
+    },
+    {
+      key: "premium",
+      term: "Premium",
+      current: now.premium,
+      compared: then.premium,
+      change: { value: formatPointDelta(premiumDelta), className: signedClass(premiumDelta) },
+    },
+    {
+      key: "days",
+      term: "Days left",
+      current: now.days,
+      compared: then.days,
+      change: {
+        value: formatDayDelta(contract.days_to_maturity - compared.days_to_maturity),
+      },
+    },
+    {
+      key: "yield",
+      term: `${settings.label} yield · ${settings.shortLabel}`,
+      tag: "In chart",
+      current: now.yield,
+      compared: then.yield,
+      change: { value: formatYieldDelta(yieldDelta), className: signedClass(yieldDelta) },
+    },
+  ].map(comparisonRow));
 }
 
 function setSelection(key) {
@@ -1518,6 +1795,7 @@ function renderSnapshot(snapshot) {
       ? queryMarket
       : snapshot.default_market;
   selectMarket(selectedMarket);
+  applyRequestedMaturity();
 
   elements.marketDate.textContent = dateFormat.format(
     parseMarketDate(snapshot.market_date),
@@ -1568,6 +1846,21 @@ async function fetchSnapshot(url, options) {
 function showNotice(text) {
   elements.historyNotice.textContent = text;
   elements.historyNotice.hidden = false;
+}
+
+// Add to a notice already showing, such as a fallen-back date, instead of
+// replacing it, so each fallback from one link is still explained.
+function addNotice(text) {
+  const shown = !elements.historyNotice.hidden && elements.historyNotice.textContent;
+  showNotice(shown ? `${elements.historyNotice.textContent} ${text}` : text);
+}
+
+// Set a query parameter, or delete it with null, without a history entry.
+function updateUrlParam(name, value) {
+  const url = new URL(window.location.href);
+  if (value === null) url.searchParams.delete(name);
+  else url.searchParams.set(name, value);
+  if (url.href !== window.location.href) window.history.replaceState({}, "", url);
 }
 
 function hideNotice() {
@@ -1645,7 +1938,7 @@ function renderCompareControl() {
   }
 
   if (state.compareDate && reference && !days.includes(state.compareDate)) {
-    showNotice(
+    addNotice(
       `The close of ${formatDay(state.compareDate)} is not earlier than ` +
       `${formatDay(reference)}, so the comparison is off.`,
     );
@@ -1676,6 +1969,7 @@ function renderComparison() {
   elements.tooltip.hidden = true;
   elements.yieldTooltip.hidden = true;
   renderComparisonLegends();
+  renderInspectorComparison(selectedContract());
   renderCharts();
 }
 
@@ -1836,15 +2130,18 @@ window.addEventListener("resize", () => {
   state.resizeTimer = window.setTimeout(renderCharts, 120);
 });
 
+// Press the button of the period shown. The default, daily, stays out of the URL.
+function markYieldPeriod() {
+  elements.yieldPeriodButtons.forEach((button) => {
+    button.setAttribute("aria-pressed", String(button.dataset.yieldPeriod === state.yieldPeriod));
+  });
+  updateUrlParam("period", state.yieldPeriod === "daily" ? null : state.yieldPeriod);
+}
+
 elements.yieldPeriodButtons.forEach((button) => {
   button.addEventListener("click", () => {
     state.yieldPeriod = button.dataset.yieldPeriod;
-    elements.yieldPeriodButtons.forEach((candidate) => {
-      candidate.setAttribute(
-        "aria-pressed",
-        String(candidate === button),
-      );
-    });
+    markYieldPeriod();
     elements.yieldTooltip.hidden = true;
     renderYieldChart();
     syncKeyboardPoint(charts.yield);
@@ -2117,14 +2414,24 @@ Object.values(charts).forEach((chart) => {
 });
 
 async function init() {
-  await loadHistoryIndex();
   const params = new URLSearchParams(window.location.search);
+  // The yield period applies before anything renders.
+  const requestedPeriod = params.get("period");
+  if (requestedPeriod !== null && Object.hasOwn(YIELD_PERIODS, requestedPeriod)) {
+    state.yieldPeriod = requestedPeriod;
+  } else if (requestedPeriod !== null) {
+    showNotice("That yield period is not 1D, 30D or 365D. Showing daily yields.");
+  }
+  markYieldPeriod();
+  state.requestedMaturity = params.get("maturity");
+
+  await loadHistoryIndex();
   const requestedCompare = params.get("compare");
   if (requestedCompare && state.historyDays.includes(requestedCompare)) {
     // Checked against the view's date once that has rendered.
     setCompare(requestedCompare);
   } else if (requestedCompare) {
-    showNotice(
+    addNotice(
       HISTORY_DATE.test(requestedCompare)
         ? `No archived close for ${requestedCompare} to compare with.`
         : "That comparison date is not in the archive.",
@@ -2136,7 +2443,7 @@ async function init() {
     loadView(requested);
   } else {
     if (requested) {
-      showNotice(
+      addNotice(
         HISTORY_DATE.test(requested)
           ? `No archived close for ${requested}. Showing live data.`
           : "That date is not in the archive. Showing live data.",
