@@ -200,6 +200,16 @@ counts as its market date.
   market and yield-period switches. A comparison that isn't archived, or isn't
   earlier than the day on screen, is dropped with a short notice. Without
   history the menu stays hidden.
+- **Shareable view.** `?maturity=YYYY-MM` (the selected maturity's month) and
+  `?period=monthly` or `?period=annualized` (the yield chart's 30D or 365D
+  period) combine with all of the above, so
+  `?date=2026-10-06&compare=2026-09-30&market=USDTRY&maturity=2026-12&period=annualized`
+  reopens that close, its comparison, the 365D yield chart and the inspector
+  with its Comparison table on Dec 2026. The default daily period is left out
+  of the URL. A period other than these falls back to daily, and a maturity
+  that isn't listed on the day on screen, or isn't a month, selects nothing;
+  each is removed from the URL with a short notice. See **Selecting a
+  maturity** below.
 
 To try it locally, put a copy of the branch's `history/` directory at the repo
 root (it's ignored by git) or point `HISTORY_DIR` at one, then run
@@ -323,7 +333,12 @@ selection stays through the one-minute refresh, yield-period changes and
 comparisons, and clears when you switch market or when the maturity is no
 longer listed, for example after it matures. A chart that can't plot the
 selected maturity, such as the yield chart on its last day, shows no mark. The
-selection isn't kept in the URL.
+selection is kept in the URL as `?maturity=YYYY-MM`, and the yield period as
+`?period=` (left out for daily), so a link or a reload reopens the same
+maturity, period and inspector. Selecting, clearing and period clicks update
+the URL in place, without adding history entries. Switching market drops
+`maturity` and keeps `period`. A link's maturity is applied once, when the page
+opens: after you clear it, the one-minute refresh doesn't bring it back.
 
 **Inspector.** Below that line, an inspector shows the selected maturity's
 inputs and arithmetic for the day on screen, live or an archived close, so an

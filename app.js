@@ -3,6 +3,9 @@ const DATA_URL = "data/market.json";
 const SNAPSHOT_SCHEMA_VERSION = 4;
 const HISTORY_URL = "data/history";
 const HISTORY_DATE = /^\d{4}-\d{2}-\d{2}$/;
+// A maturity in a shared link: its month, as maturityKey() gives it.
+const MATURITY_MONTH = /^\d{4}-(0[1-9]|1[0-2])$/;
+const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const ISTANBUL_TIMEZONE = "Europe/Istanbul";
 
 const elements = {
@@ -119,6 +122,9 @@ const state = {
   adjustedDay: null,
   // The maturity selected across the charts and tables, by maturityKey(), or null.
   selectedKey: null,
+  // A ?maturity= from the link the page was opened with, applied once to the
+  // first view that renders, so a later poll can't bring back a cleared one.
+  requestedMaturity: null,
 };
 
 // Quick comparison picks: the archived close nearest each target, if one is
@@ -803,6 +809,36 @@ function updateSelection(key) {
   elements.selectionAnnouncer.textContent = contract
     ? `Selected ${contract.label}, ${contract.code}.`
     : "Selection cleared.";
+  updateUrlParam("maturity", key);
+}
+
+// "Dec 2026" for the maturity key "2026-12"; anything else as given.
+function formatMaturityMonth(key) {
+  if (!MATURITY_MONTH.test(key)) return key;
+  const [year, month] = key.split("-");
+  return `${MONTH_NAMES[Number(month) - 1]} ${year}`;
+}
+
+// Select the maturity a shared link asked for, once the first view has
+// rendered. One that isn't listed on the day on screen, or isn't a month, is
+// dropped from the URL with a notice.
+function applyRequestedMaturity() {
+  const key = state.requestedMaturity;
+  if (key === null || !state.data) return;
+  state.requestedMaturity = null;
+  const listed = MATURITY_MONTH.test(key) &&
+    state.data.contracts.some((contract) => maturityKey(contract) === key);
+  if (listed) {
+    setSelection(key);
+    return;
+  }
+  updateUrlParam("maturity", null);
+  const day = state.renderedDate ?? state.adjustedDay ?? state.snapshot.market_date;
+  addNotice(
+    MATURITY_MONTH.test(key)
+      ? `No ${formatMaturityMonth(key)} maturity listed for ${state.data.pair} on ${formatDay(day)}.`
+      : "That maturity link is not a month, so nothing is selected.",
+  );
 }
 
 // Mark the selection outside the charts: the line naming it, and its rows in
@@ -1759,6 +1795,7 @@ function renderSnapshot(snapshot) {
       ? queryMarket
       : snapshot.default_market;
   selectMarket(selectedMarket);
+  applyRequestedMaturity();
 
   elements.marketDate.textContent = dateFormat.format(
     parseMarketDate(snapshot.market_date),
@@ -1809,6 +1846,21 @@ async function fetchSnapshot(url, options) {
 function showNotice(text) {
   elements.historyNotice.textContent = text;
   elements.historyNotice.hidden = false;
+}
+
+// Add to a notice already showing, such as a fallen-back date, instead of
+// replacing it, so each fallback from one link is still explained.
+function addNotice(text) {
+  const shown = !elements.historyNotice.hidden && elements.historyNotice.textContent;
+  showNotice(shown ? `${elements.historyNotice.textContent} ${text}` : text);
+}
+
+// Set a query parameter, or delete it with null, without a history entry.
+function updateUrlParam(name, value) {
+  const url = new URL(window.location.href);
+  if (value === null) url.searchParams.delete(name);
+  else url.searchParams.set(name, value);
+  if (url.href !== window.location.href) window.history.replaceState({}, "", url);
 }
 
 function hideNotice() {
@@ -1886,7 +1938,7 @@ function renderCompareControl() {
   }
 
   if (state.compareDate && reference && !days.includes(state.compareDate)) {
-    showNotice(
+    addNotice(
       `The close of ${formatDay(state.compareDate)} is not earlier than ` +
       `${formatDay(reference)}, so the comparison is off.`,
     );
@@ -2078,15 +2130,18 @@ window.addEventListener("resize", () => {
   state.resizeTimer = window.setTimeout(renderCharts, 120);
 });
 
+// Press the button of the period shown. The default, daily, stays out of the URL.
+function markYieldPeriod() {
+  elements.yieldPeriodButtons.forEach((button) => {
+    button.setAttribute("aria-pressed", String(button.dataset.yieldPeriod === state.yieldPeriod));
+  });
+  updateUrlParam("period", state.yieldPeriod === "daily" ? null : state.yieldPeriod);
+}
+
 elements.yieldPeriodButtons.forEach((button) => {
   button.addEventListener("click", () => {
     state.yieldPeriod = button.dataset.yieldPeriod;
-    elements.yieldPeriodButtons.forEach((candidate) => {
-      candidate.setAttribute(
-        "aria-pressed",
-        String(candidate === button),
-      );
-    });
+    markYieldPeriod();
     elements.yieldTooltip.hidden = true;
     renderYieldChart();
     syncKeyboardPoint(charts.yield);
@@ -2359,14 +2414,24 @@ Object.values(charts).forEach((chart) => {
 });
 
 async function init() {
-  await loadHistoryIndex();
   const params = new URLSearchParams(window.location.search);
+  // The yield period applies before anything renders.
+  const requestedPeriod = params.get("period");
+  if (requestedPeriod !== null && Object.hasOwn(YIELD_PERIODS, requestedPeriod)) {
+    state.yieldPeriod = requestedPeriod;
+  } else if (requestedPeriod !== null) {
+    showNotice("That yield period is not 1D, 30D or 365D. Showing daily yields.");
+  }
+  markYieldPeriod();
+  state.requestedMaturity = params.get("maturity");
+
+  await loadHistoryIndex();
   const requestedCompare = params.get("compare");
   if (requestedCompare && state.historyDays.includes(requestedCompare)) {
     // Checked against the view's date once that has rendered.
     setCompare(requestedCompare);
   } else if (requestedCompare) {
-    showNotice(
+    addNotice(
       HISTORY_DATE.test(requestedCompare)
         ? `No archived close for ${requestedCompare} to compare with.`
         : "That comparison date is not in the archive.",
@@ -2378,7 +2443,7 @@ async function init() {
     loadView(requested);
   } else {
     if (requested) {
-      showNotice(
+      addNotice(
         HISTORY_DATE.test(requested)
           ? `No archived close for ${requested}. Showing live data.`
           : "That date is not in the archive. Showing live data.",
