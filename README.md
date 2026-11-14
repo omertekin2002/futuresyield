@@ -192,11 +192,24 @@ counts as its market date.
   comparison yield, in percentage points (pp), for the selected 1D, 30D or
   365D period. Each day's yield uses that day's own spot and days to maturity.
   A contract missing on either day shows "not listed" and no delta.
+- **Inspector.** With a maturity selected, the inspector's **Comparison**
+  group puts that maturity's inputs on both days side by side, with the
+  change between them. See **Inspector** below.
 - **Shareable.** `?compare=YYYY-MM-DD` combines with `?date=` and `?market=`,
   for example `?date=2026-10-05&compare=2026-09-30&market=XAUTRY`, and survives
   market and yield-period switches. A comparison that isn't archived, or isn't
   earlier than the day on screen, is dropped with a short notice. Without
   history the menu stays hidden.
+- **Shareable view.** `?maturity=YYYY-MM` (the selected maturity's month) and
+  `?period=monthly` or `?period=annualized` (the yield chart's 30D or 365D
+  period) combine with all of the above, so
+  `?date=2026-10-06&compare=2026-09-30&market=USDTRY&maturity=2026-12&period=annualized`
+  reopens that close, its comparison, the 365D yield chart and the inspector
+  with its Comparison table on Dec 2026. The default daily period is left out
+  of the URL. A period other than these falls back to daily, and a maturity
+  that isn't listed on the day on screen, or isn't a month, selects nothing;
+  each is removed from the URL with a short notice. See **Selecting a
+  maturity** below.
 
 To try it locally, put a copy of the branch's `history/` directory at the repo
 root (it's ignored by git) or point `HISTORY_DIR` at one, then run
@@ -287,7 +300,8 @@ without a browser.
 live view of each market, a past close with its banner, a comparison overlay
 with both legends and a tooltip showing, a tooltip opened from the keyboard on
 each chart, each yield period, a 390×844 mobile viewport, a selected maturity
-on desktop and on that mobile viewport with its inspector open, the stale-point
+on desktop and on that mobile viewport with its inspector open, the
+inspector's comparison table and its "not listed" message on both, the stale-point
 key on desktop and mobile, a market whose charts are empty, and the
 load-error state. It fails on any serious or critical violation and lists each one's
 rule, impact, element and help text. As an automated check, it can't judge
@@ -319,7 +333,12 @@ selection stays through the one-minute refresh, yield-period changes and
 comparisons, and clears when you switch market or when the maturity is no
 longer listed, for example after it matures. A chart that can't plot the
 selected maturity, such as the yield chart on its last day, shows no mark. The
-selection isn't kept in the URL.
+selection is kept in the URL as `?maturity=YYYY-MM`, and the yield period as
+`?period=` (left out for daily), so a link or a reload reopens the same
+maturity, period and inspector. Selecting, clearing and period clicks update
+the URL in place, without adding history entries. Switching market drops
+`maturity` and keeps `period`. A link's maturity is applied once, when the page
+opens: after you clear it, the one-minute refresh doesn't bring it back.
 
 **Inspector.** Below that line, an inspector shows the selected maturity's
 inputs and arithmetic for the day on screen, live or an archived close, so an
@@ -338,13 +357,31 @@ unusual point can be checked without reading across the board:
 - **Short carry,** USD/TRY only: the 180-day trend's window and daily
   appreciation, expected spot `spot × daily appreciation^(days left)` and
   expected profit `(bid − expected spot) × 1,000` TRY.
+- **Comparison,** only while a comparison close is on: a table with a row
+  for each input and columns for the day on screen, the compared close and
+  the change. It shows each day's date, last price, bid / ask, last trade
+  (with the **stale** tag and "—" rule, worked out within that day's own
+  snapshot), spot and spot time, premium, days left and the yield for the
+  period the chart shows, marked **In chart**. The change column gives
+  **Δ price** and **Δ spot** in the market's quote unit, **Δ premium** and
+  **Δ yield** in percentage points (pp), **Δ days left**, and the calendar
+  days between the two closes, so time to maturity running down can be seen
+  next to the repricing. Each change is the day on screen minus the compared
+  close, as in the chart tooltips, and Δ yield equals the tooltip's. The
+  compared contract is matched by maturity month, as on the charts, and keeps
+  the values its own snapshot stored: it is never rolled forward. A maturity
+  that wasn't listed yet on the compared close says "Not listed on" that date
+  and shows no changes. A side without a price or a yield shows "—" with the
+  same reason as above, and that row's change is "—". Only observed values
+  and differences are shown; nothing splits a change into causes.
 
 Every value is the one the board, the carry table and the chart tooltips show.
 Nothing missing is filled in: without a bid there is no profit, a contract
 maturing today has no daily factor or yield, and each says why. When the live
 snapshot has been rolled forward to a later Istanbul day, the inspector shows
 the adjusted days left and yields and repeats the note saying so. It updates in
-place on the one-minute refresh and hides with the selection.
+place on the one-minute refresh, on yield-period switches and when the
+comparison changes, and hides with the selection.
 
 ## Continuous integration
 

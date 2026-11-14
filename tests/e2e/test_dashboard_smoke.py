@@ -20,6 +20,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from urllib.parse import parse_qsl, urlsplit
 
 try:
     from playwright.sync_api import expect, sync_playwright
@@ -67,6 +68,11 @@ YIELD_COLUMNS = (
     ("Monthly yield · 30D", "monthly_yield_percent", 30, 2),
     ("Annualized · 365D", "annualized_yield_percent", 365, 2),
 )
+YIELD_PERIOD_LABELS = {
+    "daily": "Daily · 1D",
+    "monthly": "Monthly · 30D",
+    "annualized": "Annualized · 365D",
+}
 # On this day each market still lists a Sep 2026 contract and not yet its
 # last live maturity, so a comparison has contracts missing on either side.
 ROLLED_DAY = "2026-07-07"
@@ -2072,6 +2078,560 @@ class DashboardSmokeTests(unittest.TestCase):
                     digits=market["price_digits"],
                 ))
 
+    # The inspector's comparison with an archived close
+
+    def comparison(self):
+        """Each comparison row by data-compare-item: header, tag and each column's text."""
+        return self.page.evaluate(
+            """() => Object.fromEntries(
+                [...document.querySelectorAll('#inspector-compare-rows tr[data-compare-item]')]
+                .map((row) => {
+                    const cell = (index) => {
+                        const td = row.querySelectorAll('td')[index];
+                        const value = td.querySelector('.inspector-value');
+                        return {
+                            value: value.firstChild?.textContent ?? '',
+                            stale: Boolean(value.querySelector('.stale-tag')),
+                            detail: td.querySelector('.inspector-detail')?.textContent ?? '',
+                        };
+                    };
+                    return [row.dataset.compareItem, {
+                        term: row.querySelector('th').firstChild.textContent,
+                        tag: row.querySelector('th .inspector-tag')?.textContent ?? '',
+                        current: cell(0),
+                        compared: cell(1),
+                        change: cell(2).value,
+                    }];
+                }))"""
+        )
+
+    def comparison_texts(self, part):
+        """One column of the comparison, by row: 'current', 'compared' or 'change'."""
+        return {
+            key: row[part] if part == "change" else row[part]["value"]
+            for key, row in self.comparison().items()
+        }
+
+    def expected_comparison(self, current, past, period="daily", unit="TRY per USD", digits=4,
+                            current_days=None, current_yield=None):
+        """Both sides' values and the changes, hand-computed from the two snapshots.
+
+        current and past are (market, contract) pairs; current_days and
+        current_yield override the day on screen's stored values when it has
+        been rolled forward.
+        """
+        (now_market, now), (then_market, then) = current, past
+        _, field, _, yield_digits = next(c for c in YIELD_COLUMNS if c[1].startswith(period))
+        now_spot, then_spot = now_market["spot"]["last"], then_market["spot"]["last"]
+        now_days = now["days_to_maturity"] if current_days is None else current_days
+        now_yield = now[field] if current_yield is None else current_yield
+        price = lambda value: f"{value:,.{digits}f}"
+        values = {
+            "current": {
+                "last": price(now["last"]),
+                "spot": price(now_spot),
+                "premium": f"{now['premium_percent']:+.2f}%",
+                "days": str(now_days),
+                "yield": f"{now_yield:+.{yield_digits}f}%",
+            },
+            "compared": {
+                "last": price(then["last"]),
+                "spot": price(then_spot),
+                "premium": f"{then['premium_percent']:+.2f}%",
+                "days": str(then["days_to_maturity"]),
+                "yield": f"{then[field]:+.{yield_digits}f}%",
+            },
+            "change": {
+                "last": f"{now['last'] - then['last']:+,.{digits}f} {unit}",
+                "spot": f"{now_spot - then_spot:+,.{digits}f} {unit}",
+                "premium": f"{now['premium_percent'] - then['premium_percent']:+.2f} pp",
+                "days": f"{now_days - then['days_to_maturity']:+d} days",
+                "yield": f"{now_yield - then[field]:+.{yield_digits}f} pp",
+                "bid-ask": "",
+                "last-trade": "",
+                "spot-time": "",
+            },
+        }
+        return values
+
+    def assert_comparison(self, expected):
+        for part, values in expected.items():
+            texts = self.comparison_texts(part)
+            for key, value in values.items():
+                with self.subTest(part=part, item=key):
+                    self.assertEqual(texts[key], value)
+
+    def history_contract(self, day, label, key="USDTRY"):
+        market = self.history[day]["markets"][key]
+        return market, next(c for c in market["contracts"] if c["label"] == label)
+
+    def assert_comparison_hidden(self):
+        expect(self.page.locator("#inspector-compare-group")).to_be_hidden()
+        self.assertEqual(self.comparison(), {})
+
+    def assert_tooltip_delta(self, label, change):
+        """The yield tooltip for label shows the same change as the inspector."""
+        self.hover_label("#yield-chart", label, "yieldChartPoints")
+        tooltip = self.page.locator("#yield-tooltip")
+        expect(tooltip).to_be_visible()
+        expect(tooltip).to_contain_text(f"Δ {change}")
+
+    def test_inspector_compares_both_days_inputs_and_the_change(self):
+        compared = "2026-09-30"
+        self.open_dashboard("?market=USDTRY")
+        self.select_button("Oct 2026").click()
+        self.assert_selected("Oct 2026")
+        # Without a comparison there is no Comparison group.
+        self.assert_comparison_hidden()
+
+        self.choose_compare(compared)
+        group = self.page.locator("#inspector-compare-group")
+        expect(group).to_be_visible()
+        live = self.snapshot["markets"]["USDTRY"]
+        expected = self.expected_comparison(
+            (live, self.contract("Oct 2026")), self.history_contract(compared, "Oct 2026"),
+        )
+        # Hand-computed: 50.083 live against 50.083 × 0.97 on 30 Sep, and the
+        # spot scaled alike, so the premium is unchanged and only the extra
+        # 7 days to maturity move the yield.
+        self.assertEqual(expected["change"]["last"], "+1.5025 TRY per USD")
+        self.assertEqual(expected["change"]["spot"], "+1.4758 TRY per USD")
+        self.assertEqual(expected["change"]["premium"], "+0.00 pp")
+        self.assertEqual(expected["change"]["days"], "-7 days")
+        self.assert_comparison(expected)
+        rows = self.comparison()
+        self.assertEqual(rows["date"]["current"]["value"], LIVE_LABEL)
+        self.assertEqual(rows["date"]["compared"]["value"], HISTORY_LABELS[compared])
+        self.assertEqual(rows["date"]["change"], "7 calendar days apart")
+        self.assertEqual(rows["bid-ask"]["current"]["value"], "50.0820 / 50.0830")
+        past = self.history_contract(compared, "Oct 2026")[1]
+        self.assertEqual(
+            rows["bid-ask"]["compared"]["value"], f"{past['bid']:,.4f} / {past['ask']:,.4f}",
+        )
+        self.assertEqual(rows["last-trade"]["current"]["value"], "13:49")
+        self.assertEqual(rows["last-trade"]["compared"]["value"], "13:49")
+        self.assertFalse(rows["last-trade"]["compared"]["stale"])
+        # derive_day() keeps each spot's time, so both read 07 Oct.
+        self.assertEqual(rows["spot-time"]["current"]["value"], "07 Oct, 14:00 TRT")
+        self.assertEqual(rows["spot-time"]["compared"]["value"], "07 Oct, 14:00 TRT")
+        self.assertEqual(rows["yield"]["term"], "Daily yield · 1D")
+        self.assertEqual(rows["yield"]["tag"], "In chart")
+        expect(self.page.locator("#inspector-compare-note")).to_have_text(
+            f"Change is the day on screen minus the close of {HISTORY_LABELS[compared]}, "
+            "whose values are shown as that close stored them."
+        )
+
+        # A real table with column and row headers.
+        table = self.page.get_by_role("table", name="Comparison")
+        expect(table).to_be_visible()
+        expect(table.get_by_role("columnheader")).to_have_text(
+            ["Input", f"Live · {LIVE_LABEL}", f"Close · {HISTORY_LABELS[compared]}", "Change"]
+        )
+        expect(table.get_by_role("rowheader")).to_have_count(9)
+
+        # Δ yield matches the tooltip, and follows the yield period.
+        self.assert_tooltip_delta("Oct 2026", rows["yield"]["change"])
+        for period in ("annualized", "monthly"):
+            with self.subTest(period=period):
+                self.page.locator(f'[data-yield-period="{period}"]').click()
+                expected = self.expected_comparison(
+                    (live, self.contract("Oct 2026")),
+                    self.history_contract(compared, "Oct 2026"), period,
+                )
+                self.assert_comparison({part: {"yield": values["yield"]}
+                                        for part, values in expected.items()})
+                term = {"annualized": "Annualized yield · 365D", "monthly": "Monthly yield · 30D"}
+                self.assertEqual(self.comparison()["yield"]["term"], term[period])
+                self.assert_tooltip_delta("Oct 2026", self.comparison()["yield"]["change"])
+
+        # A stale last trade on the compared close keeps the board's tag, and
+        # a contract without a trade time shows "—" on both days, never stale.
+        self.select_button("Jan 2028").click()
+        rows = self.comparison()
+        self.assertEqual(rows["last-trade"]["current"]["value"], "05 Oct 17:54")
+        self.assertTrue(rows["last-trade"]["current"]["stale"])
+        self.assertEqual(rows["last-trade"]["compared"]["value"], "28 Sept 17:54")
+        self.assertTrue(rows["last-trade"]["compared"]["stale"])
+        self.select_button("Aug 2027").click()
+        rows = self.comparison()
+        for side in ("current", "compared"):
+            self.assertEqual(rows["last-trade"][side]["value"], "—")
+            self.assertFalse(rows["last-trade"][side]["stale"])
+            self.assertEqual(rows["bid-ask"][side]["value"], "—")
+
+        # Clearing the comparison, then the selection, hides the group;
+        # switching market clears the selection with it.
+        self.compare_select().select_option("")
+        self.assert_not_comparing()
+        expect(self.page.locator("#inspector")).to_be_visible()
+        self.assert_comparison_hidden()
+        self.choose_compare(compared)
+        expect(group).to_be_visible()
+        self.page.locator("#selection-clear").click()
+        self.assert_no_selection()
+        self.assert_comparison_hidden()
+        self.select_button("Oct 2026").click()
+        expect(group).to_be_visible()
+        self.page.locator('.market-options [data-market="EURTRY"]').click()
+        self.assert_no_selection()
+        self.assert_comparison_hidden()
+        self.select_button("Dec 2026", "EURTRY").click()
+        expect(group).to_be_visible()
+        expected = self.expected_comparison(
+            (self.snapshot["markets"]["EURTRY"], self.contract("Dec 2026", "EURTRY")),
+            self.history_contract(compared, "Dec 2026", "EURTRY"), "monthly", unit="TRY per EUR",
+        )
+        self.assert_comparison(expected)
+
+    def test_inspector_comparison_says_when_a_maturity_was_not_listed(self):
+        self.open_dashboard(f"?compare={ROLLED_DAY}&market=USDTRY")
+        self.assert_comparing(ROLLED_DAY)
+        # Jan 2028 was not listed yet on 07 Jul.
+        self.select_button("Jan 2028").click()
+        group = self.page.locator("#inspector-compare-group")
+        expect(group).to_be_visible()
+        expect(self.page.locator("#inspector-compare-note")).to_have_text(
+            f"Not listed on {HISTORY_LABELS[ROLLED_DAY]}: Jan 2028 was not listed yet on "
+            "that close, so no changes are shown."
+        )
+        expect(self.page.locator("#inspector-compare-table")).to_be_hidden()
+        self.assertEqual(self.comparison(), {})
+        # A maturity listed on both days still compares.
+        self.select_button("Dec 2027").click()
+        expect(self.page.locator("#inspector-compare-table")).to_be_visible()
+        self.assert_comparison(self.expected_comparison(
+            (self.snapshot["markets"]["USDTRY"], self.contract("Dec 2027")),
+            self.history_contract(ROLLED_DAY, "Dec 2027"),
+        ))
+
+    def test_inspector_comparison_in_a_past_close_view(self):
+        day, compared = "2026-10-06", "2026-09-30"
+        self.open_day(day, f"&compare={compared}&market=USDTRY")
+        self.assert_comparing(compared, HISTORY_LABELS[day])
+        self.select_button("Dec 2026").click()
+        self.assert_selected("Dec 2026")
+        expected = self.expected_comparison(
+            self.history_contract(day, "Dec 2026"), self.history_contract(compared, "Dec 2026"),
+        )
+        self.assertEqual(expected["change"]["days"], "-6 days")
+        self.assert_comparison(expected)
+        rows = self.comparison()
+        self.assertEqual(rows["date"]["current"]["value"], HISTORY_LABELS[day])
+        self.assertEqual(rows["date"]["change"], "6 calendar days apart")
+        expect(
+            self.page.get_by_role("table", name="Comparison").get_by_role("columnheader")
+        ).to_have_text(
+            ["Input", f"Close · {HISTORY_LABELS[day]}", f"Close · {HISTORY_LABELS[compared]}",
+             "Change"]
+        )
+        self.assert_tooltip_delta("Dec 2026", rows["yield"]["change"])
+
+    def test_inspector_comparison_keeps_the_compared_close_stored_on_a_later_day(self):
+        self.reopen_at(NEXT_DAY_TIME)
+        compared = "2026-09-30"
+        self.open_dashboard(f"?compare={compared}&market=USDTRY")
+        self.assert_comparing(compared)
+        self.assert_note("08 Oct 2026")
+        self.select_button("Oct 2026").click()
+        live = self.snapshot["markets"]["USDTRY"]
+        front = self.contract("Oct 2026")
+        # Live moves on to 22 days left; 30 Sep keeps its stored 30 days and yield.
+        rolled_yield = ((front["last"] / live["spot"]["last"]) ** (1 / 22) - 1) * 100
+        expected = self.expected_comparison(
+            (live, front), self.history_contract(compared, "Oct 2026"),
+            current_days=22, current_yield=rolled_yield,
+        )
+        self.assertEqual(expected["change"]["days"], "-8 days")
+        self.assertEqual(expected["compared"]["days"], "30")
+        self.assert_comparison(expected)
+        rows = self.comparison()
+        self.assertEqual(rows["date"]["change"], "7 calendar days apart")
+        self.assertEqual(rows["date"]["current"]["detail"], "Days left from 08 Oct 2026, adjusted")
+        self.assert_tooltip_delta("Oct 2026", rows["yield"]["change"])
+
+    def test_inspector_comparison_states_why_values_are_missing(self):
+        compared = "2026-09-30"
+        unpriced = copy.deepcopy(self.snapshot)
+        market = unpriced["markets"]["USDTRY"]
+        contract = next(c for c in market["contracts"] if c["label"] == "Dec 2026")
+        contract["last"] = None
+        contract["premium_percent"] = None
+        set_yields(contract, market["spot"]["last"])
+        self.serve_snapshot(re.compile(r"/data/market\.json"), unpriced)
+        self.open_dashboard(f"?compare={compared}&market=USDTRY")
+        self.assert_comparing(compared)
+        self.select_button("Dec 2026").click()
+        rows = self.comparison()
+        self.assertEqual(rows["last"]["current"]["value"], "—")
+        self.assertEqual(rows["last"]["current"]["detail"], "No last price in this snapshot.")
+        self.assertEqual(rows["premium"]["current"]["value"], "—")
+        self.assertEqual(
+            rows["premium"]["current"]["detail"], "No premium: the contract has no last price."
+        )
+        self.assertEqual(rows["yield"]["current"]["value"], "—")
+        self.assertEqual(
+            rows["yield"]["current"]["detail"], "No yield: the contract has no last price."
+        )
+        for key in ("last", "premium", "yield"):
+            with self.subTest(item=key):
+                self.assertNotEqual(rows[key]["compared"]["value"], "—")
+                self.assertEqual(rows[key]["compared"]["detail"], "")
+                self.assertEqual(rows[key]["change"], "—")
+        # Spot and days left don't depend on the price.
+        self.assertNotEqual(rows["spot"]["change"], "—")
+        self.assertEqual(rows["days"]["change"], "-7 days")
+
+        # On its maturity day a contract has no yield, and says why.
+        self.reopen_at(datetime.fromisoformat("2026-10-30T12:00:00+03:00"))
+        self.open_dashboard(f"?compare={compared}&market=USDTRY")
+        self.assert_comparing(compared)
+        self.select_button("Oct 2026").click()
+        rows = self.comparison()
+        self.assertEqual(rows["days"]["current"]["value"], "0")
+        self.assertEqual(rows["days"]["compared"]["value"], "30")
+        self.assertEqual(rows["days"]["change"], "-30 days")
+        self.assertEqual(rows["yield"]["current"]["value"], "—")
+        self.assertEqual(
+            rows["yield"]["current"]["detail"],
+            "No yield: the contract matures today, with 0 days left.",
+        )
+        self.assertEqual(rows["yield"]["change"], "—")
+        self.assertEqual(rows["premium"]["change"], "+0.00 pp")
+
+    @unittest.skipIf(Axe is None, "axe-playwright-python is not installed")
+    def test_accessibility_of_the_inspector_comparison(self):
+        for viewport in (None, MOBILE_VIEWPORT):
+            with self.subTest(viewport=viewport):
+                if viewport:
+                    self.reopen_at(FIXTURE_DAY_TIME, viewport=viewport)
+                self.open_dashboard("?compare=2026-09-30&market=USDTRY")
+                self.select_button("Jan 2028").click()
+                expect(self.page.locator("#inspector-compare-table")).to_be_visible()
+                self.assert_no_sideways_scroll()
+                self.assert_accessible(f"inspector comparison at {viewport or 'desktop'}")
+                # The not-listed message, too.
+                self.compare_select().select_option(ROLLED_DAY)
+                expect(self.page.locator("#inspector-compare-note")).to_contain_text("Not listed")
+                self.assert_no_sideways_scroll()
+                self.assert_accessible(f"not-listed comparison at {viewport or 'desktop'}")
+
+    # Shareable links: the selected maturity and the yield period
+
+    def url_params(self):
+        return dict(parse_qsl(urlsplit(self.page.url).query))
+
+    def history_length(self):
+        return self.page.evaluate("() => history.length")
+
+    def assert_period(self, period):
+        pressed = self.page.locator('[data-yield-period][aria-pressed="true"]')
+        expect(pressed).to_have_count(1)
+        expect(pressed).to_have_attribute("data-yield-period", period)
+        expect(self.page.locator("#yield-period-label")).to_have_text(YIELD_PERIOD_LABELS[period])
+        expect(self.page.locator("#yield-chart")).to_have_attribute(
+            "aria-label", re.compile(f"^{YIELD_PERIOD_LABELS[period].split(' ')[0]} compounded"),
+        )
+
+    def test_link_restores_the_maturity_and_yield_period(self):
+        self.open_dashboard("?market=USDTRY&maturity=2026-12&period=annualized")
+        self.assert_market("USDTRY")
+        self.assert_period("annualized")
+        self.assert_selected("Dec 2026")
+        self.assertEqual(
+            [key for key, row in self.inspector().items() if row["tag"]], ["yield-annualized"],
+        )
+        self.assertEqual(self.inspector()["yield-annualized"]["tag"], "In chart")
+        self.assert_comparison_hidden()
+        expect(self.page.locator("#history-notice")).to_be_hidden()
+        self.assertEqual(
+            self.url_params(), {"market": "USDTRY", "maturity": "2026-12", "period": "annualized"},
+        )
+
+        # The default period is left out of the URL, even when a link names it.
+        self.open_dashboard("?market=EURTRY&period=daily&maturity=2027-12")
+        self.assert_period("daily")
+        self.assert_selected("Dec 2027", "EURTRY")
+        expect(self.page.locator("#history-notice")).to_be_hidden()
+        self.assertEqual(self.url_params(), {"market": "EURTRY", "maturity": "2027-12"})
+
+    def test_link_with_a_comparison_restores_the_inspector_comparison(self):
+        compared = "2026-09-30"
+        for day in (None, "2026-10-06"):
+            with self.subTest(day=day):
+                query = f"&compare={compared}&market=USDTRY&maturity=2026-12&period=annualized"
+                if day:
+                    self.open_day(day, query)
+                    current = self.history_contract(day, "Dec 2026")
+                else:
+                    self.open_dashboard("?" + query[1:])
+                    current = (self.snapshot["markets"]["USDTRY"], self.contract("Dec 2026"))
+                self.assert_comparing(compared, HISTORY_LABELS[day] if day else LIVE_LABEL)
+                self.assert_period("annualized")
+                self.assert_selected("Dec 2026")
+                expect(self.page.locator("#inspector-compare-table")).to_be_visible()
+                self.assert_comparison(self.expected_comparison(
+                    current, self.history_contract(compared, "Dec 2026"), period="annualized",
+                ))
+                self.assertEqual(self.comparison()["yield"]["tag"], "In chart")
+                expect(self.page.locator("#history-notice")).to_be_hidden()
+                self.assertEqual(self.url_params().get("maturity"), "2026-12")
+                self.assertEqual(self.url_params().get("period"), "annualized")
+
+    def test_selection_and_period_keep_the_url_in_sync_without_history_entries(self):
+        self.open_dashboard("?market=USDTRY")
+        length = self.history_length()
+        self.assertEqual(self.url_params(), {"market": "USDTRY"})
+
+        self.select_button("Dec 2026").click()
+        self.assert_selected("Dec 2026")
+        self.assertEqual(self.url_params().get("maturity"), "2026-12")
+        self.click_point("#curve-chart", "Mar 2027")
+        self.assert_selected("Mar 2027")
+        self.assertEqual(self.url_params().get("maturity"), "2027-03")
+        # Selecting it again clears it, and the param with it.
+        self.click_point("#curve-chart", "Mar 2027")
+        self.assert_no_selection()
+        self.assertNotIn("maturity", self.url_params())
+        self.select_button("Jul 2027").click()
+        self.assertEqual(self.url_params().get("maturity"), "2027-07")
+        self.page.get_by_role("button", name="Clear selection", exact=True).click()
+        self.assert_no_selection()
+        self.assertNotIn("maturity", self.url_params())
+
+        for period in ("monthly", "annualized", "daily"):
+            with self.subTest(period=period):
+                self.page.locator(f'[data-yield-period="{period}"]').click()
+                self.assert_period(period)
+                self.assertEqual(
+                    self.url_params().get("period"), None if period == "daily" else period,
+                )
+
+        self.page.locator('[data-yield-period="annualized"]').click()
+        self.select_button("Nov 2026").click()
+        self.assertEqual(
+            self.url_params(), {"market": "USDTRY", "maturity": "2026-11", "period": "annualized"},
+        )
+        self.assertEqual(self.history_length(), length)
+
+        # A reload reopens the same view.
+        self.page.reload()
+        expect(self.page.locator("#data-state")).to_have_class(re.compile(r"\bis-delayed\b"))
+        self.assert_period("annualized")
+        self.assert_selected("Nov 2026")
+        self.assertEqual(self.history_length(), length)
+
+    def test_switching_market_drops_the_maturity_and_keeps_the_period(self):
+        self.open_dashboard("?market=USDTRY&maturity=2028-01&period=monthly")
+        self.assert_selected("Jan 2028")
+        length = self.history_length()
+
+        # A past close, a comparison and Live keep both while the maturity is listed.
+        day = "2026-10-06"
+        self.page.locator("#history-select").select_option(day)
+        self.assert_historical(day)
+        self.assert_selected("Jan 2028")
+        self.compare_select().select_option("2026-09-30")
+        self.assert_comparing("2026-09-30", HISTORY_LABELS[day])
+        self.assert_selected("Jan 2028")
+        self.page.locator("#live-button").click()
+        self.assert_live()
+        self.assert_selected("Jan 2028")
+        self.assertEqual(self.url_params(), {
+            "market": "USDTRY", "maturity": "2028-01", "period": "monthly",
+            "compare": "2026-09-30",
+        })
+
+        # A close where it isn't listed yet clears it, and the param.
+        self.page.locator("#history-select").select_option(ROLLED_DAY)
+        self.assert_historical(ROLLED_DAY)
+        self.assert_no_selection()
+        self.assertNotIn("maturity", self.url_params())
+        self.assertEqual(self.url_params().get("period"), "monthly")
+
+        self.page.locator("#live-button").click()
+        self.assert_live()
+        self.select_button("Dec 2026").click()
+        self.assertEqual(self.url_params().get("maturity"), "2026-12")
+        self.page.locator('.market-options [data-market="EURTRY"]').click()
+        self.assert_market("EURTRY")
+        self.assert_no_selection()
+        expect(self.page.locator("#selection-announcer")).to_have_text("Selection cleared.")
+        self.assert_period("monthly")
+        self.assertEqual(self.url_params(), {"market": "EURTRY", "period": "monthly"})
+        self.assertEqual(self.history_length(), length)
+
+    def test_unlisted_or_malformed_params_fall_back_with_a_notice(self):
+        not_a_month = "That maturity link is not a month, so nothing is selected."
+        bad_period = "That yield period is not 1D, 30D or 365D. Showing daily yields."
+        cases = (
+            ("?market=USDTRY&maturity=2026-09", None, "USDTRY",
+             ["No Sep 2026 maturity listed for USD/TRY on 07 Oct 2026."]),
+            ("?market=EURTRY&maturity=2027-03", None, "EURTRY",
+             ["No Mar 2027 maturity listed for EUR/TRY on 07 Oct 2026."]),
+            ("?market=USDTRY&maturity=Dec-2026", None, "USDTRY", [not_a_month]),
+            ("?market=USDTRY&maturity=2026-13", None, "USDTRY", [not_a_month]),
+            ("?market=USDTRY&maturity=", None, "USDTRY", [not_a_month]),
+            ("&market=USDTRY&maturity=2028-01", ROLLED_DAY, "USDTRY",
+             ["No Jan 2028 maturity listed for USD/TRY on 07 Jul 2026."]),
+            ("?market=USDTRY&period=weekly", None, "USDTRY", [bad_period]),
+            ("?market=USDTRY&period=constructor", None, "USDTRY", [bad_period]),
+            # Each fallback from one link is explained.
+            ("?date=2020-01-01&market=USDTRY&maturity=2026-09&period=weekly", None, "USDTRY",
+             [bad_period, "No archived close for 2020-01-01. Showing live data.",
+              "No Sep 2026 maturity listed for USD/TRY on 07 Oct 2026."]),
+        )
+        for query, day, market, notices in cases:
+            with self.subTest(query=query):
+                if day:
+                    self.open_day(day, query)
+                    self.assert_market(market, self.history[day])
+                else:
+                    self.open_dashboard(query)
+                    self.assert_market(market)
+                self.assert_no_selection()
+                self.assert_period("daily")
+                notice = self.page.locator("#history-notice")
+                expect(notice).to_be_visible()
+                expect(notice).to_have_text(" ".join(notices))
+                params = self.url_params()
+                self.assertNotIn("maturity", params)
+                self.assertNotIn("period", params)
+                self.assertEqual(params["market"], market)
+
+    def test_poll_does_not_restore_a_cleared_link_selection(self):
+        live_requests = []
+        self.page.on(
+            "request",
+            lambda request: "data/market.json" in request.url
+            and live_requests.append(request.url),
+        )
+        self.page.clock.install(time=FIXTURE_DAY_TIME)
+        self.open_dashboard("?market=USDTRY&maturity=2026-12&period=annualized")
+        self.assert_selected("Dec 2026")
+        length = self.history_length()
+        self.page.get_by_role("button", name="Clear selection", exact=True).click()
+        self.assert_no_selection()
+
+        for polls in (2, 3):
+            self.page.evaluate("() => { document.querySelector('#contract-rows tr').__old = true; }")
+            self.page.clock.run_for("01:01")
+            self.page.wait_for_function(
+                "() => !document.querySelector('#contract-rows tr').__old"
+            )
+            self.assertEqual(len(live_requests), polls)
+            self.assert_no_selection()
+            self.assert_period("annualized")
+            self.assertEqual(self.url_params(), {"market": "USDTRY", "period": "annualized"})
+
+        # A maturity chosen afterwards stays through the poll, in the URL too.
+        self.select_button("Mar 2027").click()
+        self.page.evaluate("() => { document.querySelector('#contract-rows tr').__old = true; }")
+        self.page.clock.run_for("01:01")
+        self.page.wait_for_function("() => !document.querySelector('#contract-rows tr').__old")
+        self.assert_selected("Mar 2027")
+        self.assertEqual(self.url_params().get("maturity"), "2027-03")
+        self.assertEqual(self.history_length(), length)
+
     # Accessibility: axe-core audit of each rendered state
 
     def assert_accessible(self, state):
@@ -2187,6 +2747,26 @@ class DashboardSmokeTests(unittest.TestCase):
         expect(self.page.locator("#contract-rows")).to_contain_text("could not be loaded")
         self.expect_load_errors(1)
         self.assert_accessible("load error")
+
+    @unittest.skipIf(Axe is None, "axe-playwright-python is not installed")
+    def test_accessibility_of_a_restored_link(self):
+        for viewport in (None, MOBILE_VIEWPORT):
+            with self.subTest(viewport=viewport):
+                if viewport:
+                    self.reopen_at(FIXTURE_DAY_TIME, viewport=viewport)
+                self.open_day(
+                    "2026-10-06",
+                    "&compare=2026-09-30&market=USDTRY&maturity=2026-12&period=annualized",
+                )
+                self.assert_selected("Dec 2026")
+                self.assert_period("annualized")
+                expect(self.page.locator("#inspector-compare-table")).to_be_visible()
+                self.assert_no_sideways_scroll()
+                self.assert_accessible(f"restored link at {viewport or 'desktop'}")
+        # The fallback notice, too.
+        self.open_dashboard("?market=USDTRY&maturity=2026-09&period=weekly")
+        expect(self.page.locator("#history-notice")).to_be_visible()
+        self.assert_accessible("link fallback notice")
 
 
 if __name__ == "__main__":
