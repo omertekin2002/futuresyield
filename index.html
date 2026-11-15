@@ -493,9 +493,21 @@
               <p class="eyebrow">Contract board</p>
               <h2 id="contracts-title">Every maturity</h2>
             </div>
-            <div class="updated-block">
-              <span>Snapshot updated</span>
-              <strong id="updated-at">—</strong>
+            <div class="board-actions">
+              <div class="updated-block">
+                <span>Snapshot updated</span>
+                <strong id="updated-at">—</strong>
+              </div>
+              <button
+                class="download-button"
+                id="download-csv"
+                type="button"
+                aria-describedby="download-csv-hint"
+                disabled
+              >Download CSV<span class="sr-only" id="download-csv-name"> of the contract board</span></button>
+              <span class="sr-only" id="download-csv-hint">
+                One row per contract, with the compared close when one is on.
+              </span>
             </div>
           </div>
 
