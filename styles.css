@@ -993,6 +993,28 @@ canvas:focus-visible {
 .updated-block strong {
   font-weight: 400;
 }
+.board-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px 16px;
+}
+.download-button {
+  min-height: 36px;
+  padding: 6px 12px;
+  border: 3px outset var(--paper);
+  background: var(--paper);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.download-button:active {
+  border-style: inset;
+}
+.download-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
 .table-shell {
   overflow-x: auto;
 }
@@ -1388,6 +1410,9 @@ footer p {
   }
   .contracts-heading .updated-block {
     align-items: flex-start;
+  }
+  .board-actions {
+    justify-content: flex-start;
   }
   table,
   tbody {

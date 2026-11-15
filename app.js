@@ -94,6 +94,8 @@ const elements = {
   inspectorCompareTable: document.querySelector("#inspector-compare-table"),
   inspectorCompareHead: document.querySelector("#inspector-compare-head"),
   inspectorCompareRows: document.querySelector("#inspector-compare-rows"),
+  downloadCsv: document.querySelector("#download-csv"),
+  downloadCsvName: document.querySelector("#download-csv-name"),
 };
 
 const state = {
@@ -387,7 +389,8 @@ function istanbulWallClock(date) {
 // in its market and snapshot: the time alone on that Istanbul day, the date
 // and time on an earlier day, which makes it stale, and "—" without a time,
 // which is never stale. Older snapshots filled a missing time in with their
-// own generated_at, so that exact time counts as none.
+// own generated_at, so that exact time counts as none. Each entry keeps the
+// time it read, or null.
 function lastTrades(contracts, generatedAt) {
   const standIn = Date.parse(generatedAt);
   const times = contracts.map((contract) => {
@@ -401,11 +404,11 @@ function lastTrades(contracts, generatedAt) {
   );
   return new Map(contracts.map((contract, index) => {
     const time = times[index];
-    if (!time) return [contract, { text: "—", stale: false }];
+    if (!time) return [contract, { text: "—", stale: false, time: null }];
     const clock = tradeTimeFormat.format(time);
     return [contract, days[index] === newestDay
-      ? { text: clock, stale: false }
-      : { text: `${tradeDayFormat.format(time)} ${clock}`, stale: true }];
+      ? { text: clock, stale: false, time }
+      : { text: `${tradeDayFormat.format(time)} ${clock}`, stale: true, time }];
   }));
 }
 
@@ -558,6 +561,7 @@ function renderMarketIdentity(market) {
   elements.contractsCaption.textContent =
     `${state.renderedDate ? "Closing" : "Latest"} VİOP ${market.pair} futures prices${closeOf}, ` +
     "maturity dates, days remaining, and compounded implied yields";
+  elements.downloadCsvName.textContent = ` of the ${market.pair} contract board`;
   elements.footerMarketCopy.textContent =
     `Built as a clear window into the ${market.pair} term structure.`;
 
@@ -1274,6 +1278,252 @@ function renderInspectorComparison(contract) {
   ].map(comparisonRow));
 }
 
+// The contract board as a CSV file: one row per contract of the day on
+// screen, in board order, with the values the board, the carry table and the
+// inspector show, unformatted. Nothing missing is filled in: an empty value
+// gets its reason in the row's missing column. The README's "Downloading the
+// board as CSV" lists every column.
+
+// Text a spreadsheet could run as a formula starts with one of these.
+const CSV_FORMULA_START = /^[=+\-@\t\r]/;
+
+// One RFC 4180 field. A number is written in full precision and a missing
+// one as an empty field; text a spreadsheet could read as a formula gets a
+// leading ', and text with a comma, quote or line break is quoted.
+function csvField(value) {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "number") return hasNumber(value) ? String(value) : "";
+  if (typeof value === "boolean") return String(value);
+  let text = String(value);
+  if (CSV_FORMULA_START.test(text)) text = `'${text}`;
+  return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+}
+
+// The day the board's values describe: the close on screen, or the live
+// snapshot's market date after any roll forward.
+function boardDay() {
+  return state.renderedDate ?? state.adjustedDay ?? state.snapshot.market_date;
+}
+
+// A snapshot time string, kept as given, or null if it doesn't parse.
+function isoTime(value) {
+  return typeof value === "string" && !Number.isNaN(Date.parse(value)) ? value : null;
+}
+
+// Why a contract has no yield, in the dashboard's words, as noYieldReason().
+function csvYieldGap(contract, spot) {
+  if (!hasNumber(contract.last)) return "no yield: no last price";
+  if (!hasNumber(spot) || spot <= 0) return "no yield: no spot reference";
+  if (contract.days_to_maturity <= 0) return "matures today: no yield";
+  return "no yield: no daily factor";
+}
+
+// The values each day's side of a row compares, with why each can be missing.
+// A side is one contract with its market's spot and its last trade.
+const CSV_SIDE_FIELDS = [
+  { field: "last", value: (side) => side.contract.last, gap: () => "no last price" },
+  { field: "bid", value: (side) => side.contract.bid, gap: () => "no bid" },
+  { field: "ask", value: (side) => side.contract.ask, gap: () => "no ask" },
+  {
+    field: "last_trade_at",
+    value: (side) => side.trade.time ? isoTime(side.contract.updated_at) : null,
+    gap: () => "no last trade time",
+  },
+  { field: "stale", value: (side) => side.trade.stale },
+  { field: "spot", value: (side) => side.spot, gap: () => "no spot reference" },
+  {
+    field: "premium_percent",
+    value: (side) => side.contract.premium_percent,
+    gap: (side) => hasNumber(side.contract.last)
+      ? "no premium in this snapshot"
+      : "no premium: no last price",
+  },
+  { field: "days_left", value: (side) => side.contract.days_to_maturity },
+  ...Object.entries(YIELD_PERIODS).map(([period, settings]) => ({
+    field: `yield_${settings.shortLabel.toLowerCase()}_percent`,
+    period,
+    value: (side) => yieldValue(side.contract, period, side.spot),
+    gap: (side) => csvYieldGap(side.contract, side.spot),
+  })),
+];
+
+// A side field, with a plain "no <field>" reason if it has none of its own.
+function sideField(field) {
+  const entry = CSV_SIDE_FIELDS.find((candidate) => candidate.field === field);
+  return { gap: () => `no ${field}`, ...entry };
+}
+
+// The board's columns for the day on screen: each a name, the row's value and
+// why that value is missing when it is. Carry columns come only with a carry
+// table, comparison columns only with a loaded comparison.
+function boardCsvColumns(data, { carry, compareDate, compareMarket }) {
+  const side = (field) => {
+    const { value, gap } = sideField(field);
+    return { name: field, value: (row) => value(row.now), gap: (row) => gap(row.now) };
+  };
+  const columns = [
+    { name: "market", value: () => data.key },
+    { name: "view", value: () => state.renderedDate ? "close" : "live" },
+    { name: "market_date", value: () => boardDay() },
+    { name: "snapshot_generated_at", value: () => state.snapshot.generated_at },
+    {
+      name: "days_rolled_forward_from",
+      value: () => state.adjustedDay ? state.snapshot.market_date : null,
+      context: true,
+    },
+    side("spot"),
+    { name: "spot_unit", value: () => data.spot_unit },
+    { name: "spot_time", value: () => isoTime(data.spot.updated_at), gap: () => "no spot time" },
+    { name: "spot_source", value: () => data.spot.source, gap: () => "no spot source" },
+    { name: "maturity_month", value: (row) => maturityKey(row.now.contract) },
+    { name: "label", value: (row) => row.now.contract.label, gap: () => "no label" },
+    { name: "symbol", value: (row) => row.now.contract.symbol, gap: () => "no symbol" },
+    { name: "code", value: (row) => row.now.contract.code, gap: () => "no code" },
+    { name: "maturity_date", value: (row) => row.now.contract.maturity_date },
+    side("days_left"),
+    side("last"),
+    {
+      name: "change_percent",
+      value: (row) => row.now.contract.change_percent,
+      gap: () => "no change",
+    },
+    side("bid"),
+    side("ask"),
+    { name: "volume", value: (row) => row.now.contract.volume, gap: () => "no volume" },
+    side("last_trade_at"),
+    side("stale"),
+    side("premium_percent"),
+    ...Object.values(YIELD_PERIODS).map((settings) =>
+      side(`yield_${settings.shortLabel.toLowerCase()}_percent`)
+    ),
+  ];
+
+  if (carry) {
+    const lookback = data.spot_trend?.lookback_days ?? 180;
+    columns.push(
+      {
+        name: "expected_spot_at_maturity",
+        value: (row) => row.now.contract.expected_spot_at_maturity,
+        gap: () => data.spot_trend
+          ? "no projection"
+          : `no projection: no ${lookback}-day spot history`,
+      },
+      {
+        name: "expected_short_profit_try",
+        value: (row) => row.now.contract.expected_short_profit_try,
+        gap: (row) => hasNumber(row.now.contract.bid)
+          ? "no profit: no expected spot"
+          : "no profit: no bid",
+      },
+    );
+  }
+
+  if (compareDate) {
+    // A maturity the compared close doesn't list leaves every comparison and
+    // change cell of its row empty.
+    const absent = compareMarket
+      ? `not listed on ${compareDate}`
+      : `no ${data.pair} data on ${compareDate}`;
+    const then = (field) => {
+      const { value, gap } = sideField(field);
+      return {
+        name: `compare_${field}`,
+        value: (row) => row.then ? value(row.then) : null,
+        gap: (row) => row.then ? `on ${compareDate}: ${gap(row.then)}` : absent,
+      };
+    };
+    // A change is the day on screen minus the compared close.
+    const change = (name, field) => {
+      const { value, gap } = sideField(field);
+      return {
+        name,
+        value: (row) => row.then ? difference(value(row.now), value(row.then)) : null,
+        gap: (row) => {
+          if (!row.then) return absent;
+          return hasNumber(value(row.now)) ? `on ${compareDate}: ${gap(row.then)}` : gap(row.now);
+        },
+      };
+    };
+    const periodNames = Object.values(YIELD_PERIODS)
+      .map((settings) => settings.shortLabel.toLowerCase());
+    columns.push(
+      { name: "compare_market_date", value: (row) => row.then ? compareDate : null, gap: () => absent },
+      ...["last", "bid", "ask", "last_trade_at", "stale", "spot", "premium_percent", "days_left"]
+        .map(then),
+      ...periodNames.map((name) => then(`yield_${name}_percent`)),
+      change("delta_price", "last"),
+      change("delta_spot", "spot"),
+      change("delta_premium_pp", "premium_percent"),
+      change("delta_days_left", "days_left"),
+      ...periodNames.map((name) => change(`delta_yield_${name}_pp`, `yield_${name}_percent`)),
+    );
+  }
+  return columns;
+}
+
+// The CSV text and file name for the board on screen.
+function boardCsv() {
+  const data = state.data;
+  const compareDate = state.compareSnapshot && state.compareDate ? state.compareDate : null;
+  const compareMarket = compareDate ? comparisonMarket() : null;
+  const columns = boardCsvColumns(data, {
+    carry: hasNumber(data.contract_size),
+    compareDate,
+    compareMarket,
+  });
+  const trades = lastTrades(data.contracts, state.snapshot.generated_at);
+  const compareTrades = compareMarket
+    ? lastTrades(compareMarket.contracts, state.compareSnapshot.generated_at)
+    : null;
+
+  const lines = [[...columns.map((column) => column.name), "missing"]];
+  data.contracts.forEach((contract) => {
+    const compared = compareMarket?.contracts.find((candidate) =>
+      maturityKey(candidate) === maturityKey(contract)
+    );
+    const row = {
+      now: { contract, spot: data.spot.last, trade: trades.get(contract) },
+      then: compared
+        ? { contract: compared, spot: compareMarket.spot?.last, trade: compareTrades.get(compared) }
+        : null,
+    };
+    const values = columns.map((column) => {
+      const value = column.value(row);
+      return typeof value === "number" && !hasNumber(value) ? null : value ?? null;
+    });
+    const gaps = new Set();
+    columns.forEach((column, index) => {
+      const value = values[index];
+      if (!column.context && (value === null || value === "")) {
+        gaps.add(column.gap ? column.gap(row) : `no ${column.name}`);
+      }
+    });
+    lines.push([...values, [...gaps].join("; ")]);
+  });
+
+  const market = String(data.key).replace(/[^A-Za-z0-9]/g, "");
+  return {
+    name: `vade-${market}-${boardDay()}${compareDate ? `-vs-${compareDate}` : ""}.csv`,
+    text: lines.map((fields) => fields.map(csvField).join(",")).join("\r\n") + "\r\n",
+  };
+}
+
+// Save the board as a UTF-8 CSV with a byte-order mark, so spreadsheets read
+// İ and ş correctly. It is built in the page; nothing is fetched.
+function downloadBoardCsv() {
+  if (!state.data || !state.snapshot) return;
+  const { name, text } = boardCsv();
+  const url = URL.createObjectURL(new Blob(["﻿", text], { type: "text/csv;charset=utf-8" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  link.hidden = true;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 function setSelection(key) {
   if (key === state.selectedKey) return;
   updateSelection(key);
@@ -1766,6 +2016,7 @@ function selectMarket(marketKey, updateUrl = false) {
   elements.yieldTooltip.hidden = true;
 
   renderMarketIdentity(market);
+  elements.downloadCsv.disabled = false;
   renderSpot(market.spot);
   renderStats(market);
   renderRows(market.contracts);
@@ -2113,6 +2364,8 @@ elements.marketButtons.forEach((button) => {
     selectMarket(button.dataset.market, true);
   });
 });
+
+elements.downloadCsv.addEventListener("click", downloadBoardCsv);
 
 elements.rows.addEventListener("click", (event) => {
   const button = event.target.closest(".select-button");
