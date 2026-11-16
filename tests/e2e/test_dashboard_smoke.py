@@ -3030,10 +3030,31 @@ class DashboardSmokeTests(unittest.TestCase):
         return row.locator("dd").inner_text().strip() if row.is_visible() else None
 
     def print_media(self, width=None):
-        """Lay the page out for print, optionally at a page's content width."""
+        """Lay the page out for print, optionally at a page's content width.
+
+        Emulating the media applies the print styles at once, but sends no
+        beforeprint: the page learns of it from its media query's change event,
+        a frame later. Until then the header is visible and not yet filled, so
+        return only once that event has been delivered.
+        """
         if width:
             self.page.set_viewport_size({"width": width, "height": 1000})
+        self.page.evaluate(
+            """() => {
+              const query = window.matchMedia('print');
+              window.printMediaDelivered = query.matches;
+              if (!query.matches) {
+                query.addEventListener(
+                  'change',
+                  () => { window.printMediaDelivered = true; },
+                  { once: true },
+                );
+              }
+            }"""
+        )
         self.page.emulate_media(media="print")
+        # Change events reach every listener in one task, app.js's included.
+        self.page.wait_for_function("() => window.printMediaDelivered === true")
         expect(self.page.locator("#print-header")).to_be_visible()
 
     def assert_print_header(self, view, compare=None, maturity=None, period="daily", note=None):
