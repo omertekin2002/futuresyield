@@ -1227,7 +1227,7 @@ footer p {
     margin: 16px 12px;
   }
 }
-@media (max-width: 620px) {
+@media screen and (max-width: 620px) {
   .page-frame {
     margin: 8px;
   }

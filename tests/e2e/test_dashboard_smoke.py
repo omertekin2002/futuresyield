@@ -3233,6 +3233,14 @@ class DashboardSmokeTests(unittest.TestCase):
                     self.assert_no_sideways_scroll()
                     self.page.emulate_media(media="screen")
 
+    def test_print_keeps_table_structure_and_catalog_note_at_narrow_page_width(self):
+        self.open_dashboard("?market=USDTRY")
+        self.print_media(600)
+        expect(self.page.locator(".catalog-note")).to_be_visible()
+        table = self.page.locator("#contracts table")
+        self.assertEqual(table.evaluate("node => getComputedStyle(node).display"), "table")
+        self.assertEqual(table.locator("tbody").evaluate("node => getComputedStyle(node).display"), "table-row-group")
+
     def test_print_to_pdf_of_a_live_and_a_comparison_view(self):
         for query in ("?market=USDTRY", "?market=USDTRY&compare=2026-09-30&maturity=2026-12&period=annualized"):
             with self.subTest(query=query):
