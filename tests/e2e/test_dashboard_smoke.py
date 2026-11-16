@@ -3123,6 +3123,48 @@ class DashboardSmokeTests(unittest.TestCase):
                 )
                 self.page.emulate_media(media="screen")
 
+    def test_print_header_waits_for_the_compared_snapshot(self):
+        day = "2026-09-30"
+        view = (
+            "Live snapshot taken 07 Oct 2026, 14:06 TRT (Europe/Istanbul). "
+            "Live values change on every refresh."
+        )
+        for missing_market in (False, True):
+            with self.subTest(missing_market=missing_market):
+                self.page.emulate_media(media="screen")
+                self.open_dashboard("?market=USDTRY")
+                snapshot = copy.deepcopy(self.history[day])
+                if missing_market:
+                    del snapshot["markets"]["USDTRY"]
+                    snapshot["market_order"].remove("USDTRY")
+                pending = []
+                pattern = re.compile(rf"/data/history/{day}\.json$")
+                # Keep the archive request pending until after the first print:
+                # its selected date is already in the URL, but no overlay exists.
+                self.page.route(pattern, lambda route: pending.append(route))
+                with self.page.expect_request(pattern):
+                    self.compare_select().select_option(day)
+                expect(self.compare_select()).to_have_value(day)
+                expect(self.page.locator("#curve-legend")).to_be_hidden()
+                self.assertIn(f"compare={day}", self.page.url)
+                self.page.evaluate("() => window.dispatchEvent(new Event('beforeprint'))")
+                self.assert_print_header(view)
+
+                self.assertEqual(len(pending), 1)
+                pending.pop().fulfill(
+                    status=200, content_type="application/json", body=json.dumps(snapshot)
+                )
+                if missing_market:
+                    expect(self.page.locator("#curve-legend")).to_contain_text("no USD/TRY data")
+                else:
+                    self.assert_comparing(day)
+                self.page.evaluate("() => window.dispatchEvent(new Event('beforeprint'))")
+                self.assert_print_header(
+                    view,
+                    compare="Close of 30 Sept 2026" + (" · no USD/TRY data" if missing_market else ""),
+                )
+                self.page.unroute(pattern)
+
     def test_print_header_keeps_the_rolled_forward_note_and_the_print_time(self):
         self.reopen_at(NEXT_DAY_TIME)
         self.open_dashboard("?market=USDTRY")

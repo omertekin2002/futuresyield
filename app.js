@@ -1569,7 +1569,7 @@ function renderPrintHeader() {
       `Live snapshot taken ${time} (Europe/Istanbul). Live values change on every refresh.`;
   }
 
-  const compared = Boolean(state.compareDate);
+  const compared = Boolean(state.compareSnapshot && state.compareDate);
   elements.printCompareRow.hidden = !compared;
   elements.printCompare.textContent = compared
     ? `Close of ${formatDay(state.compareDate)}` +
