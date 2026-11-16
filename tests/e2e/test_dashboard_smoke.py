@@ -137,6 +137,29 @@ CSV_YIELDS = (
 )
 # Columns that are never a missing value: context, and the reasons themselves.
 CSV_CONTEXT_COLUMNS = ("days_rolled_forward_from", "missing")
+# Printing. The content width of an A4 portrait page with the stylesheet's
+# 15 mm margins (210 mm - 30 mm, at 96 px per inch), and of US Letter's.
+A4_CONTENT_WIDTH = 680
+LETTER_CONTENT_WIDTH = 703
+# The print header's rows that are always shown, in order.
+PRINT_ROWS = ("Market", "View", "Yield period", "Page", "Printed")
+# Interactive-only controls that print drops.
+PRINT_HIDDEN = (
+    "#refresh-button", "#history-control", "#compare-control", "#live-button",
+    "#selection-clear", "#download-csv", "#print-page", "#chart-tooltip",
+    "#yield-tooltip", "#curve-marker", "#yield-marker", ".period-toggle",
+    ".select-button", '.market-options [aria-pressed="false"]',
+)
+# What a printout keeps: charts with their keys, tables, notes and disclaimer.
+PRINT_VISIBLE = (
+    "#print-header", "#curve-chart", "#yield-chart", "#curve-legend", "#yield-legend",
+    "#curve-key", "#yield-key", "#carry", "#contracts", ".yield-footnote",
+    "#carry-footnote", "#contracts .table-footnote", "footer .disclaimer",
+    '.market-options [aria-pressed="true"]',
+)
+# A sensible ceiling for one market's printout: the header, sidebar and
+# inspector, two charts, the carry table and the board.
+MAX_PRINTED_PAGES = 8
 NO_PRICE_MESSAGE = "No priced maturities to plot."
 NO_YIELD_MESSAGE = (
     "No maturities with a yield to plot: every listed contract matures today or has no price."
@@ -2995,6 +3018,189 @@ class DashboardSmokeTests(unittest.TestCase):
         expect(self.page.locator("#data-state")).to_have_class(re.compile(r"\bis-error\b"))
         self.expect_load_errors(1)
         expect(self.download_button()).to_be_disabled()
+
+    # Printing the dashboard
+
+    def print_row(self, term):
+        """The print header's value for term, or None when its row is hidden."""
+        row = self.page.locator("#print-header dl > div").filter(
+            has=self.page.locator("dt", has_text=re.compile(f"^{re.escape(term)}$"))
+        )
+        expect(row).to_have_count(1)
+        return row.locator("dd").inner_text().strip() if row.is_visible() else None
+
+    def print_media(self, width=None):
+        """Lay the page out for print, optionally at a page's content width."""
+        if width:
+            self.page.set_viewport_size({"width": width, "height": 1000})
+        self.page.emulate_media(media="print")
+        expect(self.page.locator("#print-header")).to_be_visible()
+
+    def assert_print_header(self, view, compare=None, maturity=None, period="daily", note=None):
+        self.print_media()
+        expect(self.page.locator("#print-header dt")).to_have_count(8)
+        for term in PRINT_ROWS:
+            self.assertTrue(self.print_row(term), term)
+        self.assertEqual(
+            self.print_row("Market"),
+            "USD/TRY · spot in TRY per USD · curve in TRY / USD",
+        )
+        self.assertEqual(self.print_row("View"), view)
+        self.assertEqual(self.print_row("Compared with"), compare)
+        self.assertEqual(self.print_row("Selected maturity"), maturity)
+        self.assertEqual(self.print_row("Yield period"), YIELD_PERIOD_LABELS[period])
+        self.assertEqual(self.print_row("Note"), note)
+        self.assertEqual(self.print_row("Page"), self.page.url)
+        self.assertEqual(self.print_row("Printed"), "07 Oct 2026, 23:00 TRT")
+        expect(self.page.locator(".print-title")).to_have_text("VADE · VİOP futures, USD/TRY")
+
+    def pdf_pages(self, **options):
+        pdf = self.page.pdf(format="A4", **options)
+        self.assertTrue(pdf.startswith(b"%PDF"))
+        return len(re.findall(rb"/Type\s*/Page(?![a-zA-Z])", pdf))
+
+    def test_print_button_opens_the_print_dialog(self):
+        self.open_dashboard("?market=USDTRY")
+        self.page.evaluate("() => { window.print = () => { window.printed = (window.printed ?? 0) + 1; }; }")
+        button = self.page.get_by_role("button", name="Print this page", exact=True)
+        expect(button).to_be_visible()
+        expect(button).to_have_accessible_description(re.compile(r"print dialog"))
+        # Beside Download CSV, in the board's heading.
+        expect(self.page.locator(".board-actions #download-csv + .sr-only + #print-page")).to_have_count(1)
+        button.click()
+        self.assertEqual(self.page.evaluate("window.printed"), 1)
+        for key in ("Enter", " "):
+            button.focus()
+            self.page.keyboard.press(key)
+        self.assertEqual(self.page.evaluate("window.printed"), 3)
+
+    def test_print_header_is_not_on_screen_or_in_the_accessibility_tree(self):
+        self.open_dashboard("?market=USDTRY&maturity=2026-12&compare=2026-09-30")
+        header = self.page.locator("#print-header")
+        expect(header).to_be_hidden()
+        self.assertEqual(header.evaluate("(node) => getComputedStyle(node).display"), "none")
+        # Filled once printing starts, and still hidden on screen afterwards.
+        self.page.evaluate("() => window.dispatchEvent(new Event('beforeprint'))")
+        expect(self.page.locator("#print-view")).to_contain_text("Live snapshot taken")
+        expect(header).to_be_hidden()
+        tree = self.page.locator("body").aria_snapshot()
+        for text in ("Live snapshot taken", "Printed", "VADE · VİOP futures"):
+            self.assertNotIn(text, tree)
+        self.assert_no_sideways_scroll()
+
+    def test_print_header_of_the_live_view(self):
+        self.open_dashboard("?market=USDTRY")
+        self.assert_print_header(
+            "Live snapshot taken 07 Oct 2026, 14:06 TRT (Europe/Istanbul). "
+            "Live values change on every refresh."
+        )
+
+    def test_print_header_of_an_archived_close(self):
+        self.open_day("2026-10-06", "&market=USDTRY")
+        self.assert_print_header("Archived close of 06 Oct 2026")
+        # The past-close banner still prints, without its button.
+        expect(self.page.locator("#history-banner")).to_be_visible()
+        expect(self.page.locator("#live-button")).to_be_hidden()
+
+    def test_print_header_of_a_comparison_with_a_maturity_and_period(self):
+        query = "?market=USDTRY&compare=2026-09-30&maturity=2026-12&period=annualized"
+        for day in (None, "2026-10-06"):
+            with self.subTest(day=day):
+                if day:
+                    self.open_day(day, "&" + query[1:])
+                else:
+                    self.open_dashboard(query)
+                self.assert_comparing("2026-09-30", current=HISTORY_LABELS[day] if day else LIVE_LABEL)
+                self.assert_selected("Dec 2026")
+                self.assert_print_header(
+                    f"Archived close of {HISTORY_LABELS[day]}" if day else (
+                        "Live snapshot taken 07 Oct 2026, 14:06 TRT (Europe/Istanbul). "
+                        "Live values change on every refresh."
+                    ),
+                    compare="Close of 30 Sept 2026",
+                    maturity=f"Dec 2026 · {self.contract('Dec 2026')['code']}",
+                    period="annualized",
+                )
+                self.page.emulate_media(media="screen")
+
+    def test_print_header_keeps_the_rolled_forward_note_and_the_print_time(self):
+        self.reopen_at(NEXT_DAY_TIME)
+        self.open_dashboard("?market=USDTRY")
+        note = self.page.locator("#days-note")
+        expect(note).to_be_visible()
+        self.print_media()
+        self.assertEqual(self.print_row("Note"), note.inner_text().strip())
+        self.assertEqual(self.print_row("Printed"), "08 Oct 2026, 10:00 TRT")
+        # The print time is taken when printing starts, not when the page loaded.
+        self.page.clock.set_fixed_time(NEXT_DAY_TIME + timedelta(minutes=95))
+        self.page.evaluate("() => window.dispatchEvent(new Event('beforeprint'))")
+        self.assertEqual(self.print_row("Printed"), "08 Oct 2026, 11:35 TRT")
+
+    def test_print_hides_controls_and_keeps_charts_tables_and_notes(self):
+        self.open_dashboard("?market=USDTRY&compare=2026-09-30&maturity=2026-12")
+        self.assert_comparing("2026-09-30")
+        # A tooltip and a keyboard marker that were showing are dropped too.
+        self.tab_to("#curve-chart")
+        self.page.keyboard.press("ArrowRight")
+        expect(self.page.locator("#curve-marker")).to_be_visible()
+        self.print_media(A4_CONTENT_WIDTH)
+        for selector in PRINT_HIDDEN:
+            with self.subTest(hidden=selector):
+                locator = self.page.locator(selector)
+                for index in range(locator.count()):
+                    expect(locator.nth(index)).to_be_hidden()
+        for selector in PRINT_VISIBLE + ("#inspector", "#inspector-compare-table"):
+            with self.subTest(visible=selector):
+                expect(self.page.locator(selector)).to_be_visible()
+        expect(self.page.locator("footer .disclaimer")).to_contain_text("not investment advice")
+        # Charts redraw at the printed width, so they print undistorted.
+        for canvas in ("#curve-chart", "#yield-chart"):
+            with self.subTest(canvas=canvas):
+                self.page.wait_for_function(
+                    """(selector) => {
+                      const canvas = document.querySelector(selector);
+                      const box = canvas.getBoundingClientRect();
+                      return canvas.width === Math.round(box.width) && canvas.height === Math.round(box.height);
+                    }""",
+                    arg=canvas,
+                )
+                self.assertLessEqual(
+                    self.page.locator(canvas).bounding_box()["width"], A4_CONTENT_WIDTH
+                )
+
+    def test_print_fits_every_table_column_on_the_page(self):
+        for width in (A4_CONTENT_WIDTH, LETTER_CONTENT_WIDTH):
+            for query in ("?market=USDTRY&maturity=2026-12&compare=2026-09-30", "?market=EURTRY"):
+                with self.subTest(width=width, query=query):
+                    self.open_dashboard(query)
+                    self.print_media(width)
+                    shells = self.page.evaluate(
+                        """() => [...document.querySelectorAll('.table-shell, .inspector-compare-table')]
+                          .filter((node) => node.offsetParent !== null)
+                          .map((node) => ({
+                            scroll: node.scrollWidth,
+                            client: node.clientWidth,
+                            table: (node.querySelector('table') ?? node).getBoundingClientRect().right,
+                            right: node.getBoundingClientRect().right,
+                          }))"""
+                    )
+                    self.assertGreaterEqual(len(shells), 2 if "USDTRY" in query else 1)
+                    for shell in shells:
+                        self.assertLessEqual(shell["scroll"], shell["client"], shell)
+                        self.assertLessEqual(shell["table"], shell["right"] + 0.5, shell)
+                    self.assert_no_sideways_scroll()
+                    self.page.emulate_media(media="screen")
+
+    def test_print_to_pdf_of_a_live_and_a_comparison_view(self):
+        for query in ("?market=USDTRY", "?market=USDTRY&compare=2026-09-30&maturity=2026-12&period=annualized"):
+            with self.subTest(query=query):
+                self.open_dashboard(query)
+                pages = self.pdf_pages()
+                self.assertGreaterEqual(pages, 2)
+                self.assertLessEqual(pages, MAX_PRINTED_PAGES)
+                # Printing leaves the screen as it was.
+                expect(self.page.locator("#print-header")).to_be_hidden()
+                expect(self.page.locator("#refresh-button")).to_be_visible()
 
     def assert_accessible(self, state):
         """Fail with every serious or critical WCAG 2.1 A/AA violation on the page."""
