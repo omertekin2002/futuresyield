@@ -1309,7 +1309,7 @@ function renderInspectorComparison(contract) {
 // board as CSV" lists every column.
 
 // Text a spreadsheet could run as a formula starts with one of these.
-const CSV_FORMULA_START = /^[=+\-@\t\r]/;
+const CSV_FORMULA_START = /^[=+\-@\t\r\n]/;
 
 // One RFC 4180 field. A number is written in full precision and a missing
 // one as an empty field; text a spreadsheet could read as a formula gets a

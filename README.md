@@ -246,9 +246,9 @@ example `vade-USDTRY-2026-10-07-vs-2026-09-30.csv`.
 - **Format.** RFC 4180: comma separated, CRLF line endings, fields with a
   comma, quote or line break quoted, and quotes doubled. UTF-8 with a
   byte-order mark, so spreadsheets read `İ` correctly. A text cell that starts
-  with `=`, `+`, `-`, `@`, a tab or a carriage return gets a leading `'`, so a
-  spreadsheet never runs it as a formula; numbers, negative ones included, stay
-  numeric.
+  with `=`, `+`, `-`, `@`, a tab, a carriage return or a line feed gets a
+  leading `'`, so a spreadsheet never runs it as a formula; numbers, negative
+  ones included, stay numeric.
 - **Values.** Raw numbers in full precision, with `.` decimals, no thousands
   separators and no `%` signs. Very small or large numbers may be written in
   exponent notation, such as `1e-7`, which spreadsheets read as numbers.

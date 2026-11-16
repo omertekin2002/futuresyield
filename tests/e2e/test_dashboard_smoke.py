@@ -2970,7 +2970,8 @@ class DashboardSmokeTests(unittest.TestCase):
         self.open_dashboard("?market=USDTRY")
         cases = [
             ["=1+2", "'=1+2"], ["+1", "'+1"], ["-1", "'-1"], ["@SUM(A1)", "'@SUM(A1)"],
-            ["\tx", "'\tx"], ["\rx", "\"'\rx\""], ["a,b", '"a,b"'],
+            ["\tx", "'\tx"], ["\rx", "\"'\rx\""], ["\n=1+1", "\"'\n=1+1\""],
+            ["a,b", '"a,b"'],
             ['say "hi"', '"say ""hi"""'], ["two\nlines", '"two\nlines"'],
             ["İstanbul", "İstanbul"], [-1.5, "-1.5"], [0.1 + 0.2, "0.30000000000000004"],
             [None, ""], [float("nan"), ""], [True, "true"], [False, "false"],
