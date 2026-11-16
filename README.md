@@ -23,6 +23,12 @@ redeployed by GitHub Actions every hour during VİOP trading hours on weekdays,
 - Snapshot age, delayed-data and market-closed states, and one-click refresh
 - Any archived end-of-day close, browsable from the **View** menu
 - Any earlier archived close overlaid on both curves, with price and yield deltas
+- A **Download CSV** of the contract board, with the compared close when one is on
+- A **Print** layout, from the button beside it or the browser's own print
+  command: a header names the market, the live snapshot time or archived
+  close, any compared close, selected maturity and yield period, the page
+  link and the print time; controls drop out and every table column fits
+  an A4 or Letter page
 
 Maturity is calculated as the final **full** Turkish business day of each
 contract month. Weekends, public holidays, and half-day official holidays are
@@ -222,6 +228,85 @@ logic lives in `scripts/archive_snapshot.py`, and
 `scripts/archive_history.sh SNAPSHOT [WORKTREE]` runs it against a checkout of
 the branch, creating the branch as an orphan holding only `history/` on the
 first run.
+
+### Downloading the board as CSV
+
+The **Download CSV** button in the contract board's heading saves the board on
+screen as a CSV file. It is built in the browser from the values the board, the
+carry table and the inspector already show, so it needs no network request:
+the live view (rolled forward when it is), an archived close, or either with a
+comparison on. The file is named `vade-<market>-<market_date>.csv`, or
+`vade-<market>-<market_date>-vs-<compare date>.csv` with a comparison, for
+example `vade-USDTRY-2026-10-07-vs-2026-09-30.csv`.
+
+- **Rows.** One header row, then one row per contract on the board, in board
+  order. Every row carries its own context, so it reads on its own; there are
+  no metadata lines above the header. Maturities listed only on the compared
+  close are not exported.
+- **Format.** RFC 4180: comma separated, CRLF line endings, fields with a
+  comma, quote or line break quoted, and quotes doubled. UTF-8 with a
+  byte-order mark, so spreadsheets read `İ` correctly. A text cell that starts
+  with `=`, `+`, `-`, `@`, a tab, a carriage return or a line feed gets a
+  leading `'`, so a spreadsheet never runs it as a formula; numbers, negative
+  ones included, stay numeric.
+- **Values.** Raw numbers in full precision, with `.` decimals, no thousands
+  separators and no `%` signs. Very small or large numbers may be written in
+  exponent notation, such as `1e-7`, which spreadsheets read as numbers.
+  Booleans are `true` or `false`.
+- **Missing values.** A missing value is never filled in: its cell is empty,
+  and the row's `missing` column gives the reason, using the dashboard's own
+  wording, such as `no bid`, `no last trade time`, `matures today: no yield`,
+  `on 2026-09-30: no bid` (a value missing on the compared close) or
+  `not listed on 2026-09-30`. Reasons are separated by `; ` and each is listed
+  once. `missing` is empty when the row has every value.
+  `days_rolled_forward_from` is context, not a value, so it is empty without a
+  reason when nothing was rolled forward.
+
+Prices and spot are in the market's `spot_unit` (TRY per USD, per EUR or per
+gram). Times are ISO 8601 with an offset, as the snapshot stores them.
+
+| Column | Meaning |
+| --- | --- |
+| `market` | Market key: `USDTRY`, `EURTRY` or `XAUTRY` |
+| `view` | `live` or `close` (an archived close) |
+| `market_date` | The day the values describe, `YYYY-MM-DD`, after any roll forward |
+| `snapshot_generated_at` | When the snapshot on screen was generated |
+| `days_rolled_forward_from` | The live snapshot's own `market_date` when its days left and yields were rolled forward to `market_date`; empty otherwise |
+| `spot`, `spot_unit` | Spot reference and its unit |
+| `spot_time`, `spot_source` | When the spot reference was taken, and its source |
+| `maturity_month` | Maturity month, `YYYY-MM`, as in `?maturity=` |
+| `label`, `symbol`, `code` | Contract label (`Oct 2026`), VİOP symbol and table code |
+| `maturity_date`, `days_left` | Maturity date and calendar days left from `market_date` |
+| `last` | Last price, in `spot_unit` |
+| `change_percent` | Daily change of the last price, in percent |
+| `bid`, `ask` | Best bid and ask, in `spot_unit` |
+| `volume` | Traded volume, as the snapshot reports it |
+| `last_trade_at` | Time of the contract's last trade; empty without one |
+| `stale` | `true` if the contract last traded before the market's latest quote day, as the board's **stale** tag |
+| `premium_percent` | Last price against spot, in percent |
+| `yield_1d_percent`, `yield_30d_percent`, `yield_365d_percent` | Compounded implied yield over 1, 30 and 365 days, in percent |
+| `expected_spot_at_maturity` | USD/TRY only: spot projected at its 180-day pace to maturity, in `spot_unit` |
+| `expected_short_profit_try` | USD/TRY only: expected profit from shorting one contract at the bid, in TRY |
+| `compare_market_date` | With a comparison: the compared close's date |
+| `compare_last`, `compare_bid`, `compare_ask` | The same maturity's prices on the compared close, matched by maturity month |
+| `compare_last_trade_at`, `compare_stale` | Its last trade and stale flag on the compared close, by that close's own latest quote day |
+| `compare_spot`, `compare_premium_percent`, `compare_days_left` | Spot, premium and days left on the compared close |
+| `compare_yield_1d_percent`, `compare_yield_30d_percent`, `compare_yield_365d_percent` | Its yields on the compared close, from that close's own spot and days left |
+| `delta_price`, `delta_spot` | Change in last price and in spot, in `spot_unit` |
+| `delta_premium_pp` | Change in premium, in percentage points |
+| `delta_days_left` | Change in days left |
+| `delta_yield_1d_pp`, `delta_yield_30d_pp`, `delta_yield_365d_pp` | Change in each yield, in percentage points |
+| `missing` | Why each empty value cell in the row is empty |
+
+The two `expected_*` columns are present only for USD/TRY, the market with a
+carry table, and left out for EUR/TRY and XAU/TRY. The `compare_*` and
+`delta_*` columns are present only while a comparison is loaded, and left out
+otherwise. Every change is the day on screen minus the compared close, exactly
+as the inspector's **Comparison** table computes it, and the compared close
+keeps its stored values; it is never rolled forward.
+
+The expected spot and profit are a projection from the recent spot trend, not a
+forecast, and nothing in the file is investment advice.
 
 ## Publish on GitHub Pages
 

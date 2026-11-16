@@ -993,6 +993,28 @@ canvas:focus-visible {
 .updated-block strong {
   font-weight: 400;
 }
+.board-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px 16px;
+}
+.download-button {
+  min-height: 36px;
+  padding: 6px 12px;
+  border: 3px outset var(--paper);
+  background: var(--paper);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.download-button:active {
+  border-style: inset;
+}
+.download-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
 .table-shell {
   overflow-x: auto;
 }
@@ -1205,7 +1227,7 @@ footer p {
     margin: 16px 12px;
   }
 }
-@media (max-width: 620px) {
+@media screen and (max-width: 620px) {
   .page-frame {
     margin: 8px;
   }
@@ -1389,6 +1411,9 @@ footer p {
   .contracts-heading .updated-block {
     align-items: flex-start;
   }
+  .board-actions {
+    justify-content: flex-start;
+  }
   table,
   tbody {
     display: block;
@@ -1538,5 +1563,160 @@ footer p {
   *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
+  }
+}
+
+/* Print: one dated page that explains itself. The header names the view, and
+   interactive-only controls drop out. Colours print as on screen, so white
+   text on black stays legible, and every distinction also holds in grey:
+   stale points are dotted and the comparison is dashed. */
+.print-header {
+  display: none;
+}
+@page {
+  margin: 15mm;
+}
+@media print {
+  html {
+    scroll-behavior: auto;
+  }
+  body {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .skip-link,
+  .header-meta,
+  .history-control,
+  .compare-control,
+  .live-button,
+  #selection-clear,
+  .board-actions .download-button,
+  .select-button,
+  .chart-tooltip,
+  .chart-marker,
+  .period-toggle,
+  .market-rail-label,
+  .market-options button[aria-pressed="false"] {
+    display: none !important;
+  }
+  /* Inset a little, so borders on the right edge aren't clipped. */
+  .page-frame {
+    max-width: none;
+    margin: 0;
+    padding: 0 2px;
+    border: 0;
+  }
+  .print-header {
+    display: block;
+    margin: 0 0 10px;
+    padding: 0 0 8px;
+    border-bottom: 3px solid var(--ink);
+    font: 11px/1.35 var(--serif);
+    break-inside: avoid;
+  }
+  .print-title {
+    margin: 0 0 6px;
+    font: 900 15px/1.1 var(--display);
+  }
+  .print-header dl {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 2px 12px;
+    margin: 0;
+  }
+  .print-header dl > div {
+    display: contents;
+  }
+  .print-header dt {
+    font: 700 9px/1.6 var(--sans);
+    text-transform: uppercase;
+  }
+  .print-header dd {
+    margin: 0;
+  }
+  .print-url {
+    overflow-wrap: anywhere;
+  }
+  .site-header {
+    padding: 8px 12px 10px;
+  }
+  .catalog-layout {
+    display: block;
+    padding: 12px 0 0;
+  }
+  .catalog-sidebar {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+    margin-bottom: 12px;
+    break-inside: avoid;
+  }
+  .catalog-note {
+    grid-column: 1 / -1;
+  }
+  .market-options button {
+    cursor: auto;
+  }
+  h1 {
+    font-size: 28px;
+  }
+  .section-heading,
+  .inspector-heading,
+  .selection-line,
+  .chart-legend {
+    break-after: avoid;
+  }
+  .curve-frame,
+  .yield-frame {
+    height: 240px;
+  }
+  /* Each chart prints whole, with its heading, key and readouts. */
+  .curve-section,
+  .yield-section,
+  .inspector,
+  .curve-frame,
+  .yield-frame,
+  .chart-legend,
+  .chart-key,
+  .stat-strip,
+  .yield-toolbar,
+  .yield-readouts,
+  .yield-footnote,
+  .carry-formulas,
+  .inspector-heading,
+  .inspector-group,
+  .table-footnote,
+  footer {
+    break-inside: avoid;
+  }
+  .carry-section,
+  .contracts-section {
+    margin: 12px 0;
+  }
+  /* Every column on the page: no sideways scroll, smaller type, tighter
+     cells, the header row on each page and no row split across two. */
+  .table-shell {
+    overflow: visible;
+  }
+  th,
+  th small {
+    font-size: 8px;
+  }
+  th {
+    padding: 6px 3px;
+  }
+  td {
+    padding: 5px 3px;
+    font-size: 9px;
+  }
+  .contract-name small,
+  .last-trade {
+    font-size: 8px;
+  }
+  thead {
+    display: table-header-group;
+  }
+  tr {
+    break-inside: avoid;
   }
 }

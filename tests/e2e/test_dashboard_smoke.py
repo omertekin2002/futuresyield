@@ -8,9 +8,11 @@ __init__.py, so `python -m unittest discover -s tests` never collects it.
 """
 
 import copy
+import csv
 from datetime import date, datetime, timedelta
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+import io
 import json
 import os
 from pathlib import Path
@@ -109,6 +111,55 @@ STALE_CHARTS = (
     ("#curve-chart", "#curve-key", "#curve-empty", "chartPoints"),
     ("#yield-chart", "#yield-key", "#yield-empty", "yieldChartPoints"),
 )
+# The board CSV's columns: always, with a carry table (USD/TRY), and with a
+# loaded comparison. "missing" always comes last.
+CSV_COLUMNS = [
+    "market", "view", "market_date", "snapshot_generated_at", "days_rolled_forward_from",
+    "spot", "spot_unit", "spot_time", "spot_source",
+    "maturity_month", "label", "symbol", "code", "maturity_date", "days_left",
+    "last", "change_percent", "bid", "ask", "volume", "last_trade_at", "stale",
+    "premium_percent", "yield_1d_percent", "yield_30d_percent", "yield_365d_percent",
+]
+CSV_CARRY_COLUMNS = ["expected_spot_at_maturity", "expected_short_profit_try"]
+CSV_COMPARE_COLUMNS = [
+    "compare_market_date", "compare_last", "compare_bid", "compare_ask",
+    "compare_last_trade_at", "compare_stale", "compare_spot", "compare_premium_percent",
+    "compare_days_left", "compare_yield_1d_percent", "compare_yield_30d_percent",
+    "compare_yield_365d_percent", "delta_price", "delta_spot", "delta_premium_pp",
+    "delta_days_left", "delta_yield_1d_pp", "delta_yield_30d_pp", "delta_yield_365d_pp",
+]
+# Each yield column of the CSV, the snapshot field it holds, its period and
+# the yield period button that shows it in the chart.
+CSV_YIELDS = (
+    ("1d", "daily_yield_percent", 1, "daily"),
+    ("30d", "monthly_yield_percent", 30, "monthly"),
+    ("365d", "annualized_yield_percent", 365, "annualized"),
+)
+# Columns that are never a missing value: context, and the reasons themselves.
+CSV_CONTEXT_COLUMNS = ("days_rolled_forward_from", "missing")
+# Printing. The content width of an A4 portrait page with the stylesheet's
+# 15 mm margins (210 mm - 30 mm, at 96 px per inch), and of US Letter's.
+A4_CONTENT_WIDTH = 680
+LETTER_CONTENT_WIDTH = 703
+# The print header's rows that are always shown, in order.
+PRINT_ROWS = ("Market", "View", "Yield period", "Page", "Printed")
+# Interactive-only controls that print drops.
+PRINT_HIDDEN = (
+    "#refresh-button", "#history-control", "#compare-control", "#live-button",
+    "#selection-clear", "#download-csv", "#print-page", "#chart-tooltip",
+    "#yield-tooltip", "#curve-marker", "#yield-marker", ".period-toggle",
+    ".select-button", '.market-options [aria-pressed="false"]',
+)
+# What a printout keeps: charts with their keys, tables, notes and disclaimer.
+PRINT_VISIBLE = (
+    "#print-header", "#curve-chart", "#yield-chart", "#curve-legend", "#yield-legend",
+    "#curve-key", "#yield-key", "#carry", "#contracts", ".yield-footnote",
+    "#carry-footnote", "#contracts .table-footnote", "footer .disclaimer",
+    '.market-options [aria-pressed="true"]',
+)
+# A sensible ceiling for one market's printout: the header, sidebar and
+# inspector, two charts, the carry table and the board.
+MAX_PRINTED_PAGES = 8
 NO_PRICE_MESSAGE = "No priced maturities to plot."
 NO_YIELD_MESSAGE = (
     "No maturities with a yield to plot: every listed contract matures today or has no price."
@@ -2633,6 +2684,595 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assertEqual(self.history_length(), length)
 
     # Accessibility: axe-core audit of each rendered state
+
+    # Downloading the contract board as CSV
+
+    def download_button(self):
+        return self.page.get_by_role("button", name=re.compile(r"^Download CSV"))
+
+    def download_csv(self, press=None):
+        """Download the board by click, or by pressing a key on the focused button.
+
+        Returns the suggested file name, the raw bytes and the parsed rows.
+        """
+        button = self.download_button()
+        expect(button).to_be_enabled()
+        with self.page.expect_download() as info:
+            if press:
+                button.focus()
+                self.page.keyboard.press(press)
+            else:
+                button.click()
+        download = info.value
+        raw = Path(download.path()).read_bytes()
+        return download.suggested_filename, raw, list(
+            csv.reader(io.StringIO(raw.decode("utf-8-sig"), newline=""))
+        )
+
+    def csv_rows(self, table):
+        header, *rows = table
+        return [dict(zip(header, row)) for row in rows]
+
+    def assert_csv_format(self, raw, table):
+        """UTF-8 with a BOM, CRLF records, one header and every row as wide."""
+        self.assertTrue(raw.startswith(b"\xef\xbb\xbf"), "no UTF-8 byte-order mark")
+        self.assertEqual(raw.count(b"\r\n"), len(table))
+        self.assertNotIn(b"\n", raw.replace(b"\r\n", b""))
+        self.assertTrue(all(len(row) == len(table[0]) for row in table))
+
+    def assert_missing_is_explained(self, rows):
+        """A row names a reason exactly when one of its values is empty."""
+        for row in rows:
+            empty = [
+                key for key, value in row.items()
+                if key not in CSV_CONTEXT_COLUMNS and value == ""
+            ]
+            with self.subTest(maturity=row["maturity_month"], empty=empty):
+                self.assertEqual(bool(row["missing"]), bool(empty))
+
+    def assert_csv_contract(self, row, contract):
+        """A row's stored contract values, in full precision."""
+        self.assertEqual(row["maturity_month"], contract["maturity_date"][:7])
+        for column, field in (
+            ("label", "label"), ("symbol", "symbol"), ("code", "code"),
+            ("maturity_date", "maturity_date"),
+        ):
+            self.assertEqual(row[column], contract[field])
+        for column, field in (
+            ("last", "last"), ("change_percent", "change_percent"), ("bid", "bid"),
+            ("ask", "ask"), ("volume", "volume"), ("premium_percent", "premium_percent"),
+        ):
+            with self.subTest(column=column):
+                value = contract.get(field)
+                if isinstance(value, (int, float)):
+                    self.assertEqual(float(row[column]), value)
+                else:
+                    self.assertEqual(row[column], "")
+
+    def test_csv_of_the_live_usdtry_board(self):
+        self.open_dashboard("?market=USDTRY")
+        button = self.download_button()
+        expect(button).to_have_accessible_name("Download CSV of the USD/TRY contract board")
+        name, raw, table = self.download_csv()
+        self.assertEqual(name, "vade-USDTRY-2026-10-07.csv")
+        self.assert_csv_format(raw, table)
+        self.assertEqual(table[0], CSV_COLUMNS + CSV_CARRY_COLUMNS + ["missing"])
+
+        market = self.snapshot["markets"]["USDTRY"]
+        rows = self.csv_rows(table)
+        self.assertEqual(len(rows), len(market["contracts"]))
+        # Board order.
+        self.assertEqual(
+            [row["label"] for row in rows],
+            [text.strip() for text in self.page.locator("#contract-rows strong").all_inner_texts()],
+        )
+        for row, contract in zip(rows, market["contracts"]):
+            stale = contract["symbol"] in STALE_TRADES
+            timed = contract["updated_at"] not in (None, self.snapshot["generated_at"])
+            with self.subTest(contract=contract["code"]):
+                self.assertEqual(row["market"], "USDTRY")
+                self.assertEqual(row["view"], "live")
+                self.assertEqual(row["market_date"], "2026-10-07")
+                self.assertEqual(row["snapshot_generated_at"], self.snapshot["generated_at"])
+                self.assertEqual(row["days_rolled_forward_from"], "")
+                self.assertEqual(float(row["spot"]), market["spot"]["last"])
+                self.assertEqual(row["spot_unit"], "TRY per USD")
+                self.assertEqual(row["spot_time"], market["spot"]["updated_at"])
+                self.assertEqual(row["spot_source"], market["spot"]["source"])
+                self.assertEqual(int(row["days_left"]), contract["days_to_maturity"])
+                self.assert_csv_contract(row, contract)
+                for period, field, _, _ in CSV_YIELDS:
+                    self.assertEqual(float(row[f"yield_{period}_percent"]), contract[field])
+                for field in CSV_CARRY_COLUMNS:
+                    if isinstance(contract.get(field), (int, float)):
+                        self.assertEqual(float(row[field]), contract[field])
+                    else:
+                        self.assertEqual(row[field], "")
+                # The board's stale rule, and a time only where the board shows one.
+                self.assertEqual(row["stale"], "true" if stale else "false")
+                if not timed:
+                    self.assertEqual(row["last_trade_at"], "")
+                    self.assertIn("no last trade time", row["missing"].split("; "))
+                else:
+                    self.assertEqual(row["last_trade_at"], contract["updated_at"])
+
+        by_code = {row["code"]: row for row in rows}
+        # Hand-checked rows.
+        front = by_code["F_USDTRY1026"]
+        self.assertEqual(front["last"], "50.083")
+        self.assertEqual(front["bid"], "50.082")
+        self.assertEqual(front["yield_365d_percent"], "32.83610915665602")
+        self.assertEqual(front["expected_short_profit_try"], "271.2229257931753")
+        self.assertEqual(front["last_trade_at"], "2026-10-07T13:49:00+03:00")
+        self.assertEqual(front["missing"], "")
+        # No bid: no profit either, and nothing filled in.
+        no_bid = by_code["F_USDTRY0827"]
+        self.assertEqual((no_bid["last"], no_bid["bid"], no_bid["ask"]), ("63.121", "", ""))
+        self.assertEqual((no_bid["volume"], no_bid["expected_short_profit_try"]), ("", ""))
+        self.assertEqual(no_bid["expected_spot_at_maturity"], "58.7461747709814")
+        self.assertEqual(
+            no_bid["missing"].split("; "),
+            ["no bid", "no ask", "no volume", "no last trade time", "no profit: no bid"],
+        )
+        stale = by_code["F_USDTRY0727"]
+        self.assertEqual((stale["stale"], stale["last_trade_at"]), ("true", "2026-10-06T18:07:00+03:00"))
+        # The board shows the same numbers, rounded.
+        for text, row in zip(self.column("#contract-rows", "Daily yield · 1D"), rows):
+            self.assertAlmostEqual(self.number(text), float(row["yield_1d_percent"]), delta=1e-4)
+        self.assert_missing_is_explained(rows)
+
+    def test_csv_of_markets_without_a_carry_table(self):
+        for key, unit in (("EURTRY", "TRY per EUR"), ("XAUTRY", "TRY per gram")):
+            with self.subTest(market=key):
+                self.open_dashboard(f"?market={key}")
+                market = self.snapshot["markets"][key]
+                expect(self.download_button()).to_have_accessible_name(
+                    f"Download CSV of the {market['pair']} contract board"
+                )
+                name, raw, table = self.download_csv()
+                self.assertEqual(name, f"vade-{key}-2026-10-07.csv")
+                self.assert_csv_format(raw, table)
+                # The USD/TRY carry columns are left out.
+                self.assertEqual(table[0], CSV_COLUMNS + ["missing"])
+                rows = self.csv_rows(table)
+                self.assertEqual(len(rows), len(market["contracts"]))
+                for row, contract in zip(rows, market["contracts"]):
+                    self.assertEqual((row["market"], row["spot_unit"]), (key, unit))
+                    self.assert_csv_contract(row, contract)
+                self.assert_missing_is_explained(rows)
+
+    def test_csv_of_a_rolled_forward_live_snapshot(self):
+        self.reopen_at(NEXT_DAY_TIME)
+        self.open_dashboard("?market=USDTRY")
+        self.assert_note("08 Oct 2026")
+        market = self.snapshot["markets"]["USDTRY"]
+        name, raw, table = self.download_csv()
+        self.assertEqual(name, "vade-USDTRY-2026-10-08.csv")
+        self.assert_csv_format(raw, table)
+        rows = self.csv_rows(table)
+        days = self.expected_days(market, date(2026, 10, 8))
+        self.assertEqual([int(row["days_left"]) for row in rows], days)
+        self.assertEqual(self.column("#contract-rows", "Days left"), [row["days_left"] for row in rows])
+        spot, trend = market["spot"]["last"], market["spot_trend"]["daily_factor"]
+        for row, contract, day in zip(rows, market["contracts"], days):
+            with self.subTest(contract=contract["code"]):
+                self.assertEqual(row["view"], "live")
+                self.assertEqual(row["market_date"], "2026-10-08")
+                self.assertEqual(row["days_rolled_forward_from"], "2026-10-07")
+                # Prices stay as published; days, yields and the projection move on.
+                self.assertEqual(float(row["last"]), contract["last"])
+                factor = (contract["last"] / spot) ** (1 / day)
+                for period, _, period_days, _ in CSV_YIELDS:
+                    self.assertAlmostEqual(
+                        float(row[f"yield_{period}_percent"]),
+                        (factor ** period_days - 1) * 100,
+                        places=9,
+                    )
+                self.assertAlmostEqual(
+                    float(row["expected_spot_at_maturity"]), spot * trend ** day, places=9,
+                )
+        self.assert_missing_is_explained(rows)
+
+    def test_csv_of_an_archived_close(self):
+        day = "2026-10-06"
+        self.open_day(day, "&market=USDTRY")
+        name, raw, table = self.download_csv()
+        self.assertEqual(name, f"vade-USDTRY-{day}.csv")
+        self.assert_csv_format(raw, table)
+        market = self.history[day]["markets"]["USDTRY"]
+        rows = self.csv_rows(table)
+        self.assertEqual(len(rows), len(market["contracts"]))
+        for row, contract in zip(rows, market["contracts"]):
+            with self.subTest(contract=contract["code"]):
+                self.assertEqual((row["view"], row["market_date"]), ("close", day))
+                self.assertEqual(row["days_rolled_forward_from"], "")
+                self.assertEqual(int(row["days_left"]), contract["days_to_maturity"])
+                self.assert_csv_contract(row, contract)
+                for period, field, _, _ in CSV_YIELDS:
+                    self.assertEqual(float(row[f"yield_{period}_percent"]), contract[field])
+        self.assert_missing_is_explained(rows)
+
+    def test_csv_with_a_comparison_matches_the_inspector(self):
+        day = "2026-10-06"
+        self.open_day(day, f"&compare={ROLLED_DAY}&market=USDTRY")
+        self.assert_comparing(ROLLED_DAY, HISTORY_LABELS[day])
+        name, raw, table = self.download_csv()
+        self.assertEqual(name, f"vade-USDTRY-{day}-vs-{ROLLED_DAY}.csv")
+        self.assert_csv_format(raw, table)
+        self.assertEqual(
+            table[0], CSV_COLUMNS + CSV_CARRY_COLUMNS + CSV_COMPARE_COLUMNS + ["missing"],
+        )
+        rows = {row["label"]: row for row in self.csv_rows(table)}
+        # Only the board's maturities: Sep 2026, listed only on the compared
+        # close, is not a row.
+        self.assertEqual(
+            list(rows), [c["label"] for c in self.history[day]["markets"]["USDTRY"]["contracts"]],
+        )
+
+        # Jan 2028 was not listed yet on the compared close.
+        unlisted = rows["Jan 2028"]
+        for column in CSV_COMPARE_COLUMNS:
+            self.assertEqual(unlisted[column], "", column)
+        self.assertEqual(unlisted["last"], str(self.history_contract(day, "Jan 2028")[1]["last"]))
+        self.assertIn(f"not listed on {ROLLED_DAY}", unlisted["missing"].split("; "))
+
+        (now_market, now), (then_market, then) = (
+            self.history_contract(day, "Dec 2026"), self.history_contract(ROLLED_DAY, "Dec 2026"),
+        )
+        row = rows["Dec 2026"]
+        self.assertEqual(row["compare_market_date"], ROLLED_DAY)
+        self.assertEqual(float(row["compare_last"]), then["last"])
+        self.assertEqual(float(row["compare_spot"]), then_market["spot"]["last"])
+        self.assertEqual(int(row["compare_days_left"]), then["days_to_maturity"])
+        self.assertEqual(
+            int(row["delta_days_left"]), now["days_to_maturity"] - then["days_to_maturity"],
+        )
+        self.assertAlmostEqual(float(row["delta_price"]), now["last"] - then["last"], places=12)
+        self.assertAlmostEqual(
+            float(row["delta_spot"]), now_market["spot"]["last"] - then_market["spot"]["last"],
+            places=12,
+        )
+        self.assertAlmostEqual(
+            float(row["delta_premium_pp"]), now["premium_percent"] - then["premium_percent"],
+            places=12,
+        )
+        # Each period's change is the inspector's, in full precision.
+        self.select_button("Dec 2026").click()
+        self.assert_selected("Dec 2026")
+        for period, field, _, button in CSV_YIELDS:
+            with self.subTest(period=period):
+                self.assertEqual(float(row[f"compare_yield_{period}_percent"]), then[field])
+                delta = float(row[f"delta_yield_{period}_pp"])
+                self.assertAlmostEqual(delta, now[field] - then[field], places=12)
+                self.page.locator(f'[data-yield-period="{button}"]').click()
+                self.assert_period(button)
+                digits = next(c[3] for c in YIELD_COLUMNS if c[1] == field)
+                self.assertEqual(self.comparison_texts("change")["yield"], f"{delta:+.{digits}f} pp")
+        self.assert_missing_is_explained(rows.values())
+
+    def test_csv_without_the_compared_market_says_why(self):
+        compared = "2026-09-30"
+        thin = copy.deepcopy(self.history[compared])
+        del thin["markets"]["EURTRY"]
+        thin["market_order"].remove("EURTRY")
+        self.serve_snapshot(re.compile(rf"/data/history/{compared}\.json"), thin)
+        self.open_dashboard(f"?compare={compared}&market=EURTRY")
+        expect(self.page.locator("#curve-legend")).to_contain_text("no EUR/TRY data")
+        name, _, table = self.download_csv()
+        self.assertEqual(name, f"vade-EURTRY-2026-10-07-vs-{compared}.csv")
+        self.assertEqual(table[0], CSV_COLUMNS + CSV_COMPARE_COLUMNS + ["missing"])
+        for row in self.csv_rows(table):
+            self.assertEqual([row[column] for column in CSV_COMPARE_COLUMNS],
+                             [""] * len(CSV_COMPARE_COLUMNS))
+            self.assertIn(f"no EUR/TRY data on {compared}", row["missing"].split("; "))
+
+    def test_csv_quotes_fields_and_guards_formulas(self):
+        self.open_dashboard("?market=USDTRY")
+        cases = [
+            ["=1+2", "'=1+2"], ["+1", "'+1"], ["-1", "'-1"], ["@SUM(A1)", "'@SUM(A1)"],
+            ["\tx", "'\tx"], ["\rx", "\"'\rx\""], ["\n=1+1", "\"'\n=1+1\""],
+            ["a,b", '"a,b"'],
+            ['say "hi"', '"say ""hi"""'], ["two\nlines", '"two\nlines"'],
+            ["İstanbul", "İstanbul"], [-1.5, "-1.5"], [0.1 + 0.2, "0.30000000000000004"],
+            [None, ""], [float("nan"), ""], [True, "true"], [False, "false"],
+        ]
+        encoded = self.page.evaluate(
+            "(cases) => cases.map(([value]) => csvField(value === 'NaN' ? NaN : value))",
+            [[("NaN" if isinstance(v, float) and v != v else v), e] for v, e in cases],
+        )
+        self.assertEqual(encoded, [expected for _, expected in cases])
+
+        # A snapshot string that needs both, end to end.
+        snapshot = copy.deepcopy(self.snapshot)
+        label = '=HYPERLINK("http://example.invalid"), "x"'
+        snapshot["markets"]["USDTRY"]["contracts"][0]["label"] = label
+        snapshot["markets"]["USDTRY"]["contracts"][0]["change_percent"] = -0.01
+        self.serve_snapshot(re.compile(r"/data/market\.json"), snapshot)
+        self.open_dashboard("?market=USDTRY")
+        _, raw, table = self.download_csv()
+        self.assertIn(b'"\'=HYPERLINK(""http://example.invalid""), ""x"""', raw)
+        front = self.csv_rows(table)[0]
+        self.assertEqual(front["label"], "'" + label)
+        # Negative numbers stay numeric.
+        self.assertEqual(front["change_percent"], "-0.01")
+
+    def test_csv_button_is_keyboard_operable_on_a_phone(self):
+        self.reopen_at(FIXTURE_DAY_TIME, viewport=MOBILE_VIEWPORT)
+        self.open_dashboard("?market=USDTRY")
+        button = self.download_button()
+        expect(button).to_be_visible()
+        box = button.bounding_box()
+        self.assertGreaterEqual(box["x"], 0)
+        self.assertLessEqual(box["x"] + box["width"], MOBILE_VIEWPORT["width"])
+        self.assert_no_sideways_scroll()
+        for key in ("Enter", " "):
+            with self.subTest(key=key):
+                name, _, table = self.download_csv(press=key)
+                self.assertEqual(name, "vade-USDTRY-2026-10-07.csv")
+                self.assertEqual(len(table), len(self.snapshot["markets"]["USDTRY"]["contracts"]) + 1)
+
+    def test_csv_button_waits_for_data(self):
+        unknown = copy.deepcopy(self.snapshot)
+        unknown["schema_version"] = 5
+        self.serve_snapshot(re.compile(r"/data/market\.json"), unknown)
+        self.page.goto(self.base_url)
+        expect(self.page.locator("#data-state")).to_have_class(re.compile(r"\bis-error\b"))
+        self.expect_load_errors(1)
+        expect(self.download_button()).to_be_disabled()
+
+    # Printing the dashboard
+
+    def print_row(self, term):
+        """The print header's value for term, or None when its row is hidden."""
+        row = self.page.locator("#print-header dl > div").filter(
+            has=self.page.locator("dt", has_text=re.compile(f"^{re.escape(term)}$"))
+        )
+        expect(row).to_have_count(1)
+        return row.locator("dd").inner_text().strip() if row.is_visible() else None
+
+    def print_media(self, width=None):
+        """Lay the page out for print, optionally at a page's content width.
+
+        Emulating the media applies the print styles at once, but sends no
+        beforeprint: the page learns of it from its media query's change event,
+        a frame later. Until then the header is visible and not yet filled, so
+        return only once that event has been delivered.
+        """
+        if width:
+            self.page.set_viewport_size({"width": width, "height": 1000})
+        self.page.evaluate(
+            """() => {
+              const query = window.matchMedia('print');
+              window.printMediaDelivered = query.matches;
+              if (!query.matches) {
+                query.addEventListener(
+                  'change',
+                  () => { window.printMediaDelivered = true; },
+                  { once: true },
+                );
+              }
+            }"""
+        )
+        self.page.emulate_media(media="print")
+        # Change events reach every listener in one task, app.js's included.
+        self.page.wait_for_function("() => window.printMediaDelivered === true")
+        expect(self.page.locator("#print-header")).to_be_visible()
+
+    def assert_print_header(self, view, compare=None, maturity=None, period="daily", note=None):
+        self.print_media()
+        expect(self.page.locator("#print-header dt")).to_have_count(8)
+        for term in PRINT_ROWS:
+            self.assertTrue(self.print_row(term), term)
+        self.assertEqual(
+            self.print_row("Market"),
+            "USD/TRY · spot in TRY per USD · curve in TRY / USD",
+        )
+        self.assertEqual(self.print_row("View"), view)
+        self.assertEqual(self.print_row("Compared with"), compare)
+        self.assertEqual(self.print_row("Selected maturity"), maturity)
+        self.assertEqual(self.print_row("Yield period"), YIELD_PERIOD_LABELS[period])
+        self.assertEqual(self.print_row("Note"), note)
+        self.assertEqual(self.print_row("Page"), self.page.url)
+        self.assertEqual(self.print_row("Printed"), "07 Oct 2026, 23:00 TRT")
+        expect(self.page.locator(".print-title")).to_have_text("VADE · VİOP futures, USD/TRY")
+
+    def pdf_pages(self, **options):
+        pdf = self.page.pdf(format="A4", **options)
+        self.assertTrue(pdf.startswith(b"%PDF"))
+        return len(re.findall(rb"/Type\s*/Page(?![a-zA-Z])", pdf))
+
+    def test_print_button_opens_the_print_dialog(self):
+        self.open_dashboard("?market=USDTRY")
+        self.page.evaluate("() => { window.print = () => { window.printed = (window.printed ?? 0) + 1; }; }")
+        button = self.page.get_by_role("button", name="Print this page", exact=True)
+        expect(button).to_be_visible()
+        expect(button).to_have_accessible_description(re.compile(r"print dialog"))
+        # Beside Download CSV, in the board's heading.
+        expect(self.page.locator(".board-actions #download-csv + .sr-only + #print-page")).to_have_count(1)
+        button.click()
+        self.assertEqual(self.page.evaluate("window.printed"), 1)
+        for key in ("Enter", " "):
+            button.focus()
+            self.page.keyboard.press(key)
+        self.assertEqual(self.page.evaluate("window.printed"), 3)
+
+    def test_print_header_is_not_on_screen_or_in_the_accessibility_tree(self):
+        self.open_dashboard("?market=USDTRY&maturity=2026-12&compare=2026-09-30")
+        header = self.page.locator("#print-header")
+        expect(header).to_be_hidden()
+        self.assertEqual(header.evaluate("(node) => getComputedStyle(node).display"), "none")
+        # Filled once printing starts, and still hidden on screen afterwards.
+        self.page.evaluate("() => window.dispatchEvent(new Event('beforeprint'))")
+        expect(self.page.locator("#print-view")).to_contain_text("Live snapshot taken")
+        expect(header).to_be_hidden()
+        tree = self.page.locator("body").aria_snapshot()
+        for text in ("Live snapshot taken", "Printed", "VADE · VİOP futures"):
+            self.assertNotIn(text, tree)
+        self.assert_no_sideways_scroll()
+
+    def test_print_header_of_the_live_view(self):
+        self.open_dashboard("?market=USDTRY")
+        self.assert_print_header(
+            "Live snapshot taken 07 Oct 2026, 14:06 TRT (Europe/Istanbul). "
+            "Live values change on every refresh."
+        )
+
+    def test_print_header_of_an_archived_close(self):
+        self.open_day("2026-10-06", "&market=USDTRY")
+        self.assert_print_header("Archived close of 06 Oct 2026")
+        # The past-close banner still prints, without its button.
+        expect(self.page.locator("#history-banner")).to_be_visible()
+        expect(self.page.locator("#live-button")).to_be_hidden()
+
+    def test_print_header_of_a_comparison_with_a_maturity_and_period(self):
+        query = "?market=USDTRY&compare=2026-09-30&maturity=2026-12&period=annualized"
+        for day in (None, "2026-10-06"):
+            with self.subTest(day=day):
+                if day:
+                    self.open_day(day, "&" + query[1:])
+                else:
+                    self.open_dashboard(query)
+                self.assert_comparing("2026-09-30", current=HISTORY_LABELS[day] if day else LIVE_LABEL)
+                self.assert_selected("Dec 2026")
+                self.assert_print_header(
+                    f"Archived close of {HISTORY_LABELS[day]}" if day else (
+                        "Live snapshot taken 07 Oct 2026, 14:06 TRT (Europe/Istanbul). "
+                        "Live values change on every refresh."
+                    ),
+                    compare="Close of 30 Sept 2026",
+                    maturity=f"Dec 2026 · {self.contract('Dec 2026')['code']}",
+                    period="annualized",
+                )
+                self.page.emulate_media(media="screen")
+
+    def test_print_header_waits_for_the_compared_snapshot(self):
+        day = "2026-09-30"
+        view = (
+            "Live snapshot taken 07 Oct 2026, 14:06 TRT (Europe/Istanbul). "
+            "Live values change on every refresh."
+        )
+        for missing_market in (False, True):
+            with self.subTest(missing_market=missing_market):
+                self.page.emulate_media(media="screen")
+                self.open_dashboard("?market=USDTRY")
+                snapshot = copy.deepcopy(self.history[day])
+                if missing_market:
+                    del snapshot["markets"]["USDTRY"]
+                    snapshot["market_order"].remove("USDTRY")
+                pending = []
+                pattern = re.compile(rf"/data/history/{day}\.json$")
+                # Keep the archive request pending until after the first print:
+                # its selected date is already in the URL, but no overlay exists.
+                self.page.route(pattern, lambda route: pending.append(route))
+                with self.page.expect_request(pattern):
+                    self.compare_select().select_option(day)
+                expect(self.compare_select()).to_have_value(day)
+                expect(self.page.locator("#curve-legend")).to_be_hidden()
+                self.assertIn(f"compare={day}", self.page.url)
+                self.page.evaluate("() => window.dispatchEvent(new Event('beforeprint'))")
+                self.assert_print_header(view)
+
+                self.assertEqual(len(pending), 1)
+                pending.pop().fulfill(
+                    status=200, content_type="application/json", body=json.dumps(snapshot)
+                )
+                if missing_market:
+                    expect(self.page.locator("#curve-legend")).to_contain_text("no USD/TRY data")
+                else:
+                    self.assert_comparing(day)
+                self.page.evaluate("() => window.dispatchEvent(new Event('beforeprint'))")
+                self.assert_print_header(
+                    view,
+                    compare="Close of 30 Sept 2026" + (" · no USD/TRY data" if missing_market else ""),
+                )
+                self.page.unroute(pattern)
+
+    def test_print_header_keeps_the_rolled_forward_note_and_the_print_time(self):
+        self.reopen_at(NEXT_DAY_TIME)
+        self.open_dashboard("?market=USDTRY")
+        note = self.page.locator("#days-note")
+        expect(note).to_be_visible()
+        self.print_media()
+        self.assertEqual(self.print_row("Note"), note.inner_text().strip())
+        self.assertEqual(self.print_row("Printed"), "08 Oct 2026, 10:00 TRT")
+        # The print time is taken when printing starts, not when the page loaded.
+        self.page.clock.set_fixed_time(NEXT_DAY_TIME + timedelta(minutes=95))
+        self.page.evaluate("() => window.dispatchEvent(new Event('beforeprint'))")
+        self.assertEqual(self.print_row("Printed"), "08 Oct 2026, 11:35 TRT")
+
+    def test_print_hides_controls_and_keeps_charts_tables_and_notes(self):
+        self.open_dashboard("?market=USDTRY&compare=2026-09-30&maturity=2026-12")
+        self.assert_comparing("2026-09-30")
+        # A tooltip and a keyboard marker that were showing are dropped too.
+        self.tab_to("#curve-chart")
+        self.page.keyboard.press("ArrowRight")
+        expect(self.page.locator("#curve-marker")).to_be_visible()
+        self.print_media(A4_CONTENT_WIDTH)
+        for selector in PRINT_HIDDEN:
+            with self.subTest(hidden=selector):
+                locator = self.page.locator(selector)
+                for index in range(locator.count()):
+                    expect(locator.nth(index)).to_be_hidden()
+        for selector in PRINT_VISIBLE + ("#inspector", "#inspector-compare-table"):
+            with self.subTest(visible=selector):
+                expect(self.page.locator(selector)).to_be_visible()
+        expect(self.page.locator("footer .disclaimer")).to_contain_text("not investment advice")
+        # Charts redraw at the printed width, so they print undistorted.
+        for canvas in ("#curve-chart", "#yield-chart"):
+            with self.subTest(canvas=canvas):
+                self.page.wait_for_function(
+                    """(selector) => {
+                      const canvas = document.querySelector(selector);
+                      const box = canvas.getBoundingClientRect();
+                      return canvas.width === Math.round(box.width) && canvas.height === Math.round(box.height);
+                    }""",
+                    arg=canvas,
+                )
+                self.assertLessEqual(
+                    self.page.locator(canvas).bounding_box()["width"], A4_CONTENT_WIDTH
+                )
+
+    def test_print_fits_every_table_column_on_the_page(self):
+        for width in (A4_CONTENT_WIDTH, LETTER_CONTENT_WIDTH):
+            for query in ("?market=USDTRY&maturity=2026-12&compare=2026-09-30", "?market=EURTRY"):
+                with self.subTest(width=width, query=query):
+                    self.open_dashboard(query)
+                    self.print_media(width)
+                    shells = self.page.evaluate(
+                        """() => [...document.querySelectorAll('.table-shell, .inspector-compare-table')]
+                          .filter((node) => node.offsetParent !== null)
+                          .map((node) => ({
+                            scroll: node.scrollWidth,
+                            client: node.clientWidth,
+                            table: (node.querySelector('table') ?? node).getBoundingClientRect().right,
+                            right: node.getBoundingClientRect().right,
+                          }))"""
+                    )
+                    self.assertGreaterEqual(len(shells), 2 if "USDTRY" in query else 1)
+                    for shell in shells:
+                        self.assertLessEqual(shell["scroll"], shell["client"], shell)
+                        self.assertLessEqual(shell["table"], shell["right"] + 0.5, shell)
+                    self.assert_no_sideways_scroll()
+                    self.page.emulate_media(media="screen")
+
+    def test_print_keeps_table_structure_and_catalog_note_at_narrow_page_width(self):
+        self.open_dashboard("?market=USDTRY")
+        self.print_media(600)
+        expect(self.page.locator(".catalog-note")).to_be_visible()
+        table = self.page.locator("#contracts table")
+        self.assertEqual(table.evaluate("node => getComputedStyle(node).display"), "table")
+        self.assertEqual(table.locator("tbody").evaluate("node => getComputedStyle(node).display"), "table-row-group")
+
+    def test_print_to_pdf_of_a_live_and_a_comparison_view(self):
+        for query in ("?market=USDTRY", "?market=USDTRY&compare=2026-09-30&maturity=2026-12&period=annualized"):
+            with self.subTest(query=query):
+                self.open_dashboard(query)
+                pages = self.pdf_pages()
+                self.assertGreaterEqual(pages, 2)
+                self.assertLessEqual(pages, MAX_PRINTED_PAGES)
+                # Printing leaves the screen as it was.
+                expect(self.page.locator("#print-header")).to_be_hidden()
+                expect(self.page.locator("#refresh-button")).to_be_visible()
 
     def assert_accessible(self, state):
         """Fail with every serious or critical WCAG 2.1 A/AA violation on the page."""
