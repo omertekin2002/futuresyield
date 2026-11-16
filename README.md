@@ -24,6 +24,11 @@ redeployed by GitHub Actions every hour during VİOP trading hours on weekdays,
 - Any archived end-of-day close, browsable from the **View** menu
 - Any earlier archived close overlaid on both curves, with price and yield deltas
 - A **Download CSV** of the contract board, with the compared close when one is on
+- A **Print** layout, from the button beside it or the browser's own print
+  command: a header names the market, the live snapshot time or archived
+  close, any compared close, selected maturity and yield period, the page
+  link and the print time; controls drop out and every table column fits
+  an A4 or Letter page
 
 Maturity is calculated as the final **full** Turkish business day of each
 contract month. Weekends, public holidays, and half-day official holidays are

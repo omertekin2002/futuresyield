@@ -96,6 +96,19 @@ const elements = {
   inspectorCompareRows: document.querySelector("#inspector-compare-rows"),
   downloadCsv: document.querySelector("#download-csv"),
   downloadCsvName: document.querySelector("#download-csv-name"),
+  printPage: document.querySelector("#print-page"),
+  printPair: document.querySelector("#print-pair"),
+  printMarket: document.querySelector("#print-market"),
+  printView: document.querySelector("#print-view"),
+  printCompareRow: document.querySelector("#print-compare-row"),
+  printCompare: document.querySelector("#print-compare"),
+  printMaturityRow: document.querySelector("#print-maturity-row"),
+  printMaturity: document.querySelector("#print-maturity"),
+  printPeriod: document.querySelector("#print-period"),
+  printNoteRow: document.querySelector("#print-note-row"),
+  printNote: document.querySelector("#print-note"),
+  printUrl: document.querySelector("#print-url"),
+  printTime: document.querySelector("#print-time"),
 };
 
 const state = {
@@ -201,6 +214,17 @@ const dateTimeFormat = new Intl.DateTimeFormat("en-GB", {
 });
 
 // A contract's last trade: "27 Oct" and "18:07", in Istanbul time.
+// A full Istanbul date and time, for the print header: "07 Oct 2026, 23:30".
+const stampFormat = new Intl.DateTimeFormat("en-GB", {
+  day: "2-digit",
+  month: "short",
+  year: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+  timeZone: ISTANBUL_TIMEZONE,
+});
+
 const tradeDayFormat = new Intl.DateTimeFormat("en-GB", {
   day: "2-digit",
   month: "short",
@@ -1524,6 +1548,49 @@ function downloadBoardCsv() {
   window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
+// The print-only header: what the page shows, as the CSV's context columns
+// do, so a printout explains itself. Snapshot strings go in as text.
+function renderPrintHeader() {
+  const data = state.data;
+  const snapshot = state.snapshot;
+  elements.printPair.textContent = data?.pair ?? "—";
+  elements.printMarket.textContent = data
+    ? `${data.pair} · spot in ${data.spot_unit} · curve in ${data.curve_unit}`
+    : "—";
+
+  if (!snapshot) {
+    elements.printView.textContent = "No market data loaded.";
+  } else if (state.renderedDate) {
+    elements.printView.textContent = `Archived close of ${formatDay(state.renderedDate)}`;
+  } else {
+    const taken = new Date(snapshot.generated_at);
+    const time = Number.isNaN(taken.getTime()) ? "at an unknown time" : `${stampFormat.format(taken)} TRT`;
+    elements.printView.textContent =
+      `Live snapshot taken ${time} (Europe/Istanbul). Live values change on every refresh.`;
+  }
+
+  const compared = Boolean(state.compareDate);
+  elements.printCompareRow.hidden = !compared;
+  elements.printCompare.textContent = compared
+    ? `Close of ${formatDay(state.compareDate)}` +
+      (state.compareSnapshot && data && !comparisonMarket() ? ` · no ${data.pair} data` : "")
+    : "";
+
+  const contract = selectedContract();
+  elements.printMaturityRow.hidden = !contract;
+  elements.printMaturity.textContent = contract ? `${contract.label} · ${contract.code}` : "";
+
+  const period = YIELD_PERIODS[state.yieldPeriod];
+  elements.printPeriod.textContent = `${period.label} · ${period.shortLabel}`;
+
+  const note = snapshot ? daysNoteText(snapshot) : "";
+  elements.printNoteRow.hidden = !note;
+  elements.printNote.textContent = note;
+
+  elements.printUrl.textContent = window.location.href;
+  elements.printTime.textContent = `${stampFormat.format(new Date())} TRT`;
+}
+
 function setSelection(key) {
   if (key === state.selectedKey) return;
   updateSelection(key);
@@ -2366,6 +2433,18 @@ elements.marketButtons.forEach((button) => {
 });
 
 elements.downloadCsv.addEventListener("click", downloadBoardCsv);
+
+// The button and the browser's own print command print the same page: both
+// fill the header as printing starts, and the charts redraw at the printed
+// width once the print styles apply, then again at the screen's afterwards.
+elements.printPage.addEventListener("click", () => window.print());
+window.addEventListener("beforeprint", renderPrintHeader);
+window.matchMedia("print").addEventListener("change", (event) => {
+  if (event.matches) renderPrintHeader();
+  elements.tooltip.hidden = true;
+  elements.yieldTooltip.hidden = true;
+  renderCharts();
+});
 
 elements.rows.addEventListener("click", (event) => {
   const button = event.target.closest(".select-button");
