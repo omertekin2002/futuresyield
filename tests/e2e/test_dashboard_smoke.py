@@ -2704,6 +2704,26 @@ class DashboardSmokeTests(unittest.TestCase):
             day,
         )
 
+    def test_history_links_follow_the_comparison(self):
+        self.open_dashboard("?market=USDTRY&maturity=2028-01")
+        self.load_history(len(HISTORY_FIXTURE))
+        def compare_params():
+            return {
+                row["day"]: dict(parse_qsl(row["href"].lstrip("?"))).get("compare")
+                for row in self.history_rows() if row["href"]
+            }
+        self.assertEqual(set(compare_params().values()), {None})
+        # Only closes later than the comparison carry it.
+        self.choose_compare("2026-09-30")
+        self.assert_comparing("2026-09-30")
+        self.assertEqual(compare_params(), {
+            "2026-10-06": "2026-09-30", "2026-10-05": "2026-09-30", "2026-09-30": None,
+            NO_PRICE_DAY: None, ROLLED_DAY: None,
+        })
+        self.compare_select().select_option("")
+        self.assert_not_comparing()
+        self.assertEqual(set(compare_params().values()), {None})
+
     def test_history_link_works_as_a_shared_url(self):
         self.open_dashboard("?market=USDTRY&maturity=2028-01")
         self.load_history(len(HISTORY_FIXTURE))

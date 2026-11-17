@@ -2571,6 +2571,8 @@ function renderComparison() {
   elements.yieldTooltip.hidden = true;
   renderComparisonLegends();
   renderInspectorComparison(selectedContract());
+  // The History links carry the comparison, so they follow it too.
+  renderInspectorHistory(selectedContract());
   renderCharts();
 }
 
