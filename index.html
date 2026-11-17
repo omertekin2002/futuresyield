@@ -271,6 +271,41 @@
                     <tbody id="inspector-compare-rows"></tbody>
                   </table>
                 </div>
+                <div
+                  class="inspector-group inspector-history"
+                  id="inspector-history-group"
+                  hidden
+                >
+                  <h3 id="inspector-history-title">History</h3>
+                  <p class="inspector-history-note" id="inspector-history-note"></p>
+                  <button type="button" class="history-load" id="history-load"></button>
+                  <p
+                    class="inspector-history-status"
+                    id="inspector-history-status"
+                    aria-live="polite"
+                    tabindex="-1"
+                  ></p>
+                  <p
+                    class="inspector-history-coverage"
+                    id="inspector-history-coverage"
+                    hidden
+                  ></p>
+                  <div
+                    class="inspector-history-scroll"
+                    id="inspector-history-scroll"
+                    role="region"
+                    aria-labelledby="inspector-history-title"
+                    tabindex="0"
+                    hidden
+                  >
+                    <table class="inspector-history-table" aria-labelledby="inspector-history-title">
+                      <thead>
+                        <tr id="inspector-history-head"></tr>
+                      </thead>
+                      <tbody id="inspector-history-rows"></tbody>
+                    </table>
+                  </div>
+                </div>
               </div>
             </section>
 

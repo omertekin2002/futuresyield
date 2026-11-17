@@ -23,6 +23,8 @@ redeployed by GitHub Actions every hour during VİOP trading hours on weekdays,
 - Snapshot age, delayed-data and market-closed states, and one-click refresh
 - Any archived end-of-day close, browsable from the **View** menu
 - Any earlier archived close overlaid on both curves, with price and yield deltas
+- One exact contract's archived closes as a **History** table in the inspector,
+  loaded on demand, with every missing value and capture gap shown as such
 - A **Download CSV** of the contract board, with the compared close when one is on
 - A **Print** layout, from the button beside it or the browser's own print
   command: a header names the market, the live snapshot time or archived
@@ -173,6 +175,10 @@ board) from that day's snapshot, for every market.
   `_site/data/history/`, so the files are served from the same origin. A close
   archived by a run appears in the next run's deploy. Without the branch the
   site ships an empty manifest and the menu stays hidden.
+- **One contract across the archive.** With a maturity selected, the
+  inspector's **History** group lists that exact contract on every archived
+  close up to the day on screen, each date linking to that close. See
+  **Inspector** below.
 
 ### Comparing two closes
 
@@ -459,6 +465,40 @@ unusual point can be checked without reading across the board:
   and shows no changes. A side without a price or a yield shows "—" with the
   same reason as above, and that row's change is "—". Only observed values
   and differences are shown; nothing splits a change into causes.
+- **History,** whenever the site has archived closes: the selected contract on
+  every archived close up to and including the day on screen, newest first,
+  so one contract, such as `USDTRYZ2026`, can be followed across the archive.
+  Nothing is fetched until you press **Load history**, which names how many
+  closes it will load. They are then fetched a few at a time and kept in
+  memory, so switching the yield period, the selection or the market never
+  fetches them again, and opening a close from the table reuses its file.
+  - **Identity.** Rows are matched by the selected contract's exact VİOP
+    symbol in the market on screen. Another contract, such as the next
+    front month, is never stitched into the series.
+  - **Rows.** Each close shows its last price, premium, the yield for the
+    period the chart shows, days left and last trade with the **stale** tag,
+    each as that close's own snapshot stored or worked them out (its own spot,
+    days left and latest quote day). The live view adds itself as the top
+    row, labelled **Live**; a past close's own row is labelled **On screen**.
+    Closes after the day on screen are left out. A coverage line above the
+    table counts the archived closes with a price, for example "Observed with
+    a price on 12 of 15 archived closes, 26 Oct 2026 – 16 Nov 2026".
+  - **Missing values,** each with its own text and never filled in or
+    interpolated: **Not listed on this close** (the contract wasn't listed
+    yet, or no longer); **Listed, no price** (listed with no last price, so
+    the premium and yield cells are empty); **Could not be loaded** with the
+    reason, while the other closes still render; and **No archived close for
+    N weekdays (a holiday or a missed capture)** between two closes that
+    have weekdays between them. The archive doesn't say which of the two a
+    gap is, so the table doesn't either, and gaps are never backfilled.
+  - **Links.** Each date opens that close's full dashboard with the same
+    market, maturity and yield period
+    (`?date=YYYY-MM-DD&market=…&maturity=YYYY-MM&period=…`, plus the
+    comparison while it is earlier than that close). A plain click opens it
+    in place, as the **View** menu does; the day on screen isn't a link.
+  - **Layout.** It stays a real table with column and row headers at every
+    width, and scrolls sideways inside its own frame on a phone. Once
+    loaded, it prints with the inspector; the button never prints.
 
 Every value is the one the board, the carry table and the chart tooltips show.
 Nothing missing is filled in: without a bid there is no profit, a contract
