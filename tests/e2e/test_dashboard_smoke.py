@@ -2784,6 +2784,7 @@ class DashboardSmokeTests(unittest.TestCase):
         self.print_media(A4_CONTENT_WIDTH)
         expect(self.page.locator("#inspector")).to_be_visible()
         expect(self.page.locator("#inspector-history-group")).to_be_hidden()
+        expect(self.page.locator("#history-chart")).to_be_hidden()
         self.page.emulate_media(media="screen")
         self.page.set_viewport_size({"width": 1280, "height": 900})
         self.load_history(len(HISTORY_FIXTURE))
@@ -2793,6 +2794,15 @@ class DashboardSmokeTests(unittest.TestCase):
         expect(self.page.locator("#inspector-history-status")).to_be_hidden()
         table = self.page.locator(".inspector-history-table").bounding_box()
         self.assertLessEqual(table["width"], A4_CONTENT_WIDTH)
+        # The chart prints with the table, redrawn at the page's width.
+        expect(self.page.locator("#history-chart")).to_be_visible()
+        for selector in ("#history-chart", "#history-chart-svg"):
+            box = self.page.locator(selector).bounding_box()
+            self.assertLessEqual(box["x"] + box["width"], A4_CONTENT_WIDTH, selector)
+        self.assertLessEqual(
+            float(self.page.locator("#history-chart-svg").get_attribute("viewBox").split()[2]),
+            A4_CONTENT_WIDTH,
+        )
 
     @unittest.skipIf(Axe is None, "axe-playwright-python is not installed")
     def test_accessibility_of_the_history_table(self):
@@ -2802,8 +2812,304 @@ class DashboardSmokeTests(unittest.TestCase):
                     self.reopen_at(FIXTURE_DAY_TIME, viewport=viewport)
                 self.open_dashboard("?market=USDTRY&maturity=2028-01")
                 self.load_history(len(HISTORY_FIXTURE))
+                expect(self.page.locator("#history-chart")).to_be_visible()
                 self.assert_no_sideways_scroll()
                 self.assert_accessible(f"history table at {viewport or 'desktop'}")
+                # With a point focused, too.
+                self.page.locator("#history-chart-svg a").first.focus()
+                self.assert_accessible(f"history chart point at {viewport or 'desktop'}")
+
+    # The History chart: the same closes as the table, on a calendar-time axis
+
+    def history_chart(self):
+        """The chart's points, line runs, missing marks and gap bands."""
+        return self.page.evaluate(
+            """() => {
+                const svg = document.querySelector('#history-chart-svg');
+                const centre = (node) => {
+                    const box = node.getBBox();
+                    return box.x + box.width / 2;
+                };
+                return {
+                    points: [...svg.querySelectorAll('.history-point')].map((node) => {
+                        const marker = node.querySelector('.history-marker');
+                        return {
+                            day: node.dataset.historyDay,
+                            link: node.tagName === 'a',
+                            href: node.getAttribute('href'),
+                            name: node.getAttribute('aria-label'),
+                            onScreen: node.classList.contains('is-on-screen'),
+                            shape: marker.tagName,
+                            stale: marker.classList.contains('is-stale'),
+                            halo: Boolean(node.querySelector('.history-halo')),
+                            label: node.querySelector('.history-on-screen-label')?.textContent ?? null,
+                            x: centre(marker),
+                        };
+                    }),
+                    runs: [...svg.querySelectorAll('.history-lines polyline')].map(
+                        (line) => line.dataset.days.split(' ')
+                    ),
+                    marks: Object.fromEntries([...svg.querySelectorAll('.history-missing-mark')].map(
+                        (mark) => [mark.dataset.historyDay, mark.dataset.state]
+                    )),
+                    gaps: [...svg.querySelectorAll('rect[data-gap]')].map((band) => Number(band.dataset.gap)),
+                };
+            }"""
+        )
+
+    def history_yield_cells(self):
+        """Each History row's yield cell, by date, for priced rows."""
+        return {
+            row["day"]: row["cells"][2]
+            for row in self.history_rows()
+            if row["state"] == "listed" and row["cells"][0] != "Listed, no price"
+        }
+
+    def test_history_chart_appears_only_once_history_is_loaded(self):
+        fetched = self.watch_history_fetches()
+        self.open_dashboard("?market=USDTRY&maturity=2028-01")
+        expect(self.page.locator("#history-load")).to_be_visible()
+        expect(self.page.locator("#history-chart")).to_be_hidden()
+        self.assertEqual(self.page.locator("#history-chart-svg > *").count(), 0)
+        self.assertEqual(fetched, [], "fetched archived closes before Load history")
+
+        self.load_history(len(HISTORY_FIXTURE))
+        expect(self.page.locator("#history-chart")).to_be_visible()
+        expect(self.page.locator("#history-chart-caption")).to_have_text(
+            "USDTRYF2028 · Daily yield · 1D on each close, oldest to newest. "
+            "Each point opens its close; the table below lists every value."
+        )
+        self.assertEqual(sorted(fetched), sorted(HISTORY_FIXTURE))
+        fetched.clear()
+
+        # Period, selection and market switches redraw from the cache.
+        self.page.locator('[data-yield-period="monthly"]').click()
+        expect(self.page.locator("#history-chart-caption")).to_contain_text("Monthly yield · 30D")
+        self.select_button("Dec 2026").click()
+        self.assert_selected("Dec 2026")
+        expect(self.page.locator("#history-chart-caption")).to_contain_text("USDTRYZ2026")
+        self.assertEqual(len(self.history_chart()["points"]), 6)
+        self.page.locator('.market-options [data-market="EURTRY"]').click()
+        self.assert_market("EURTRY")
+        expect(self.page.locator("#history-chart")).to_be_hidden()
+        self.select_button("Dec 2026", "EURTRY").click()
+        expect(self.page.locator("#history-chart-caption")).to_contain_text("EURTRYZ2026")
+        self.assertEqual(len(self.history_chart()["points"]), 6)
+        self.assertEqual(fetched, [], "refetched cached closes")
+
+    def test_history_chart_points_equal_the_table(self):
+        self.open_dashboard("?market=USDTRY&maturity=2028-01")
+        self.load_history(len(HISTORY_FIXTURE))
+        for period in ("daily", "annualized"):
+            with self.subTest(period=period):
+                self.page.locator(f'[data-yield-period="{period}"]').click()
+                label, short = YIELD_PERIOD_LABELS[period].split(" · ")
+                expect(self.page.locator("#inspector-history-head th").nth(3)).to_have_text(
+                    f"{label} yield · {short}"
+                )
+                points = self.history_chart()["points"]
+                table = self.history_yield_cells()
+                # One point per priced close, oldest first, and nothing else.
+                self.assertEqual(
+                    [point["day"] for point in points],
+                    ["2026-09-30", "2026-10-05", "2026-10-06", "2026-10-07"],
+                )
+                for point in points:
+                    value = re.search(r": ([+-][\d.]+%) ", point["name"]).group(1)
+                    self.assertEqual(value, table[point["day"]], point["day"])
+                # Hand-computed from two closes' own spot, price and days left.
+                for day in ("2026-09-30", "2026-10-06"):
+                    market, contract = self.history_symbol_on(day)
+                    expected = self.expected_history_row(market, contract, period)[2]
+                    point = next(p for p in points if p["day"] == day)
+                    self.assertIn(f": {expected} {period} yield", point["name"])
+                self.assertEqual(
+                    next(p for p in points if p["day"] == "2026-10-05")["name"],
+                    f"05 Oct 2026: {table['2026-10-05']} {period} yield "
+                    f"({short}), last trade 03 Oct 17:54, stale",
+                )
+
+    def test_history_chart_breaks_at_every_missing_close_and_gap(self):
+        failed = "2026-10-06"
+        self.page.route(f"**/data/history/{failed}.json", lambda route: route.fulfill(status=404))
+        self.open_dashboard("?market=USDTRY&maturity=2028-01")
+        self.load_history(len(HISTORY_FIXTURE))
+        chart = self.history_chart()
+        # Not listed, listed without a price and not loaded: a mark, no point.
+        self.assertEqual(chart["marks"], {
+            ROLLED_DAY: "not-listed", NO_PRICE_DAY: "listed", failed: "error",
+        })
+        self.assertEqual(
+            [point["day"] for point in chart["points"]], ["2026-09-30", "2026-10-05", "2026-10-07"]
+        )
+        # Every point is cut off from its neighbours: by weekdays without a
+        # close before 05 Oct, and by the close that failed after it.
+        self.assertEqual(chart["runs"], [])
+        self.assertEqual(chart["gaps"], [43, 16, 2])
+        self.assertEqual(len(self.errors), 1, self.errors)
+        self.errors = []
+
+        # Loaded, the closes 05, 06 and 07 Oct are the only joined run.
+        self.reopen_at(FIXTURE_DAY_TIME)
+        self.open_dashboard("?market=USDTRY&maturity=2028-01")
+        self.load_history(len(HISTORY_FIXTURE))
+        chart = self.history_chart()
+        self.assertEqual(chart["runs"], [["2026-10-05", "2026-10-06", "2026-10-07"]])
+        self.assertEqual(chart["marks"], {ROLLED_DAY: "not-listed", NO_PRICE_DAY: "listed"})
+        self.assertEqual(chart["gaps"], [43, 16, 2])
+        # Calendar time: 30 Sep to 05 Oct is five days wide, 05 to 06 Oct one.
+        x = {point["day"]: point["x"] for point in chart["points"]}
+        step = x["2026-10-06"] - x["2026-10-05"]
+        self.assertGreater(step, 0)
+        self.assertAlmostEqual((x["2026-10-05"] - x["2026-09-30"]) / step, 5, places=3)
+        self.assertAlmostEqual((x["2026-10-07"] - x["2026-10-06"]) / step, 1, places=3)
+        key = self.page.locator("#history-chart-key")
+        expect(key).to_contain_text("No yield on that close; the table says why")
+        expect(key).to_contain_text("Weekdays with no archived close")
+        expect(key).to_contain_text("The line breaks at each of these; nothing is interpolated.")
+
+    def test_history_chart_marks_stale_points_and_the_day_on_screen(self):
+        self.open_dashboard("?market=USDTRY&maturity=2028-01")
+        self.load_history(len(HISTORY_FIXTURE))
+        points = self.history_chart()["points"]
+        # This contract last traded before each close's latest quote day.
+        self.assertEqual([p["stale"] for p in points], [True] * 4)
+        live = points[-1]
+        self.assertEqual(
+            (live["day"], live["onScreen"], live["link"], live["shape"], live["halo"], live["label"]),
+            ("2026-10-07", True, False, "rect", True, "Live"),
+        )
+        self.assertTrue(live["name"].startswith("07 Oct 2026, Live: "))
+        self.assertEqual({p["shape"] for p in points[:-1]}, {"circle"})
+        self.assertFalse(any(p["onScreen"] or p["halo"] for p in points[:-1]))
+        key = self.page.locator("#history-chart-key")
+        expect(key).to_contain_text("Live: the snapshot on screen")
+        expect(key).to_contain_text("Hollow: last traded before that close’s latest quote day")
+
+        # On a past close, its own point is highlighted; Dec 2026 isn't stale.
+        self.open_day("2026-10-05", "&market=USDTRY&maturity=2026-12")
+        self.load_history(4)
+        points = self.history_chart()["points"]
+        self.assertEqual(
+            [p["day"] for p in points], ["2026-07-07", "2026-09-07", "2026-09-30", "2026-10-05"]
+        )
+        self.assertEqual([p["stale"] for p in points], [False] * 4)
+        self.assertEqual(
+            [(p["onScreen"], p["label"]) for p in points],
+            [(False, None)] * 3 + [(True, "On screen")],
+        )
+        self.assertEqual(points[-1]["shape"], "circle")
+        expect(key).to_contain_text("On screen: the close you are viewing")
+        expect(key).not_to_contain_text("Hollow")
+
+    def test_history_chart_point_opens_its_close_like_the_table(self):
+        fetched = self.watch_history_fetches()
+        self.open_dashboard("?market=USDTRY&maturity=2028-01&period=annualized")
+        self.load_history(len(HISTORY_FIXTURE))
+        fetched.clear()
+        day = "2026-09-30"
+        point = self.page.locator(f'#history-chart-svg a[data-history-day="{day}"]')
+        table_href = self.page.locator(
+            f'#inspector-history-rows a[data-history-day="{day}"]'
+        ).get_attribute("href")
+        self.assertEqual(point.get_attribute("href"), table_href)
+        self.assertEqual(
+            point.get_attribute("aria-label"),
+            f"30 Sept 2026: {self.history_yield_cells()[day]} annualized yield (365D), "
+            "last trade 28 Sept 17:54, stale",
+        )
+        # A modified click keeps the browser's own behaviour.
+        self.assertIsNone(
+            self.page.evaluate(
+                """() => {
+                  const link = document.querySelector('#history-chart-svg a');
+                  const event = new MouseEvent('click', { bubbles: true, cancelable: true, shiftKey: true });
+                  link.addEventListener('click', (e) => e.preventDefault(), { once: true });
+                  link.dispatchEvent(event);
+                  return state.viewDate;
+                }"""
+            )
+        )
+        point.click()
+        self.assert_historical(day)
+        self.assert_selected("Jan 2028")
+        self.assertEqual(
+            {key: self.url_params()[key] for key in ("date", "market", "maturity", "period")},
+            {"date": day, "market": "USDTRY", "maturity": "2028-01", "period": "annualized"},
+        )
+        # The view matches opening the same close from the table.
+        expect(self.page.locator("#history-chart")).to_be_visible()
+        points = self.history_chart()["points"]
+        self.assertEqual(points[-1]["day"], day)
+        self.assertTrue(points[-1]["onScreen"])
+        self.assertEqual(fetched, [], "refetched cached closes")
+
+    def test_history_chart_point_opens_its_close_from_the_keyboard_and_a_tap(self):
+        self.open_dashboard("?market=USDTRY&maturity=2028-01")
+        self.load_history(len(HISTORY_FIXTURE))
+        # Points come straight after the loading status in Tab order.
+        self.page.locator("#inspector-history-status").focus()
+        self.tab_to('#history-chart-svg a[data-history-day="2026-09-30"]', limit=3)
+        expect(self.page.locator("#history-chart-svg .history-point:focus .history-ring")).to_be_visible()
+        self.page.keyboard.press("Enter")
+        self.assert_historical("2026-09-30")
+        self.assertEqual(self.url_params()["maturity"], "2028-01")
+
+        self.reopen_at(FIXTURE_DAY_TIME, viewport=MOBILE_VIEWPORT, has_touch=True, is_mobile=True)
+        self.open_dashboard("?market=USDTRY&maturity=2028-01")
+        self.load_history(len(HISTORY_FIXTURE))
+        self.page.locator('#history-chart-svg a[data-history-day="2026-10-05"]').tap()
+        self.assert_historical("2026-10-05")
+        self.assert_no_sideways_scroll()
+
+    def test_history_chart_point_centres_hit_their_own_point(self):
+        # Dec 2026 is priced on every close, so on a phone 05, 06 and 07 Oct
+        # sit a few pixels apart and the live point's halo covers the others.
+        for viewport in (None, MOBILE_VIEWPORT):
+            with self.subTest(viewport=viewport):
+                if viewport:
+                    self.reopen_at(
+                        FIXTURE_DAY_TIME, viewport=viewport, has_touch=True, is_mobile=True,
+                    )
+                self.open_dashboard("?market=USDTRY&maturity=2026-12")
+                self.load_history(len(HISTORY_FIXTURE))
+                hits = self.page.evaluate(
+                    """() => [...document.querySelectorAll('#history-chart-svg .history-point')]
+                        .map((node) => {
+                            const box = node.querySelector('.history-marker').getBoundingClientRect();
+                            const hit = document.elementFromPoint(
+                                box.x + box.width / 2, box.y + box.height / 2,
+                            );
+                            return [node.dataset.historyDay,
+                                    hit?.closest('.history-point')?.dataset.historyDay ?? null];
+                        })"""
+                )
+                self.assertEqual(len(hits), 6)
+                for day, hit in hits:
+                    self.assertEqual(hit, day)
+                if viewport:
+                    box = self.page.locator(
+                        '#history-chart-svg [data-history-day="2026-10-06"] .history-marker'
+                    ).bounding_box()
+                    self.page.touchscreen.tap(
+                        box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+                    )
+                    self.assert_historical("2026-10-06")
+
+    def test_history_chart_follows_the_yield_period(self):
+        self.open_dashboard("?market=USDTRY&maturity=2028-01")
+        self.load_history(len(HISTORY_FIXTURE))
+        before = self.history_chart()["points"]
+        self.page.locator('[data-yield-period="monthly"]').click()
+        expect(self.page.locator("#history-chart-caption")).to_contain_text("Monthly yield · 30D")
+        after = self.history_chart()["points"]
+        self.assertEqual([p["day"] for p in after], [p["day"] for p in before])
+        table = self.history_yield_cells()
+        for point in after:
+            self.assertIn(f": {table[point['day']]} monthly yield (30D)", point["name"])
+            if point["link"]:
+                self.assertEqual(dict(parse_qsl(point["href"].lstrip("?")))["period"], "monthly")
+        self.assertNotEqual([p["name"] for p in after], [p["name"] for p in before])
 
     # Shareable links: the selected maturity and the yield period
 

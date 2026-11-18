@@ -24,7 +24,8 @@ redeployed by GitHub Actions every hour during VİOP trading hours on weekdays,
 - Any archived end-of-day close, browsable from the **View** menu
 - Any earlier archived close overlaid on both curves, with price and yield deltas
 - One exact contract's archived closes as a **History** table in the inspector,
-  loaded on demand, with every missing value and capture gap shown as such
+  loaded on demand, with every missing value and capture gap shown as such,
+  and a small chart of its yield on those closes whose points open their day
 - A **Download CSV** of the contract board, with the compared close when one is on
 - A **Print** layout, from the button beside it or the browser's own print
   command: a header names the market, the live snapshot time or archived
@@ -392,7 +393,8 @@ live view of each market, a past close with its banner, a comparison overlay
 with both legends and a tooltip showing, a tooltip opened from the keyboard on
 each chart, each yield period, a 390×844 mobile viewport, a selected maturity
 on desktop and on that mobile viewport with its inspector open, the
-inspector's comparison table and its "not listed" message on both, the stale-point
+inspector's comparison table and its "not listed" message on both, the
+History table and chart on both, with a chart point focused, the stale-point
 key on desktop and mobile, a market whose charts are empty, and the
 load-error state. It fails on any serious or critical violation and lists each one's
 rule, impact, element and help text. As an automated check, it can't judge
@@ -496,9 +498,22 @@ unusual point can be checked without reading across the board:
     (`?date=YYYY-MM-DD&market=…&maturity=YYYY-MM&period=…`, plus the
     comparison while it is earlier than that close). A plain click opens it
     in place, as the **View** menu does; the day on screen isn't a link.
+  - **Chart.** Above the table, a small chart plots the same closes' yield
+    for the period the yield chart shows, drawn from the closes already
+    loaded, so it fetches nothing. Its x axis is calendar time, so missing
+    closes keep their width. The line breaks at every close that is not
+    listed, listed with no price or could not be loaded (each marked with a
+    cross), and at weekdays with no archived close (hatched along the axis).
+    Nothing is interpolated across a break. Stale points are hollow, and the
+    day on screen is ringed in yellow and labelled **Live** or **On screen**.
+    Every other point is a link with the same URL as that close's table
+    date, opened in place the same way, and is named for screen readers by
+    its date, yield and last trade; the table stays the full text
+    alternative.
   - **Layout.** It stays a real table with column and row headers at every
     width, and scrolls sideways inside its own frame on a phone. Once
-    loaded, it prints with the inspector; the button never prints.
+    loaded, it prints with the inspector, its chart redrawn at the page's
+    width; the button never prints.
 
 Every value is the one the board, the carry table and the chart tooltips show.
 Nothing missing is filled in: without a bid there is no profit, a contract

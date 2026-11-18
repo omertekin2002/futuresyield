@@ -102,6 +102,10 @@ const elements = {
   inspectorHistoryScroll: document.querySelector("#inspector-history-scroll"),
   inspectorHistoryHead: document.querySelector("#inspector-history-head"),
   inspectorHistoryRows: document.querySelector("#inspector-history-rows"),
+  historyChart: document.querySelector("#history-chart"),
+  historyChartCaption: document.querySelector("#history-chart-caption"),
+  historyChartSvg: document.querySelector("#history-chart-svg"),
+  historyChartKey: document.querySelector("#history-chart-key"),
   downloadCsv: document.querySelector("#download-csv"),
   downloadCsvName: document.querySelector("#download-csv-name"),
   printPage: document.querySelector("#print-page"),
@@ -155,6 +159,9 @@ const state = {
   historyOpen: false,
   historyCache: new Map(),
   historyPending: new Set(),
+  // The loaded History rows the chart above the table draws, newest first,
+  // with the contract's symbol, or null while the table isn't loaded.
+  historyChart: null,
 };
 
 // Archived closes fetched at once for the History table.
@@ -1486,6 +1493,8 @@ function renderInspectorHistory(contract) {
   if (group.hidden || !loaded) {
     elements.inspectorHistoryHead.replaceChildren();
     elements.inspectorHistoryRows.replaceChildren();
+    state.historyChart = null;
+    renderHistoryChart();
   }
   if (group.hidden) return;
 
@@ -1576,6 +1585,8 @@ function renderInspectorHistory(contract) {
   if (focused) {
     elements.inspectorHistoryRows.querySelector(`a[data-history-day="${focused}"]`)?.focus();
   }
+  state.historyChart = { symbol: contract.symbol, rows };
+  renderHistoryChart();
   setHistoryStatus(
     `History loaded: ${countText(archived.length, "archived close", "archived closes")}.`,
   );
@@ -1583,6 +1594,279 @@ function renderInspectorHistory(contract) {
   if (document.activeElement === elements.inspectorHistoryStatus) {
     elements.inspectorHistoryScroll.focus();
   }
+}
+
+// The History chart: the same rows as the History table, oldest first, with
+// the selected contract's yield for the chart's period on each close that has
+// one. The x axis is calendar time, so missing closes take up their space,
+// and the line breaks at every close without a value and every run of
+// weekdays without an archived close. Nothing is interpolated. Each point
+// other than the day on screen is a link that opens its close, like the
+// table's date links.
+const SVG_NS = "http://www.w3.org/2000/svg";
+const HISTORY_CHART_HEIGHT = 180;
+const HISTORY_CHART_PADDING = { top: 30, right: 16, bottom: 38, left: 70 };
+// Half the widest a point's click target reaches to each side.
+const HISTORY_POINT_REACH = 20;
+// The strip along the x axis that holds the gap bands and missing marks.
+const HISTORY_STRIP = 12;
+
+function svgNode(name, attributes = {}, text = null) {
+  const node = document.createElementNS(SVG_NS, name);
+  Object.entries(attributes).forEach(([key, value]) => node.setAttribute(key, String(value)));
+  if (text !== null) node.textContent = text;
+  return node;
+}
+
+// A History row as the chart plots it: its yield for the chart's period and
+// last trade, or the table's own text for why it has no value.
+function historyChartPoint(row) {
+  if (row.state === "error") return { ...row, value: null, reason: `Could not be loaded: ${row.reason}.` };
+  if (row.state === "no-market") return { ...row, value: null, reason: `No ${state.data.pair} data in this close.` };
+  if (row.state === "not-listed") return { ...row, value: null, reason: "Not listed on this close." };
+  if (!hasNumber(row.contract.last)) return { ...row, value: null, reason: "Listed, no price." };
+  const value = yieldValue(row.contract, state.yieldPeriod, row.market.spot?.last);
+  if (!hasNumber(value)) return { ...row, value: null, reason: "Listed, no yield on this close." };
+  const trade = lastTrades(row.market.contracts, row.generatedAt).get(row.contract);
+  return { ...row, value, trade };
+}
+
+// A point's accessible name: its date, yield and last trade, as the table
+// row shows them.
+function historyPointName(point) {
+  const settings = YIELD_PERIODS[state.yieldPeriod];
+  const tag = point.onScreen ? `, ${point.live ? "Live" : "On screen"}` : "";
+  const trade = point.trade.time ? `last trade ${point.trade.text}` : "no last trade time";
+  return `${formatDay(point.day)}${tag}: ${formatYield(point.value)} ` +
+    `${settings.label.toLowerCase()} yield (${settings.shortLabel}), ${trade}` +
+    (point.trade.stale ? ", stale" : "");
+}
+
+// A key entry: a small drawing and its text.
+function historyKeyItem(swatch, text) {
+  const item = document.createElement("span");
+  item.className = "history-key-item";
+  const icon = svgNode("svg", { width: 16, height: 14, viewBox: "0 0 16 14", "aria-hidden": "true" });
+  icon.append(...swatch);
+  item.append(icon, text);
+  return item;
+}
+
+function renderHistoryChart() {
+  const figure = elements.historyChart;
+  const svg = elements.historyChartSvg;
+  const chart = state.historyChart;
+  figure.hidden = !chart;
+  if (!chart) {
+    svg.replaceChildren();
+    elements.historyChartKey.replaceChildren();
+    return;
+  }
+  const settings = YIELD_PERIODS[state.yieldPeriod];
+  const rows = [...chart.rows].reverse().map(historyChartPoint);
+  const plotted = rows.filter((row) => row.value !== null);
+  const pad = HISTORY_CHART_PADDING;
+  const width = Math.max(240, Math.round(figure.clientWidth || 600));
+  const height = HISTORY_CHART_HEIGHT;
+  const left = pad.left;
+  const right = width - pad.right;
+  const top = pad.top;
+  const bottom = height - pad.bottom;
+
+  const first = rows[0].day;
+  const span = daysUntil(first, rows.at(-1).day);
+  // Dates sit 10px inside the axes, so the marks at either end stay clear of them.
+  const x = (day) => span
+    ? left + 10 + (daysUntil(first, day) / span) * (right - left - 20)
+    : (left + right) / 2;
+  const values = plotted.map((row) => row.value);
+  let low = values.length ? Math.min(...values) : 0;
+  let high = values.length ? Math.max(...values) : 1;
+  if (low === high) {
+    const margin = Math.abs(low) * 0.1 || 1;
+    low -= margin;
+    high += margin;
+  }
+  // Points stay clear of the plot's top and of the strip along its bottom.
+  const lowest = bottom - HISTORY_STRIP - 10;
+  const y = (value) => lowest - ((value - low) / (high - low)) * (lowest - top - 8);
+
+  elements.historyChartCaption.textContent =
+    `${chart.symbol} · ${settings.label} yield · ${settings.shortLabel} on each close, ` +
+    "oldest to newest. Each point opens its close; the table below lists every value.";
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("width", "100%");
+  svg.setAttribute("height", String(height));
+
+  // A redraw, such as a resize or the one-minute refresh, keeps focus on the
+  // same point.
+  const focused = svg.contains(document.activeElement)
+    ? document.activeElement.closest("a[data-history-day]")?.dataset.historyDay
+    : null;
+
+  const defs = svgNode("defs");
+  const hatch = svgNode("pattern", {
+    id: "history-gap-hatch", width: 6, height: 6,
+    patternUnits: "userSpaceOnUse", patternTransform: "rotate(45)",
+  });
+  hatch.append(svgNode("line", { x1: 0, y1: 0, x2: 0, y2: 6, class: "history-gap-line" }));
+  defs.append(hatch);
+
+  // Axes, and the yield's range and dates at their ends.
+  const axes = svgNode("g", { class: "history-axes", "aria-hidden": "true" });
+  axes.append(
+    svgNode("line", { x1: left, y1: top, x2: left, y2: bottom }),
+    svgNode("line", { x1: left, y1: bottom, x2: right, y2: bottom }),
+  );
+  if (values.length) {
+    const ticks = [...new Set([Math.max(...values), Math.min(...values)])];
+    ticks.forEach((value) => {
+      axes.append(
+        svgNode("line", { x1: left - 4, y1: y(value), x2: left, y2: y(value) }),
+        svgNode("text", { x: left - 7, y: y(value), class: "history-tick-y" }, formatYield(value)),
+      );
+    });
+  } else {
+    axes.append(svgNode("text", {
+      x: (left + right) / 2, y: (top + bottom) / 2, class: "history-empty",
+    }, `No close with a ${settings.label.toLowerCase()} yield to plot.`));
+  }
+  axes.append(svgNode("text", { x: left, y: height - 8, class: "history-tick-x is-first" }, formatDay(first)));
+  if (span) {
+    axes.append(svgNode("text", {
+      x: right, y: height - 8, class: "history-tick-x is-last",
+    }, formatDay(rows.at(-1).day)));
+  }
+
+  // Weekdays without an archived close: a hatched band along the axis
+  // between the two closes either side of them.
+  const gaps = svgNode("g", { class: "history-gaps", "aria-hidden": "true" });
+  // Runs of closes the line joins: consecutive, each with a value.
+  const segments = [];
+  let segment = [];
+  rows.forEach((row, index) => {
+    const previous = rows[index - 1];
+    const weekdays = previous ? weekdaysBetween(previous.day, row.day) : 0;
+    if (weekdays) {
+      const band = svgNode("rect", {
+        x: x(previous.day), y: bottom - HISTORY_STRIP,
+        width: Math.max(1, x(row.day) - x(previous.day)), height: HISTORY_STRIP,
+        fill: "url(#history-gap-hatch)", class: "history-gap", "data-gap": weekdays,
+      });
+      band.append(svgNode("title", {},
+        `No archived close for ${countText(weekdays, "weekday", "weekdays")} ` +
+        "(a holiday or a missed capture)."));
+      gaps.append(band);
+    }
+    if (row.value === null || weekdays) {
+      if (segment.length) segments.push(segment);
+      segment = [];
+    }
+    if (row.value !== null) segment.push(row);
+  });
+  if (segment.length) segments.push(segment);
+
+  const lines = svgNode("g", { class: "history-lines", "aria-hidden": "true" });
+  segments.filter((run) => run.length > 1).forEach((run) => {
+    lines.append(svgNode("polyline", {
+      points: run.map((row) => `${x(row.day)},${y(row.value)}`).join(" "),
+      "data-days": run.map((row) => row.day).join(" "),
+    }));
+  });
+
+  // Closes without a value: a cross on the axis, with the table's wording.
+  const marks = svgNode("g", { class: "history-marks", "aria-hidden": "true" });
+  rows.filter((row) => row.value === null).forEach((row) => {
+    const mark = svgNode("g", {
+      class: "history-missing-mark", "data-history-day": row.day, "data-state": row.state,
+      transform: `translate(${x(row.day)} ${bottom - HISTORY_STRIP / 2})`,
+    });
+    mark.append(
+      svgNode("path", { d: "M -4 -4 L 4 4 M -4 4 L 4 -4" }),
+      svgNode("title", {}, `${formatDay(row.day)}: ${row.reason}`),
+    );
+    marks.append(mark);
+  });
+
+  // The points. Each reaches halfway to its neighbours, at most
+  // HISTORY_POINT_REACH, so a tap lands on the nearest one.
+  const points = svgNode("g", { class: "history-points" });
+  plotted.forEach((row, index) => {
+    const px = x(row.day);
+    const py = y(row.value);
+    const before = index ? (px - x(plotted[index - 1].day)) / 2 : HISTORY_POINT_REACH;
+    const after = index < plotted.length - 1 ? (x(plotted[index + 1].day) - px) / 2 : HISTORY_POINT_REACH;
+    const reach = [Math.min(before, HISTORY_POINT_REACH), Math.min(after, HISTORY_POINT_REACH)];
+    const stale = row.trade.stale;
+    const marker = row.live
+      ? svgNode("rect", { x: px - 4.5, y: py - 4.5, width: 9, height: 9 })
+      : svgNode("circle", { cx: px, cy: py, r: stale ? 5.5 : 4.5 });
+    marker.setAttribute("class", `history-marker${stale ? " is-stale" : ""}`);
+    const node = row.onScreen
+      ? svgNode("g", { role: "img", class: "history-point is-on-screen" })
+      : svgNode("a", { href: historyDayHref(row.day), class: "history-point" });
+    node.setAttribute("aria-label", historyPointName(row));
+    node.dataset.historyDay = row.day;
+    node.dataset.value = String(row.value);
+    if (stale) node.dataset.stale = "";
+    node.append(svgNode("rect", {
+      class: "history-hit", x: px - reach[0], y: top,
+      width: Math.max(reach[0] + reach[1], 1), height: bottom - HISTORY_STRIP - top,
+    }));
+    if (row.onScreen) {
+      node.append(
+        svgNode("circle", { class: "history-halo", cx: px, cy: py, r: 10 }),
+        svgNode("text", {
+          class: "history-on-screen-label", x: Math.min(px + 6, right), y: Math.max(py - 14, 11),
+          "aria-hidden": "true",
+        }, row.live ? "Live" : "On screen"),
+      );
+    } else {
+      node.append(svgNode("circle", { class: "history-ring", cx: px, cy: py, r: 10 }));
+    }
+    node.append(marker);
+    points.append(node);
+  });
+
+  svg.replaceChildren(defs, gaps, axes, lines, marks, points);
+  if (focused) svg.querySelector(`a[data-history-day="${focused}"]`)?.focus();
+
+  // The key: always the day on screen, and each other kind of mark drawn.
+  const live = !state.renderedDate;
+  const items = [
+    historyKeyItem(
+      [
+        svgNode("circle", { class: "history-halo", cx: 8, cy: 7, r: 6 }),
+        live
+          ? svgNode("rect", { class: "history-marker", x: 5, y: 4, width: 6, height: 6 })
+          : svgNode("circle", { class: "history-marker", cx: 8, cy: 7, r: 3 }),
+      ],
+      live ? "Live: the snapshot on screen" : "On screen: the close you are viewing",
+    ),
+  ];
+  if (plotted.some((row) => row.trade.stale)) {
+    items.push(historyKeyItem(
+      [svgNode("circle", { class: "history-marker is-stale", cx: 8, cy: 7, r: 4.5 })],
+      "Hollow: last traded before that close’s latest quote day",
+    ));
+  }
+  if (rows.some((row) => row.value === null)) {
+    items.push(historyKeyItem(
+      [svgNode("path", { class: "history-missing-mark", d: "M 4 3 L 12 11 M 4 11 L 12 3" })],
+      "No yield on that close; the table says why",
+    ));
+  }
+  if (gaps.childElementCount) {
+    items.push(historyKeyItem(
+      [svgNode("rect", { x: 1, y: 1, width: 14, height: 12, fill: "url(#history-gap-hatch)", class: "history-key-gap" })],
+      "Weekdays with no archived close",
+    ));
+  }
+  const note = document.createElement("span");
+  note.className = "history-key-note";
+  note.textContent = "The line breaks at each of these; nothing is interpolated.";
+  items.push(note);
+  elements.historyChartKey.replaceChildren(...items);
 }
 
 // The contract board as a CSV file: one row per contract of the day on
@@ -2732,10 +3016,11 @@ elements.historyLoad.addEventListener("click", () => {
     : elements.inspectorHistoryScroll).focus();
 });
 
-// A plain click on a History date opens that close in place, like the View
-// menu, with the same market, maturity and period. A comparison that isn't
-// earlier than that close is dropped, as the link leaves it out.
-elements.inspectorHistoryRows.addEventListener("click", async (event) => {
+// A plain click on a History date or a History chart point opens that close
+// in place, like the View menu, with the same market, maturity and period. A
+// comparison that isn't earlier than that close is dropped, as the link
+// leaves it out.
+async function openHistoryLink(event) {
   const link = event.target.closest("a[data-history-day]");
   if (!link || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
     return;
@@ -2752,7 +3037,10 @@ elements.inspectorHistoryRows.addEventListener("click", async (event) => {
       ? elements.curveTitle
       : elements.inspectorHistoryScroll).focus();
   }
-});
+}
+
+elements.inspectorHistoryRows.addEventListener("click", openHistoryLink);
+elements.historyChartSvg.addEventListener("click", openHistoryLink);
 
 // The button and the browser's own print command print the same page: both
 // fill the header as printing starts, and the charts redraw at the printed
@@ -2966,6 +3254,7 @@ function syncKeyboardPoint(chart) {
 function renderCharts() {
   renderChart();
   renderYieldChart();
+  if (state.historyChart) renderHistoryChart();
   syncKeyboardPoint(charts.price);
   syncKeyboardPoint(charts.yield);
 }
