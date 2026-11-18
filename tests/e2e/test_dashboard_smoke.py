@@ -3666,6 +3666,38 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assert_no_selection()
         self.assertEqual(self.url_params(), {"market": "USDTRY"})
 
+    def test_back_to_another_market_never_mixes_markets_while_loading(self):
+        self.open_dashboard("?market=USDTRY&compare=2026-09-30")
+        self.assert_comparing("2026-09-30")
+        day = "2026-10-06"
+        self.page.locator("#history-select").select_option(day)
+        self.assert_historical(day)
+        self.page.locator('.market-options [data-market="EURTRY"]').click()
+        self.assert_market("EURTRY", self.history[day])
+        self.compare_select().select_option("")
+        self.assert_not_comparing()
+        self.page.evaluate(
+            """() => {
+              const fetchNow = window.fetch;
+              window.fetch = (url, options) => String(url).includes('market.json')
+                ? new Promise((resolve) => setTimeout(resolve, 800)).then(() => fetchNow(url, options))
+                : fetchNow(url, options);
+            }"""
+        )
+        self.page.evaluate("() => history.go(-2)")
+        self.page.wait_for_function("() => !location.search.includes('date=')")
+        # While live data loads, the close on screen is drawn for the restored
+        # market, against the restored comparison of that same market.
+        self.assert_market("USDTRY", self.history[day])
+        self.assertEqual(
+            self.page.evaluate("() => [state.marketKey, state.data.pair]"), ["USDTRY", "USD/TRY"]
+        )
+        self.assert_live()
+        self.assert_market("USDTRY")
+        self.assert_comparing("2026-09-30")
+        self.assertEqual(self.url_params(), {"market": "USDTRY", "compare": "2026-09-30"})
+        self.assertEqual(self.errors, [])
+
     def test_back_after_tapping_a_history_chart_point_on_a_phone(self):
         self.reopen_at(FIXTURE_DAY_TIME, viewport=MOBILE_VIEWPORT, has_touch=True, is_mobile=True)
         self.open_dashboard("?market=USDTRY&maturity=2028-01")

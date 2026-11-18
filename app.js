@@ -3464,14 +3464,18 @@ window.addEventListener("popstate", async () => {
   const params = new URLSearchParams(window.location.search);
   applyLinkPeriod(params);
 
-  // The market and maturity apply as the view renders: a market listed on the
-  // view's day, and a maturity listed in it, with notices as for a link.
-  const market = params.get("market")?.toUpperCase();
-  if (state.snapshot?.markets?.[market]) state.marketKey = market;
-  else if (state.snapshot) state.marketKey = null;
+  // The maturity applies as the view renders, if it is listed then, with a
+  // notice as for a link.
   const maturity = params.get("maturity");
   if (maturity === null) updateSelection(null);
   state.requestedMaturity = maturity;
+  // The market switches at once, with its data, so nothing drawn while the
+  // view loads mixes two markets.
+  if (state.snapshot) {
+    const market = params.get("market")?.toUpperCase();
+    const restored = state.snapshot.markets[market] ? market : state.snapshot.default_market;
+    if (restored !== state.marketKey) selectMarket(restored);
+  }
 
   const date = applyLinkDates(params);
   if (state.snapshot && date === state.viewDate && date === state.renderedDate) {
