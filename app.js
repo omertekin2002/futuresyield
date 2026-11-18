@@ -162,6 +162,10 @@ const state = {
   // The loaded History rows the chart above the table draws, newest first,
   // with the contract's symbol, or null while the table isn't loaded.
   historyChart: null,
+  // A move to another view the user asked for, while it loads: the address
+  // it is building, written once the view is on screen, and whether that
+  // write adds a history entry. null when no move is under way.
+  navigation: null,
 };
 
 // Archived closes fetched at once for the History table.
@@ -2641,6 +2645,9 @@ function selectMarket(marketKey, updateUrl = false) {
   // A selection is kept across redraws of the same market while its maturity
   // is still listed.
   const switched = marketKey !== state.marketKey;
+  // Another market is another page, so Back returns to this one.
+  const navigating = updateUrl && switched;
+  if (navigating) beginNavigation();
   state.marketKey = marketKey;
   state.data = market;
   if (switched || !selectedContract()) updateSelection(null);
@@ -2659,11 +2666,8 @@ function selectMarket(marketKey, updateUrl = false) {
   renderComparisonLegends();
   renderCharts();
 
-  if (updateUrl) {
-    const url = new URL(window.location.href);
-    url.searchParams.set("market", marketKey);
-    window.history.replaceState({}, "", url);
-  }
+  if (updateUrl) updateUrlParam("market", marketKey);
+  if (navigating) finishNavigation(true);
 }
 
 function renderSnapshot(snapshot) {
@@ -2671,9 +2675,7 @@ function renderSnapshot(snapshot) {
   renderMarketRail(snapshot);
   renderCompareControl();
 
-  const queryMarket = new URLSearchParams(window.location.search)
-    .get("market")
-    ?.toUpperCase();
+  const queryMarket = currentUrl().searchParams.get("market")?.toUpperCase();
   const selectedMarket = snapshot.markets[state.marketKey]
     ? state.marketKey
     : snapshot.markets[queryMarket]
@@ -2740,12 +2742,49 @@ function addNotice(text) {
   showNotice(shown ? `${elements.historyNotice.textContent} ${text}` : text);
 }
 
+// The address of the view: the one a move under way is building, or the
+// address bar's.
+function currentUrl() {
+  return new URL(state.navigation?.url ?? window.location.href);
+}
+
+// Write the view's address. Adjustments to the view on screen replace the
+// history entry; a move to another view collects them until it lands.
+function writeUrl(url) {
+  if (state.navigation) {
+    state.navigation.url = url.href;
+  } else if (url.href !== window.location.href) {
+    window.history.replaceState({}, "", url);
+  }
+}
+
 // Set a query parameter, or delete it with null, without a history entry.
 function updateUrlParam(name, value) {
-  const url = new URL(window.location.href);
+  const url = currentUrl();
   if (value === null) url.searchParams.delete(name);
   else url.searchParams.set(name, value);
-  if (url.href !== window.location.href) window.history.replaceState({}, "", url);
+  writeUrl(url);
+}
+
+// Start a move to another view, such as another close or market, that the
+// browser's Back and Forward buttons step through. The URL changes it makes,
+// and those of the adjustments that follow it as it loads, become one new
+// history entry when it finishes, so the entry it left keeps its address.
+// A move started while another is loading joins it.
+function beginNavigation() {
+  state.navigation ??= { url: window.location.href, push: true };
+}
+
+// Write the address a move built: a new history entry if it reached its view
+// and the address changed, or in place if it fell back. Only the latest load
+// finishes a move, so a superseded one never writes.
+function finishNavigation(reached) {
+  const navigation = state.navigation;
+  if (!navigation) return;
+  state.navigation = null;
+  if (navigation.url === window.location.href) return;
+  if (reached && navigation.push) window.history.pushState({}, "", navigation.url);
+  else window.history.replaceState({}, "", navigation.url);
 }
 
 function hideNotice() {
@@ -2782,10 +2821,7 @@ function quickPicks(reference, days) {
 }
 
 function updateCompareUrl() {
-  const url = new URL(window.location.href);
-  if (state.compareDate) url.searchParams.set("compare", state.compareDate);
-  else url.searchParams.delete("compare");
-  if (url.href !== window.location.href) window.history.replaceState({}, "", url);
+  updateUrlParam("compare", state.compareDate);
 }
 
 function clearCompare() {
@@ -2872,7 +2908,9 @@ async function setCompare(date) {
 
   const request = state.compareRequestId;
   try {
-    const data = await fetchSnapshot(`${HISTORY_URL}/${date}.json`);
+    // Archived closes are written once, so one already fetched is reused.
+    const data = state.historyCache.get(date)?.snapshot ??
+      await fetchSnapshot(`${HISTORY_URL}/${date}.json`);
     if (request !== state.compareRequestId) return;
     state.compareSnapshot = data;
     state.historyCache.set(date, { snapshot: data });
@@ -2902,10 +2940,7 @@ function renderViewState() {
   elements.spotTag.textContent = historical ? "Past close" : "≈ 15 min delay";
   document.body.dataset.view = historical ? "historical" : "live";
 
-  const url = new URL(window.location.href);
-  if (historical) url.searchParams.set("date", state.renderedDate);
-  else url.searchParams.delete("date");
-  if (url.href !== window.location.href) window.history.replaceState({}, "", url);
+  updateUrlParam("date", historical ? state.renderedDate : null);
 }
 
 async function loadHistoryIndex() {
@@ -2928,9 +2963,14 @@ async function loadHistoryIndex() {
 }
 
 // Load and render one view: an archived date, or null for the live snapshot.
-// A view that fails to load leaves the current one on screen.
-async function loadView(date) {
+// A view that fails to load leaves the current one on screen. With navigate,
+// the user asked to move to it, so it gets its own history entry once it is
+// on screen (see beginNavigation). Resolves true once the view is on screen,
+// false if it failed, or undefined if a later load took over.
+async function loadView(date, { navigate = false } = {}) {
+  if (navigate) beginNavigation();
   state.viewDate = date;
+  let reached = false;
   const request = ++state.requestId;
   elements.refreshButton.classList.add("is-loading");
   elements.refreshButton.disabled = true;
@@ -2947,10 +2987,13 @@ async function loadView(date) {
     state.renderedDate = date;
     state.adjustedDay = shown === data ? null : today;
     renderSnapshot(shown);
+    reached = true;
   } catch (error) {
     if (request !== state.requestId) return;
     console.error(error);
     state.viewDate = state.renderedDate;
+    // A move that falls back stays on its entry, which shows the fallback.
+    if (state.navigation) state.navigation.push = false;
     if (date) {
       showNotice(`The close of ${formatDay(date)} could not be loaded.`);
       if (!state.snapshot) {
@@ -2973,13 +3016,15 @@ async function loadView(date) {
       elements.refreshButton.classList.remove("is-loading");
       elements.refreshButton.disabled = false;
       renderViewState();
+      finishNavigation(reached);
     }
   }
+  return reached;
 }
 
 function goLive() {
   hideNotice();
-  loadView(null);
+  loadView(null, { navigate: true });
 }
 
 // Refresh always shows live data, so it also leaves a past close.
@@ -2989,7 +3034,7 @@ elements.liveButton.addEventListener("click", goLive);
 elements.historySelect.addEventListener("change", () => {
   const date = elements.historySelect.value;
   hideNotice();
-  loadView(state.historyDays.includes(date) ? date : null);
+  loadView(state.historyDays.includes(date) ? date : null, { navigate: true });
 });
 
 elements.compareSelect.addEventListener("change", () => {
@@ -3028,15 +3073,22 @@ async function openHistoryLink(event) {
   event.preventDefault();
   const day = link.dataset.historyDay;
   hideNotice();
+  // Dropping the comparison is part of the move, so the entry it leaves keeps it.
+  beginNavigation();
   state.requestedMaturity = state.selectedKey;
   if (state.compareDate && !(state.compareDate < day)) clearCompare();
-  await loadView(day);
+  await loadView(day, { navigate: true });
   state.requestedMaturity = null;
-  if (document.activeElement === document.body || !document.activeElement) {
+  if (focusLost()) {
     (elements.inspectorHistoryScroll.hidden || elements.inspector.hidden
       ? elements.curveTitle
       : elements.inspectorHistoryScroll).focus();
   }
+}
+
+// Whether the focused element was redrawn away, leaving focus on the page.
+function focusLost() {
+  return document.activeElement === document.body || !document.activeElement;
 }
 
 elements.inspectorHistoryRows.addEventListener("click", openHistoryLink);
@@ -3354,44 +3406,91 @@ Object.values(charts).forEach((chart) => {
   });
 });
 
-async function init() {
-  const params = new URLSearchParams(window.location.search);
-  // The yield period applies before anything renders.
-  const requestedPeriod = params.get("period");
-  if (requestedPeriod !== null && Object.hasOwn(YIELD_PERIODS, requestedPeriod)) {
-    state.yieldPeriod = requestedPeriod;
-  } else if (requestedPeriod !== null) {
-    showNotice("That yield period is not 1D, 30D or 365D. Showing daily yields.");
+// The yield period a link asks for, or daily with a notice for one that isn't
+// a period. Doesn't redraw; the caller renders next.
+function applyLinkPeriod(params) {
+  const requested = params.get("period");
+  if (requested !== null && Object.hasOwn(YIELD_PERIODS, requested)) {
+    state.yieldPeriod = requested;
+  } else {
+    state.yieldPeriod = "daily";
+    if (requested !== null) {
+      addNotice("That yield period is not 1D, 30D or 365D. Showing daily yields.");
+    }
   }
   markYieldPeriod();
-  state.requestedMaturity = params.get("maturity");
+}
 
-  await loadHistoryIndex();
+// Apply the comparison a link asks for, once the archive's dates are known,
+// and return the view date it asks for: an archived close, or null for live.
+// Dates that aren't archived fall back with a notice.
+function applyLinkDates(params) {
   const requestedCompare = params.get("compare");
-  if (requestedCompare && state.historyDays.includes(requestedCompare)) {
-    // Checked against the view's date once that has rendered.
-    setCompare(requestedCompare);
-  } else if (requestedCompare) {
+  const compare = requestedCompare && state.historyDays.includes(requestedCompare)
+    ? requestedCompare
+    : null;
+  if (requestedCompare && !compare) {
     addNotice(
       HISTORY_DATE.test(requestedCompare)
         ? `No archived close for ${requestedCompare} to compare with.`
         : "That comparison date is not in the archive.",
     );
-    updateCompareUrl();
   }
+  // Checked against the view's date once that has rendered.
+  if (compare !== state.compareDate) setCompare(compare);
+  else updateCompareUrl();
+
   const requested = params.get("date");
-  if (requested && state.historyDays.includes(requested)) {
-    loadView(requested);
-  } else {
-    if (requested) {
-      addNotice(
-        HISTORY_DATE.test(requested)
-          ? `No archived close for ${requested}. Showing live data.`
-          : "That date is not in the archive. Showing live data.",
-      );
-    }
-    loadView(null);
+  if (requested && state.historyDays.includes(requested)) return requested;
+  if (requested) {
+    addNotice(
+      HISTORY_DATE.test(requested)
+        ? `No archived close for ${requested}. Showing live data.`
+        : "That date is not in the archive. Showing live data.",
+    );
   }
+  return null;
+}
+
+// Back and Forward restore an entry's address; show what it names in place,
+// as a fresh link would, without adding an entry. A close already loaded is
+// reused, and one that can't be loaded falls back as a link's does.
+window.addEventListener("popstate", async () => {
+  // A move still loading is abandoned for the entry the browser went to.
+  state.navigation = null;
+  hideNotice();
+  const params = new URLSearchParams(window.location.search);
+  applyLinkPeriod(params);
+
+  // The market and maturity apply as the view renders: a market listed on the
+  // view's day, and a maturity listed in it, with notices as for a link.
+  const market = params.get("market")?.toUpperCase();
+  if (state.snapshot?.markets?.[market]) state.marketKey = market;
+  else if (state.snapshot) state.marketKey = null;
+  const maturity = params.get("maturity");
+  if (maturity === null) updateSelection(null);
+  state.requestedMaturity = maturity;
+
+  const date = applyLinkDates(params);
+  if (state.snapshot && date === state.viewDate && date === state.renderedDate) {
+    renderSnapshot(state.snapshot);
+    renderViewState();
+  } else if (await loadView(date) === false && date) {
+    // A close that can't be loaded any more falls back to live, as its link would.
+    await loadView(null);
+  }
+  // Focus left on a link or point that was redrawn returns to the charts.
+  if (focusLost()) elements.curveTitle.focus({ preventScroll: true });
+});
+
+async function init() {
+  const params = new URLSearchParams(window.location.search);
+  // The yield period applies before anything renders.
+  applyLinkPeriod(params);
+  state.requestedMaturity = params.get("maturity");
+
+  await loadHistoryIndex();
+  loadView(applyLinkDates(params));
   // The poll only refreshes the live view; a past close stays until the user leaves it.
   state.refreshTimer = window.setInterval(() => {
     if (!state.viewDate) loadView(null);

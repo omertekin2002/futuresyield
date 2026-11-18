@@ -3254,7 +3254,9 @@ class DashboardSmokeTests(unittest.TestCase):
         expect(self.page.locator("#selection-announcer")).to_have_text("Selection cleared.")
         self.assert_period("monthly")
         self.assertEqual(self.url_params(), {"market": "EURTRY", "period": "monthly"})
-        self.assertEqual(self.history_length(), length)
+        # Only the moves to another view add entries: two closes, Live twice
+        # and the market.
+        self.assertEqual(self.history_length(), length + 5)
 
     def test_unlisted_or_malformed_params_fall_back_with_a_notice(self):
         not_a_month = "That maturity link is not a month, so nothing is selected."
@@ -3327,6 +3329,282 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assert_selected("Mar 2027")
         self.assertEqual(self.url_params().get("maturity"), "2027-03")
         self.assertEqual(self.history_length(), length)
+
+    # Back and Forward: moves to another view are history entries
+
+    def go_back(self):
+        self.page.go_back(wait_until="commit")
+
+    def go_forward(self):
+        self.page.go_forward(wait_until="commit")
+
+    def assert_focus_not_lost(self):
+        self.assertFalse(
+            self.page.evaluate(
+                "() => !document.activeElement || document.activeElement === document.body"
+            ),
+            "focus fell back to the page",
+        )
+
+    def test_back_and_forward_step_between_live_and_a_close_from_the_view_menu(self):
+        fetched = self.watch_history_fetches()
+        self.open_dashboard("?market=USDTRY")
+        length = self.history_length()
+        day = "2026-10-05"
+        self.page.locator("#history-select").select_option(day)
+        self.assert_historical(day)
+        self.assertEqual(self.history_length(), length + 1)
+
+        self.go_back()
+        self.assert_live()
+        expect(self.page.locator("#history-select")).to_have_value("")
+        self.assert_market("USDTRY")
+        self.assertEqual(self.url_params(), {"market": "USDTRY"})
+        self.go_forward()
+        self.assert_historical(day)
+        self.assert_market("USDTRY", self.history[day])
+        self.assertEqual(self.url_params(), {"market": "USDTRY", "date": day})
+        self.assertEqual(fetched, [day], "refetched a close already loaded")
+
+        # Back to live, Refresh and Live in the menu leave a close as moves too,
+        # and stay put when already live.
+        for control in ("#live-button", "#refresh-button", "menu"):
+            with self.subTest(control=control):
+                self.page.locator("#history-select").select_option(day)
+                self.assert_historical(day)
+                before = self.history_length()
+                if control == "menu":
+                    self.page.locator("#history-select").select_option("")
+                else:
+                    self.page.locator(control).click()
+                self.assert_live()
+                self.assertEqual(self.history_length(), before + 1)
+                self.go_back()
+                self.assert_historical(day)
+                self.go_forward()
+                self.assert_live()
+        before = self.history_length()
+        self.page.locator("#refresh-button").click()
+        self.assert_live()
+        expect(self.page.locator("#refresh-button")).to_be_enabled()
+        self.assertEqual(self.history_length(), before)
+        self.assertEqual(self.errors, [])
+
+    def test_back_walks_through_closes_opened_from_history_links(self):
+        fetched = self.watch_history_fetches()
+        self.open_dashboard("?market=USDTRY&maturity=2028-01&period=annualized")
+        self.load_history(len(HISTORY_FIXTURE))
+        fetched.clear()
+        length = self.history_length()
+        first, second = "2026-10-06", "2026-09-30"
+        self.page.locator(f'#inspector-history-rows a[data-history-day="{first}"]').click()
+        self.assert_historical(first)
+        self.page.locator(f'#history-chart-svg a[data-history-day="{second}"]').click()
+        self.assert_historical(second)
+        self.assertEqual(self.history_length(), length + 2)
+
+        params = {"market": "USDTRY", "maturity": "2028-01", "period": "annualized"}
+        for go, day in (
+            (self.go_back, first), (self.go_back, None),
+            (self.go_forward, first), (self.go_forward, second),
+        ):
+            with self.subTest(go=go.__name__, day=day):
+                go()
+                if day:
+                    self.assert_historical(day)
+                else:
+                    self.assert_live()
+                self.assert_selected("Jan 2028")
+                self.assert_period("annualized")
+                expect(self.page.locator("#inspector-name")).to_have_text("Jan 2028")
+                self.assertEqual(self.url_params(), {**params, **({"date": day} if day else {})})
+                # The History table follows the day on screen.
+                on_screen = [row for row in self.history_rows() if row["onScreen"]]
+                self.assertEqual([row["day"] for row in on_screen], [day or self.snapshot["market_date"]])
+                self.assert_focus_not_lost()
+        self.assertEqual(fetched, [], "refetched cached closes")
+        self.assertEqual(self.history_length(), length + 2)
+
+    def test_back_restores_the_previous_market_and_its_maturity(self):
+        self.open_dashboard("?market=USDTRY&maturity=2026-12")
+        self.assert_selected("Dec 2026")
+        length = self.history_length()
+        # The market on screen is not a move.
+        self.page.locator('.market-options [data-market="USDTRY"]').click()
+        self.assertEqual(self.history_length(), length)
+
+        self.page.locator('.market-options [data-market="EURTRY"]').click()
+        self.assert_market("EURTRY")
+        self.assert_no_selection()
+        self.assertEqual(self.history_length(), length + 1)
+        self.go_back()
+        self.assert_market("USDTRY")
+        self.assert_selected("Dec 2026")
+        self.assertEqual(self.url_params(), {"market": "USDTRY", "maturity": "2026-12"})
+        self.go_forward()
+        self.assert_market("EURTRY")
+        self.assert_no_selection()
+        self.assertEqual(self.url_params(), {"market": "EURTRY"})
+
+        # A close keeps its market across Back too.
+        day = "2026-10-06"
+        self.page.locator("#history-select").select_option(day)
+        self.assert_historical(day)
+        self.page.locator('.market-options [data-market="XAUTRY"]').click()
+        self.assert_market("XAUTRY", self.history[day])
+        self.go_back()
+        self.assert_historical(day)
+        self.assert_market("EURTRY", self.history[day])
+        self.go_back()
+        self.assert_live()
+        self.assert_market("EURTRY")
+
+    def test_adjustments_poll_and_fallbacks_add_no_history_entries(self):
+        live_requests = []
+        self.page.on(
+            "request",
+            lambda request: "data/market.json" in request.url
+            and live_requests.append(request.url),
+        )
+        self.page.clock.install(time=FIXTURE_DAY_TIME)
+        self.open_dashboard("?market=USDTRY")
+        length = self.history_length()
+        # A link whose every value falls back: one entry for the page itself.
+        self.open_dashboard(
+            "?date=2020-01-01&compare=not-a-date&market=USDTRY&maturity=2026-13&period=weekly"
+        )
+        expect(self.page.locator("#history-notice")).to_contain_text("not in the archive")
+        self.assertEqual(self.url_params(), {"market": "USDTRY"})
+        length += 1
+        self.assertEqual(self.history_length(), length)
+
+        self.choose_compare("2026-09-30")
+        self.select_button("Dec 2026").click()
+        self.assert_selected("Dec 2026")
+        self.page.locator('[data-yield-period="monthly"]').click()
+        self.assert_period("monthly")
+        self.compare_select().select_option("")
+        self.assert_not_comparing()
+        self.assertEqual(
+            self.url_params(), {"market": "USDTRY", "maturity": "2026-12", "period": "monthly"}
+        )
+        self.assertEqual(self.history_length(), length)
+
+        polls = len(live_requests)
+        self.page.evaluate("() => { document.querySelector('#contract-rows tr').__old = true; }")
+        self.page.clock.run_for("01:01")
+        self.page.wait_for_function("() => !document.querySelector('#contract-rows tr').__old")
+        self.assertEqual(len(live_requests), polls + 1)
+        self.assertEqual(self.history_length(), length)
+
+        # A close that fails to load leaves the view and the entry as they were.
+        failed = "2026-10-05"
+        broken = copy.deepcopy(self.history[failed])
+        broken["schema_version"] = 3
+        self.serve_snapshot(re.compile(rf"/data/history/{failed}\.json"), broken)
+        self.page.locator("#history-select").select_option(failed)
+        expect(self.page.locator("#history-notice")).to_contain_text(
+            f"The close of {HISTORY_LABELS[failed]} could not be loaded."
+        )
+        self.assert_live()
+        expect(self.page.locator("#history-select")).to_have_value("")
+        self.assertEqual(
+            self.url_params(), {"market": "USDTRY", "maturity": "2026-12", "period": "monthly"}
+        )
+        self.assertEqual(self.history_length(), length)
+        self.expect_load_errors(1)
+
+        # Back goes to the previous view, not the previous tweak.
+        self.go_back()
+        self.assert_live()
+        self.assertEqual(self.url_params(), {"market": "USDTRY"})
+        self.assert_no_selection()
+        self.assert_period("daily")
+
+    def test_back_onto_a_close_that_can_no_longer_be_loaded_falls_back_to_live(self):
+        self.open_dashboard("?market=EURTRY&compare=2026-09-30")
+        day = "2026-10-05"
+        self.page.locator("#history-select").select_option(day)
+        self.assert_historical(day)
+        self.go_back()
+        self.assert_live()
+        self.assert_comparing("2026-09-30")
+        length = self.history_length()
+
+        broken = copy.deepcopy(self.history[day])
+        broken["schema_version"] = 3
+        self.serve_snapshot(re.compile(rf"/data/history/{day}\.json"), broken)
+        self.page.evaluate(f"() => state.historyCache.delete('{day}')")
+        self.go_forward()
+        notice = self.page.locator("#history-notice")
+        expect(notice).to_have_text(f"The close of {HISTORY_LABELS[day]} could not be loaded.")
+        self.assert_live()
+        self.assert_market("EURTRY")
+        self.assert_comparing("2026-09-30")
+        expect(self.page.locator("#history-select")).to_have_value("")
+        self.assertEqual(self.url_params(), {"market": "EURTRY", "compare": "2026-09-30"})
+        self.assertEqual(self.history_length(), length)
+        self.expect_load_errors(1)
+
+    def test_back_and_forward_during_a_slow_load_land_on_the_last_entry(self):
+        self.open_dashboard("?market=USDTRY")
+        for day in ("2026-10-06", "2026-10-05", "2026-09-30"):
+            self.page.locator("#history-select").select_option(day)
+            self.assert_historical(day)
+        length = self.history_length()
+        # Several steps at once.
+        self.page.evaluate("() => history.go(-3)")
+        self.assert_live()
+        self.assertEqual(self.url_params(), {"market": "USDTRY"})
+        self.page.evaluate("() => history.go(2)")
+        self.assert_historical("2026-10-05")
+        self.assert_market("USDTRY", self.history["2026-10-05"])
+
+        # Live data that arrives after Forward never replaces the close it reached.
+        self.page.evaluate(
+            """() => {
+              const fetchNow = window.fetch;
+              window.fetch = (url, options) => String(url).includes('market.json')
+                ? new Promise((resolve) => setTimeout(resolve, 600)).then(() => fetchNow(url, options))
+                : fetchNow(url, options);
+            }"""
+        )
+        self.page.evaluate("() => history.go(-2)")
+        self.page.wait_for_function("() => location.search === '?market=USDTRY'")
+        expect(self.page.locator("#refresh-button")).to_be_disabled()
+        self.go_forward()
+        self.assert_historical("2026-10-06")
+        self.page.wait_for_timeout(1000)
+        self.assert_historical("2026-10-06")
+        self.assert_market("USDTRY", self.history["2026-10-06"])
+        self.assertEqual(self.url_params(), {"market": "USDTRY", "date": "2026-10-06"})
+        expect(self.page.locator("#refresh-button")).to_be_enabled()
+
+        # A close chosen while Back's live load is under way is one new entry.
+        self.page.evaluate("() => history.back()")
+        self.page.wait_for_function("() => location.search === '?market=USDTRY'")
+        self.page.locator("#history-select").select_option(ROLLED_DAY)
+        self.assert_historical(ROLLED_DAY)
+        self.page.wait_for_timeout(1000)
+        self.assert_historical(ROLLED_DAY)
+        self.assertEqual(self.history_length(), length - 2)
+        self.go_back()
+        self.assert_live()
+        self.assertEqual(self.errors, [])
+
+    def test_back_after_tapping_a_history_chart_point_on_a_phone(self):
+        self.reopen_at(FIXTURE_DAY_TIME, viewport=MOBILE_VIEWPORT, has_touch=True, is_mobile=True)
+        self.open_dashboard("?market=USDTRY&maturity=2028-01")
+        self.load_history(len(HISTORY_FIXTURE))
+        day = "2026-10-05"
+        self.page.locator(f'#history-chart-svg a[data-history-day="{day}"]').tap()
+        self.assert_historical(day)
+        self.go_back()
+        self.assert_live()
+        self.assert_selected("Jan 2028")
+        expect(self.page.locator("#history-chart")).to_be_visible()
+        self.assert_focus_not_lost()
+        self.assert_no_sideways_scroll()
 
     # Accessibility: axe-core audit of each rendered state
 
