@@ -3077,7 +3077,8 @@ async function openHistoryLink(event) {
   beginNavigation();
   state.requestedMaturity = state.selectedKey;
   if (state.compareDate && !(state.compareDate < day)) clearCompare();
-  await loadView(day, { navigate: true });
+  // A later load, such as Back's, may take over; it applies its own maturity.
+  if (await loadView(day, { navigate: true }) === undefined) return;
   state.requestedMaturity = null;
   if (focusLost()) {
     (elements.inspectorHistoryScroll.hidden || elements.inspector.hidden

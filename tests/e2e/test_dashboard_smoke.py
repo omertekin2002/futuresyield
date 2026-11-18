@@ -3592,6 +3592,38 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assert_live()
         self.assertEqual(self.errors, [])
 
+    def test_back_while_a_history_link_loads_restores_the_entry_maturity(self):
+        self.open_dashboard("?market=USDTRY&maturity=2026-12")
+        self.assert_selected("Dec 2026")
+        self.page.locator('.market-options [data-market="EURTRY"]').click()
+        self.assert_market("EURTRY")
+        self.select_button("Nov 2026", "EURTRY").click()
+        self.assert_selected("Nov 2026", "EURTRY")
+        self.load_history(len(HISTORY_FIXTURE))
+        day = "2026-10-05"
+        # The close loads quickly and is then dropped for Back's slower live load.
+        self.page.evaluate(
+            f"""() => {{
+              state.historyCache.delete('{day}');
+              const fetchNow = window.fetch;
+              window.fetch = (url, options) => {{
+                const wait = String(url).includes('market.json') ? 800
+                  : String(url).includes('{day}.json') ? 200 : 0;
+                return new Promise((resolve) => setTimeout(resolve, wait))
+                  .then(() => fetchNow(url, options));
+              }};
+            }}"""
+        )
+        self.page.locator(f'#inspector-history-rows a[data-history-day="{day}"]').click()
+        self.go_back()
+        self.page.wait_for_function("() => !document.querySelector('#refresh-button').disabled")
+        self.page.wait_for_timeout(300)
+        self.assert_live()
+        self.assert_market("USDTRY")
+        self.assert_selected("Dec 2026")
+        self.assertEqual(self.url_params(), {"market": "USDTRY", "maturity": "2026-12"})
+        self.assertEqual(self.errors, [])
+
     def test_back_after_tapping_a_history_chart_point_on_a_phone(self):
         self.reopen_at(FIXTURE_DAY_TIME, viewport=MOBILE_VIEWPORT, has_touch=True, is_mobile=True)
         self.open_dashboard("?market=USDTRY&maturity=2028-01")
