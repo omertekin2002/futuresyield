@@ -876,9 +876,9 @@ function formatMaturityMonth(key) {
   return `${MONTH_NAMES[Number(month) - 1]} ${year}`;
 }
 
-// Select the maturity a shared link asked for, once the first view has
-// rendered. One that isn't listed on the day on screen, or isn't a month, is
-// dropped from the URL with a notice.
+// Select the maturity a shared link or a restored history entry asked for,
+// once its view has rendered. One that isn't listed on the day on screen, or
+// isn't a month, selects nothing and is dropped from the URL with a notice.
 function applyRequestedMaturity() {
   const key = state.requestedMaturity;
   if (key === null || !state.data) return;
@@ -889,6 +889,7 @@ function applyRequestedMaturity() {
     setSelection(key);
     return;
   }
+  setSelection(null);
   updateUrlParam("maturity", null);
   const day = state.renderedDate ?? state.adjustedDay ?? state.snapshot.market_date;
   addNotice(
@@ -3476,9 +3477,16 @@ window.addEventListener("popstate", async () => {
   if (state.snapshot && date === state.viewDate && date === state.renderedDate) {
     renderSnapshot(state.snapshot);
     renderViewState();
-  } else if (await loadView(date) === false && date) {
+  } else {
+    let reached = await loadView(date);
     // A close that can't be loaded any more falls back to live, as its link would.
-    await loadView(null);
+    if (reached === false && date) reached = await loadView(null);
+    // With nothing loadable, the view on screen stays, shown with the entry's
+    // market, maturity and period so the address matches it.
+    if (reached === false && state.snapshot) {
+      renderSnapshot(state.snapshot);
+      renderViewState();
+    }
   }
   // Focus left on a link or point that was redrawn returns to the charts.
   if (focusLost()) elements.curveTitle.focus({ preventScroll: true });

@@ -3624,6 +3624,48 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assertEqual(self.url_params(), {"market": "USDTRY", "maturity": "2026-12"})
         self.assertEqual(self.errors, [])
 
+    def test_back_when_nothing_loads_shows_the_entry_market_on_the_view_kept(self):
+        self.open_dashboard("?market=USDTRY")
+        day = "2026-10-06"
+        self.page.locator("#history-select").select_option(day)
+        self.assert_historical(day)
+        self.page.locator('.market-options [data-market="EURTRY"]').click()
+        self.assert_market("EURTRY", self.history[day])
+        broken = copy.deepcopy(self.snapshot)
+        broken["schema_version"] = 3
+        self.serve_snapshot(re.compile(r"/data/market\.json"), broken)
+        self.page.evaluate("() => history.go(-2)")
+        expect(self.page.locator("#history-notice")).to_have_text(
+            f"Live data is unavailable. Still showing the close of {HISTORY_LABELS[day]}."
+        )
+        self.assert_historical(day)
+        self.assert_market("USDTRY", self.history[day])
+        self.assertEqual(self.url_params(), {"market": "USDTRY", "date": day})
+        self.expect_load_errors(1)
+
+    def test_back_to_a_maturity_no_longer_listed_selects_nothing(self):
+        self.open_dashboard("?market=USDTRY&maturity=2026-10")
+        self.assert_selected("Oct 2026")
+        day = "2026-10-06"
+        self.page.locator("#history-select").select_option(day)
+        self.assert_historical(day)
+        self.select_button("Dec 2026").click()
+        self.assert_selected("Dec 2026")
+        # Oct 2026 has matured by the time Back reloads live data.
+        matured = copy.deepcopy(self.snapshot)
+        matured["markets"]["USDTRY"]["contracts"].pop(0)
+        self.serve_snapshot(re.compile(r"/data/market\.json"), matured)
+        self.go_back()
+        self.assert_live()
+        expect(self.page.locator("#history-notice")).to_have_text(
+            "No Oct 2026 maturity listed for USD/TRY on 07 Oct 2026."
+        )
+        expect(self.page.locator("#contract-rows > tr")).to_have_count(
+            len(matured["markets"]["USDTRY"]["contracts"])
+        )
+        self.assert_no_selection()
+        self.assertEqual(self.url_params(), {"market": "USDTRY"})
+
     def test_back_after_tapping_a_history_chart_point_on_a_phone(self):
         self.reopen_at(FIXTURE_DAY_TIME, viewport=MOBILE_VIEWPORT, has_touch=True, is_mobile=True)
         self.open_dashboard("?market=USDTRY&maturity=2028-01")
