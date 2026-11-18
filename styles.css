@@ -792,8 +792,14 @@ h2 {
   stroke: var(--ink);
   stroke-width: 1;
 }
-.history-hit {
+/* Only each point's bounded hit area takes the pointer, so a marker, ring or
+   halo that overlaps a neighbour never catches its tap. */
+.history-points * {
+  pointer-events: none;
+}
+.history-points .history-hit {
   fill: transparent;
+  pointer-events: all;
 }
 .history-ring {
   fill: none;

@@ -3062,6 +3062,40 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assert_historical("2026-10-05")
         self.assert_no_sideways_scroll()
 
+    def test_history_chart_point_centres_hit_their_own_point(self):
+        # Dec 2026 is priced on every close, so on a phone 05, 06 and 07 Oct
+        # sit a few pixels apart and the live point's halo covers the others.
+        for viewport in (None, MOBILE_VIEWPORT):
+            with self.subTest(viewport=viewport):
+                if viewport:
+                    self.reopen_at(
+                        FIXTURE_DAY_TIME, viewport=viewport, has_touch=True, is_mobile=True,
+                    )
+                self.open_dashboard("?market=USDTRY&maturity=2026-12")
+                self.load_history(len(HISTORY_FIXTURE))
+                hits = self.page.evaluate(
+                    """() => [...document.querySelectorAll('#history-chart-svg .history-point')]
+                        .map((node) => {
+                            const box = node.querySelector('.history-marker').getBoundingClientRect();
+                            const hit = document.elementFromPoint(
+                                box.x + box.width / 2, box.y + box.height / 2,
+                            );
+                            return [node.dataset.historyDay,
+                                    hit?.closest('.history-point')?.dataset.historyDay ?? null];
+                        })"""
+                )
+                self.assertEqual(len(hits), 6)
+                for day, hit in hits:
+                    self.assertEqual(hit, day)
+                if viewport:
+                    box = self.page.locator(
+                        '#history-chart-svg [data-history-day="2026-10-06"] .history-marker'
+                    ).bounding_box()
+                    self.page.touchscreen.tap(
+                        box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+                    )
+                    self.assert_historical("2026-10-06")
+
     def test_history_chart_follows_the_yield_period(self):
         self.open_dashboard("?market=USDTRY&maturity=2028-01")
         self.load_history(len(HISTORY_FIXTURE))
