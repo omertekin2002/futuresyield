@@ -171,6 +171,18 @@ board) from that day's snapshot, for every market.
   `?market=`, for example `?date=2026-10-27&market=EURTRY`. Switching markets
   keeps the date. A date that isn't archived falls back to live with a short
   notice.
+- **Back and Forward.** Moving to another page adds a browser history entry:
+  choosing a close or **Live** in the View menu, opening a close from a
+  History date or History chart point, **Back to live**, **Refresh** from a past
+  close, and clicking a market tab. The browser's **Back** and **Forward**
+  buttons then step through those views in place, restoring each one's date,
+  market, comparison, maturity and yield period, and reuse a close already
+  loaded instead of fetching it again. Adjustments to the page on screen
+  (comparison, maturity, yield period), the one-minute poll and the fallbacks
+  from a bad link update the URL in place without adding entries, so Back goes
+  to the previous view, not the previous tweak. An entry whose close can no
+  longer be loaded shows the "could not be loaded" notice and falls back to
+  live.
 - **Published with the site.** The Pages `build` job checks out `data-history`,
   if it exists, and `scripts/build_site.sh` copies its `history/` into
   `_site/data/history/`, so the files are served from the same origin. A close
@@ -431,7 +443,8 @@ selection is kept in the URL as `?maturity=YYYY-MM`, and the yield period as
 maturity, period and inspector. Selecting, clearing and period clicks update
 the URL in place, without adding history entries. Switching market drops
 `maturity` and keeps `period`. A link's maturity is applied once, when the page
-opens: after you clear it, the one-minute refresh doesn't bring it back.
+opens or Back or Forward restores its entry: after you clear it, the one-minute
+refresh doesn't bring it back.
 
 **Inspector.** Below that line, an inspector shows the selected maturity's
 inputs and arithmetic for the day on screen, live or an archived close, so an
