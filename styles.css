@@ -697,6 +697,120 @@ h2 {
   background: var(--paper);
   text-transform: uppercase;
 }
+/* The History chart: the table's closes on a calendar-time axis. Strokes
+   and fills differ in shape and dash as well as colour, so they hold in
+   grey print. */
+.history-chart {
+  margin: 0 0 12px;
+  padding: 0;
+  border: 1px solid var(--ink);
+  break-inside: avoid;
+}
+.history-chart-caption,
+.history-chart-key {
+  margin: 0;
+  padding: 6px 10px;
+  font: 12px/1.4 var(--serif);
+}
+.history-chart-caption {
+  border-bottom: 1px solid var(--ink);
+}
+.history-chart-key {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  border-top: 1px solid var(--ink);
+}
+.history-key-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.history-key-item svg {
+  flex: none;
+}
+.history-chart-svg {
+  display: block;
+  max-width: 100%;
+  overflow: visible;
+}
+.history-chart-svg text {
+  font: 11px var(--sans);
+  fill: var(--ink);
+}
+.history-axes line {
+  stroke: var(--ink);
+  stroke-width: 1;
+}
+.history-tick-y {
+  text-anchor: end;
+  dominant-baseline: middle;
+}
+.history-tick-x.is-last,
+.history-on-screen-label {
+  text-anchor: end;
+}
+.history-chart-svg .history-on-screen-label {
+  font-weight: 700;
+}
+.history-empty {
+  text-anchor: middle;
+  dominant-baseline: middle;
+  font-style: italic;
+}
+.history-gap-line {
+  stroke: var(--ink);
+  stroke-width: 1.5;
+}
+.history-gap,
+.history-key-gap {
+  stroke: var(--ink);
+  stroke-width: 0.5;
+}
+.history-lines polyline {
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: 2;
+  stroke-linejoin: round;
+}
+.history-missing-mark {
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: 2;
+}
+.history-marker {
+  fill: var(--ink);
+  stroke: var(--ink);
+  stroke-width: 2;
+}
+.history-marker.is-stale {
+  fill: var(--paper);
+  stroke-dasharray: 2.5 2.5;
+}
+.history-halo {
+  fill: var(--yellow);
+  stroke: var(--ink);
+  stroke-width: 1;
+}
+.history-hit {
+  fill: transparent;
+}
+.history-ring {
+  fill: none;
+  stroke: var(--link);
+  stroke-width: 3;
+  visibility: hidden;
+}
+.history-point:hover .history-ring,
+.history-point:focus-visible .history-ring {
+  visibility: visible;
+}
+.history-point:focus {
+  outline: none;
+}
+a.history-point {
+  cursor: pointer;
+}
 /* Positioned, so the stale tags' screen-reader text scrolls with the table
    instead of widening the page. */
 .inspector-history-scroll {
