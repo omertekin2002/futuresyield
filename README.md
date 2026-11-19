@@ -23,6 +23,9 @@ redeployed by GitHub Actions every hour during VİOP trading hours on weekdays,
 - Snapshot age, delayed-data and market-closed states, and one-click refresh
 - Any archived end-of-day close, browsable from the **View** menu
 - Any earlier archived close overlaid on both curves, with price and yield deltas
+- One exact contract's archived closes as a **History** table in the inspector,
+  loaded on demand, with every missing value and capture gap shown as such,
+  and a small chart of its yield on those closes whose points open their day
 - A **Download CSV** of the contract board, with the compared close when one is on
 - A **Print** layout, from the button beside it or the browser's own print
   command: a header names the market, the live snapshot time or archived
@@ -168,11 +171,27 @@ board) from that day's snapshot, for every market.
   `?market=`, for example `?date=2026-10-27&market=EURTRY`. Switching markets
   keeps the date. A date that isn't archived falls back to live with a short
   notice.
+- **Back and Forward.** Moving to another page adds a browser history entry:
+  choosing a close or **Live** in the View menu, opening a close from a
+  History date or History chart point, **Back to live**, **Refresh** from a past
+  close, and clicking a market tab. The browser's **Back** and **Forward**
+  buttons then step through those views in place, restoring each one's date,
+  market, comparison, maturity and yield period, and reuse a close already
+  loaded instead of fetching it again. Adjustments to the page on screen
+  (comparison, maturity, yield period), the one-minute poll and the fallbacks
+  from a bad link update the URL in place without adding entries, so Back goes
+  to the previous view, not the previous tweak. An entry whose close can no
+  longer be loaded shows the "could not be loaded" notice and falls back to
+  live.
 - **Published with the site.** The Pages `build` job checks out `data-history`,
   if it exists, and `scripts/build_site.sh` copies its `history/` into
   `_site/data/history/`, so the files are served from the same origin. A close
   archived by a run appears in the next run's deploy. Without the branch the
   site ships an empty manifest and the menu stays hidden.
+- **One contract across the archive.** With a maturity selected, the
+  inspector's **History** group lists that exact contract on every archived
+  close up to the day on screen, each date linking to that close. See
+  **Inspector** below.
 
 ### Comparing two closes
 
@@ -386,7 +405,9 @@ live view of each market, a past close with its banner, a comparison overlay
 with both legends and a tooltip showing, a tooltip opened from the keyboard on
 each chart, each yield period, a 390×844 mobile viewport, a selected maturity
 on desktop and on that mobile viewport with its inspector open, the
-inspector's comparison table and its "not listed" message on both, the stale-point
+inspector's comparison table and its "not listed" message on both, the
+History table and chart on both, with a chart point focused and with a
+Retry button for a close that failed to load, the stale-point
 key on desktop and mobile, a market whose charts are empty, and the
 load-error state. It fails on any serious or critical violation and lists each one's
 rule, impact, element and help text. As an automated check, it can't judge
@@ -423,7 +444,8 @@ selection is kept in the URL as `?maturity=YYYY-MM`, and the yield period as
 maturity, period and inspector. Selecting, clearing and period clicks update
 the URL in place, without adding history entries. Switching market drops
 `maturity` and keeps `period`. A link's maturity is applied once, when the page
-opens: after you clear it, the one-minute refresh doesn't bring it back.
+opens or Back or Forward restores its entry: after you clear it, the one-minute
+refresh doesn't bring it back.
 
 **Inspector.** Below that line, an inspector shows the selected maturity's
 inputs and arithmetic for the day on screen, live or an archived close, so an
@@ -459,6 +481,65 @@ unusual point can be checked without reading across the board:
   and shows no changes. A side without a price or a yield shows "—" with the
   same reason as above, and that row's change is "—". Only observed values
   and differences are shown; nothing splits a change into causes.
+- **History,** whenever the site has archived closes: the selected contract on
+  every archived close up to and including the day on screen, newest first,
+  so one contract, such as `USDTRYZ2026`, can be followed across the archive.
+  Nothing is fetched until you press **Load history**, which names how many
+  closes it will load. They are then fetched a few at a time and kept in
+  memory, so switching the yield period, the selection or the market never
+  fetches them again, and opening a close from the table reuses its file.
+  - **Identity.** Rows are matched by the selected contract's exact VİOP
+    symbol in the market on screen. Another contract, such as the next
+    front month, is never stitched into the series.
+  - **Rows.** Each close shows its last price, premium, the yield for the
+    period the chart shows, days left and last trade with the **stale** tag,
+    each as that close's own snapshot stored or worked them out (its own spot,
+    days left and latest quote day). The live view adds itself as the top
+    row, labelled **Live**; a past close's own row is labelled **On screen**.
+    Closes after the day on screen are left out. A coverage line above the
+    table counts the archived closes with a price, for example "Observed with
+    a price on 12 of 15 archived closes, 26 Oct 2026 – 16 Nov 2026".
+  - **Missing values,** each with its own text and never filled in or
+    interpolated: **Not listed on this close** (the contract wasn't listed
+    yet, or no longer); **Listed, no price** (listed with no last price, so
+    the premium and yield cells are empty); **Could not be loaded** with the
+    reason, while the other closes still render; and **No archived close for
+    N weekdays (a holiday or a missed capture)** between two closes that
+    have weekdays between them. The archive doesn't say which of the two a
+    gap is, so the table doesn't either, and gaps are never backfilled.
+  - **Retry.** While any close on screen could not be loaded, a **Retry**
+    button beside the coverage line names how many, such as "Retry 1 close".
+    It fetches only those closes again, a few at a time, and never the ones
+    that loaded. The table and chart stay on screen meanwhile: the failed
+    rows say they are being retried, the button is unavailable, and the
+    status reads "Retrying N closes…". A redraw in between, such as the
+    one-minute refresh or a period, selection or market change, never
+    fetches them twice. Recovered closes become normal rows and chart points
+    and are cached like the rest; a close that fails again keeps its row with
+    the new reason, and the button stays. Once every close has loaded the
+    button goes, and focus on it moves to the table. Nothing is retried
+    automatically.
+  - **Links.** Each date opens that close's full dashboard with the same
+    market, maturity and yield period
+    (`?date=YYYY-MM-DD&market=…&maturity=YYYY-MM&period=…`, plus the
+    comparison while it is earlier than that close). A plain click opens it
+    in place, as the **View** menu does; the day on screen isn't a link.
+  - **Chart.** Above the table, a small chart plots the same closes' yield
+    for the period the yield chart shows, drawn from the closes already
+    loaded, so it fetches nothing. Its x axis is calendar time, so missing
+    closes keep their width. The line breaks at every close that is not
+    listed, listed with no price or could not be loaded (each marked with a
+    cross), and at weekdays with no archived close (hatched along the axis).
+    Nothing is interpolated across a break. Stale points are hollow, and the
+    day on screen is ringed in yellow and labelled **Live** or **On screen**.
+    Every other point is a link with the same URL as that close's table
+    date, opened in place the same way, and is named for screen readers by
+    its date, yield and last trade; the table stays the full text
+    alternative.
+  - **Layout.** It stays a real table with column and row headers at every
+    width, and scrolls sideways inside its own frame on a phone. Once
+    loaded, it prints with the inspector, its chart redrawn at the page's
+    width; the button never prints.
 
 Every value is the one the board, the carry table and the chart tooltips show.
 Nothing missing is filled in: without a bid there is no profit, a contract

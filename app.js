@@ -94,6 +94,19 @@ const elements = {
   inspectorCompareTable: document.querySelector("#inspector-compare-table"),
   inspectorCompareHead: document.querySelector("#inspector-compare-head"),
   inspectorCompareRows: document.querySelector("#inspector-compare-rows"),
+  inspectorHistoryGroup: document.querySelector("#inspector-history-group"),
+  inspectorHistoryNote: document.querySelector("#inspector-history-note"),
+  historyLoad: document.querySelector("#history-load"),
+  historyRetry: document.querySelector("#history-retry"),
+  inspectorHistoryStatus: document.querySelector("#inspector-history-status"),
+  inspectorHistoryCoverage: document.querySelector("#inspector-history-coverage"),
+  inspectorHistoryScroll: document.querySelector("#inspector-history-scroll"),
+  inspectorHistoryHead: document.querySelector("#inspector-history-head"),
+  inspectorHistoryRows: document.querySelector("#inspector-history-rows"),
+  historyChart: document.querySelector("#history-chart"),
+  historyChartCaption: document.querySelector("#history-chart-caption"),
+  historyChartSvg: document.querySelector("#history-chart-svg"),
+  historyChartKey: document.querySelector("#history-chart-key"),
   downloadCsv: document.querySelector("#download-csv"),
   downloadCsvName: document.querySelector("#download-csv-name"),
   printPage: document.querySelector("#print-page"),
@@ -140,7 +153,30 @@ const state = {
   // A ?maturity= from the link the page was opened with, applied once to the
   // first view that renders, so a later poll can't bring back a cleared one.
   requestedMaturity: null,
+  // The inspector's History table: whether it was asked for, and each
+  // archived close fetched for it, by date, as { snapshot } or { error }.
+  // Closes being fetched are in historyPending. Nothing is fetched until the
+  // Load history button is pressed, and nothing is fetched twice, except a
+  // close that failed, again when Retry is pressed. A close being retried
+  // keeps its { error } entry until the new attempt settles.
+  historyOpen: false,
+  historyCache: new Map(),
+  historyPending: new Set(),
+  // The loaded History rows the chart above the table draws, newest first,
+  // with the contract's symbol, or null while the table isn't loaded.
+  historyChart: null,
+  // A move to another view the user asked for, while it loads: the address
+  // it is building, written once the view is on screen, and whether that
+  // write adds a history entry. null when no move is under way.
+  navigation: null,
+  // The query of the history entry on screen, as last written or restored.
+  // A popstate that keeps it, such as the skip link's change of fragment,
+  // names no other view.
+  shownSearch: window.location.search,
 };
+
+// Archived closes fetched at once for the History table.
+const HISTORY_CONCURRENCY = 4;
 
 // Quick comparison picks: the archived close nearest each target, if one is
 // within the tolerance, in calendar days.
@@ -847,9 +883,9 @@ function formatMaturityMonth(key) {
   return `${MONTH_NAMES[Number(month) - 1]} ${year}`;
 }
 
-// Select the maturity a shared link asked for, once the first view has
-// rendered. One that isn't listed on the day on screen, or isn't a month, is
-// dropped from the URL with a notice.
+// Select the maturity a shared link or a restored history entry asked for,
+// once its view has rendered. One that isn't listed on the day on screen, or
+// isn't a month, selects nothing and is dropped from the URL with a notice.
 function applyRequestedMaturity() {
   const key = state.requestedMaturity;
   if (key === null || !state.data) return;
@@ -860,6 +896,7 @@ function applyRequestedMaturity() {
     setSelection(key);
     return;
   }
+  setSelection(null);
   updateUrlParam("maturity", null);
   const day = state.renderedDate ?? state.adjustedDay ?? state.snapshot.market_date;
   addNotice(
@@ -957,6 +994,7 @@ function renderInspector(contract) {
   elements.inspector.hidden = !contract;
   if (!contract) {
     renderInspectorComparison(null);
+    renderInspectorHistory(null);
     return;
   }
   const data = state.data;
@@ -1048,6 +1086,7 @@ function renderInspector(contract) {
   ]);
 
   renderInspectorComparison(contract);
+  renderInspectorHistory(contract);
 
   elements.inspectorCarryGroup.hidden = !hasNumber(data.contract_size);
   if (elements.inspectorCarryGroup.hidden) {
@@ -1300,6 +1339,583 @@ function renderInspectorComparison(contract) {
       change: { value: formatYieldDelta(yieldDelta), className: signedClass(yieldDelta) },
     },
   ].map(comparisonRow));
+}
+
+// Archived closes in the selected contract's history: every one up to and
+// including the day on screen, newest first. Later closes are left out.
+function historyDaysOnScreen(reference = referenceDate()) {
+  return reference ? state.historyDays.filter((day) => day <= reference) : [];
+}
+
+// Weekdays strictly between two ISO dates, the earlier one first.
+function weekdaysBetween(earlier, later) {
+  let count = 0;
+  for (let day = dayOffset(later, { days: 1 }); day > earlier; day = dayOffset(day, { days: 1 })) {
+    const weekday = new Date(`${day}T00:00:00Z`).getUTCDay();
+    if (weekday >= 1 && weekday <= 5) count += 1;
+  }
+  return count;
+}
+
+function countText(count, one, many) {
+  return `${count} ${count === 1 ? one : many}`;
+}
+
+// Fetch the archived closes not cached or already on their way, a few at a
+// time, then redraw the History table. A close that fails to load is cached
+// with the reason, so it is not fetched again on every redraw. With retry,
+// fetch instead the closes that failed and are not already being retried.
+async function fetchHistoryDays(days, { retry = false } = {}) {
+  const queue = days.filter((day) =>
+    !state.historyPending.has(day) &&
+    (retry ? Boolean(state.historyCache.get(day)?.error) : !state.historyCache.has(day))
+  );
+  if (!queue.length) return;
+  queue.forEach((day) => state.historyPending.add(day));
+  const worker = async () => {
+    while (queue.length) {
+      const day = queue.shift();
+      try {
+        state.historyCache.set(day, { snapshot: await fetchSnapshot(`${HISTORY_URL}/${day}.json`) });
+      } catch (error) {
+        console.warn(`The close of ${day} could not be loaded for the history.`, error);
+        state.historyCache.set(day, { error: error?.message || "unknown error" });
+      } finally {
+        state.historyPending.delete(day);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(HISTORY_CONCURRENCY, queue.length) }, worker));
+  renderInspectorHistory(selectedContract());
+}
+
+// The link to a close's full dashboard with the same market, maturity and
+// yield period, and the comparison while it is still earlier than that close.
+function historyDayHref(day) {
+  const params = new URLSearchParams({
+    date: day,
+    market: state.marketKey,
+    maturity: state.selectedKey,
+    period: state.yieldPeriod,
+  });
+  if (state.compareDate && state.compareDate < day) params.set("compare", state.compareDate);
+  return `?${params}`;
+}
+
+// The History table's date cell: a link to that close, or plain text for the
+// day on screen, with a tag naming the live view.
+function historyDateCell(row) {
+  const header = document.createElement("th");
+  header.scope = "row";
+  if (row.onScreen) {
+    header.append(formatDay(row.day));
+    header.append(" ", inChartTag(row.live ? "Live" : "On screen"));
+  } else {
+    const link = document.createElement("a");
+    link.href = historyDayHref(row.day);
+    link.dataset.historyDay = row.day;
+    link.textContent = formatDay(row.day);
+    header.append(link);
+  }
+  return header;
+}
+
+// Why a History row has no value when its close could not be loaded, and
+// whether it is being fetched again.
+function historyErrorText(row) {
+  return `Could not be loaded: ${row.reason}.${row.retrying ? " Retrying…" : ""}`;
+}
+
+function historyMessageCell(text, className) {
+  const cell = document.createElement("td");
+  cell.colSpan = 5;
+  cell.className = className;
+  cell.textContent = text;
+  return cell;
+}
+
+// One History row: the selected contract on one close, as that close's own
+// snapshot stored it. Nothing missing is filled in.
+function historyRow(row) {
+  const tr = document.createElement("tr");
+  tr.dataset.historyRow = row.day;
+  tr.dataset.state = row.state;
+  if (row.onScreen) tr.classList.add("is-on-screen");
+  tr.append(historyDateCell(row));
+  if (row.state === "error") {
+    if (row.retrying) tr.dataset.retrying = "true";
+    tr.append(historyMessageCell(historyErrorText(row), "history-missing"));
+    return tr;
+  }
+  if (row.state === "no-market") {
+    tr.append(historyMessageCell(`No ${state.data.pair} data in this close.`, "history-missing"));
+    return tr;
+  }
+  if (row.state === "not-listed") {
+    tr.append(historyMessageCell("Not listed on this close.", "history-missing"));
+    return tr;
+  }
+  const { contract, market, generatedAt } = row;
+  const priced = hasNumber(contract.last);
+  const trade = lastTrades(market.contracts, generatedAt).get(contract);
+  const value = priced ? yieldValue(contract, state.yieldPeriod, market.spot?.last) : null;
+  tr.append(
+    priced
+      ? comparisonCell({ value: formatPrice(contract.last) })
+      : comparisonCell({ value: "Listed, no price", className: "history-missing" }),
+    priced
+      ? comparisonCell({ value: formatPercent(contract.premium_percent), className: signedClass(contract.premium_percent) })
+      : comparisonCell(),
+    priced
+      ? comparisonCell({ value: formatYield(value), className: signedClass(value) })
+      : comparisonCell(),
+    comparisonCell({ value: String(contract.days_to_maturity) }),
+    comparisonCell({ value: trade.text, stale: trade.stale }),
+  );
+  return tr;
+}
+
+// A separator for weekdays with no archived close between two rows. It never
+// says which: the day may have been a holiday or a missed capture.
+function historyGapRow(weekdays) {
+  const tr = document.createElement("tr");
+  tr.className = "history-gap";
+  tr.dataset.state = "gap";
+  const cell = document.createElement("td");
+  cell.colSpan = 6;
+  const text = document.createElement("span");
+  text.textContent =
+    `No archived close for ${countText(weekdays, "weekday", "weekdays")} ` +
+    "(a holiday or a missed capture).";
+  cell.append(text);
+  tr.append(cell);
+  return tr;
+}
+
+function setHistoryStatus(text) {
+  if (elements.inspectorHistoryStatus.textContent !== text) {
+    elements.inspectorHistoryStatus.textContent = text;
+  }
+}
+
+// The selected contract on every archived close up to the day on screen,
+// matched by its exact VİOP symbol in the market on screen, never by month or
+// front month. Archived closes are fetched only after Load history is
+// pressed, and each only once.
+function renderInspectorHistory(contract) {
+  const group = elements.inspectorHistoryGroup;
+  const days = historyDaysOnScreen();
+  group.hidden = !contract || !days.length;
+  const loaded = !group.hidden && state.historyOpen &&
+    days.every((day) => state.historyCache.has(day));
+  group.classList.toggle("is-loaded", loaded);
+  elements.inspectorHistoryCoverage.hidden = !loaded;
+  elements.inspectorHistoryScroll.hidden = !loaded;
+  if (group.hidden || !loaded) {
+    renderHistoryRetry([]);
+    elements.inspectorHistoryHead.replaceChildren();
+    elements.inspectorHistoryRows.replaceChildren();
+    state.historyChart = null;
+    renderHistoryChart();
+  }
+  if (group.hidden) return;
+
+  const live = !state.renderedDate;
+  elements.inspectorHistoryNote.textContent =
+    `${contract.symbol} on each archived close up to ${formatDay(referenceDate())}, ` +
+    "newest first, matched by its exact VİOP symbol. Missing values are never filled in.";
+  elements.historyLoad.hidden = state.historyOpen;
+  elements.historyLoad.textContent =
+    `Load history · ${countText(days.length, "archived close", "archived closes")}`;
+  if (!state.historyOpen) {
+    setHistoryStatus("");
+    return;
+  }
+  if (!loaded) {
+    const missing = days.filter((day) => !state.historyCache.has(day));
+    setHistoryStatus(
+      `Loading ${countText(missing.length, "archived close", "archived closes")}…`,
+    );
+    fetchHistoryDays(missing);
+    return;
+  }
+
+  const rows = [];
+  if (live) {
+    rows.push({
+      day: referenceDate(),
+      live: true,
+      onScreen: true,
+      state: "listed",
+      contract,
+      market: state.data,
+      generatedAt: state.snapshot.generated_at,
+    });
+  }
+  days.forEach((day) => {
+    const onScreen = day === state.renderedDate;
+    const entry = state.historyCache.get(day);
+    if (entry.error) {
+      rows.push({
+        day, onScreen, archived: true, state: "error", reason: entry.error,
+        retrying: state.historyPending.has(day),
+      });
+      return;
+    }
+    const market = entry.snapshot.markets?.[state.marketKey];
+    const listed = market?.contracts.find((candidate) => candidate.symbol === contract.symbol);
+    rows.push({
+      day,
+      onScreen,
+      archived: true,
+      state: !market ? "no-market" : listed ? "listed" : "not-listed",
+      contract: listed,
+      market,
+      generatedAt: entry.snapshot.generated_at,
+    });
+  });
+
+  const archived = rows.filter((row) => row.archived);
+  const observed = archived.filter((row) => row.state === "listed" && hasNumber(row.contract.last));
+  const failed = archived.filter((row) => row.state === "error");
+  elements.inspectorHistoryCoverage.textContent =
+    `Observed with a price on ${observed.length} of ` +
+    `${countText(archived.length, "archived close", "archived closes")}, ` +
+    `${formatDay(days.at(-1))} – ${formatDay(days[0])}.` +
+    (failed.length ? ` ${countText(failed.length, "close", "closes")} could not be loaded.` : "");
+
+  const settings = YIELD_PERIODS[state.yieldPeriod];
+  elements.inspectorHistoryHead.replaceChildren(
+    columnHeader("Close"),
+    columnHeader("Last"),
+    columnHeader("Premium"),
+    columnHeader(`${settings.label} yield · ${settings.shortLabel}`),
+    columnHeader("Days left"),
+    columnHeader("Last trade"),
+  );
+  // A redraw, such as the one-minute refresh, keeps focus on the same link.
+  const focused = elements.inspectorHistoryRows.contains(document.activeElement)
+    ? document.activeElement.dataset.historyDay
+    : null;
+  const body = [];
+  rows.forEach((row, index) => {
+    const previous = rows[index - 1];
+    if (previous) {
+      const weekdays = weekdaysBetween(row.day, previous.day);
+      if (weekdays) body.push(historyGapRow(weekdays));
+    }
+    body.push(historyRow(row));
+  });
+  elements.inspectorHistoryRows.replaceChildren(...body);
+  if (focused) {
+    elements.inspectorHistoryRows.querySelector(`a[data-history-day="${focused}"]`)?.focus();
+  }
+  state.historyChart = { symbol: contract.symbol, rows };
+  renderHistoryChart();
+  const retrying = failed.filter((row) => row.retrying);
+  setHistoryStatus(
+    retrying.length
+      ? `Retrying ${countText(retrying.length, "close", "closes")}…`
+      : `History loaded: ${countText(archived.length, "archived close", "archived closes")}.` +
+        (failed.length
+          ? ` ${countText(failed.length, "close", "closes")} could not be loaded.`
+          : ""),
+  );
+  // Focus left on the status while loading, or on Retry once every close it
+  // retried has loaded, moves on to the table.
+  const retryFocused = document.activeElement === elements.historyRetry;
+  renderHistoryRetry(failed);
+  if (
+    document.activeElement === elements.inspectorHistoryStatus ||
+    (retryFocused && elements.historyRetry.hidden)
+  ) {
+    elements.inspectorHistoryScroll.focus();
+  }
+}
+
+// The Retry button beside the coverage line: shown while any close on screen
+// failed to load, naming how many, and unavailable while they are retried.
+// It stays focusable then, so the keyboard keeps its place.
+function renderHistoryRetry(failed) {
+  const button = elements.historyRetry;
+  button.hidden = !failed.length;
+  button.dataset.days = failed.map((row) => row.day).join(" ");
+  button.textContent = `Retry ${countText(failed.length, "close", "closes")}`;
+  if (failed.some((row) => row.retrying)) button.setAttribute("aria-disabled", "true");
+  else button.removeAttribute("aria-disabled");
+}
+
+// The History chart: the same rows as the History table, oldest first, with
+// the selected contract's yield for the chart's period on each close that has
+// one. The x axis is calendar time, so missing closes take up their space,
+// and the line breaks at every close without a value and every run of
+// weekdays without an archived close. Nothing is interpolated. Each point
+// other than the day on screen is a link that opens its close, like the
+// table's date links.
+const SVG_NS = "http://www.w3.org/2000/svg";
+const HISTORY_CHART_HEIGHT = 180;
+const HISTORY_CHART_PADDING = { top: 30, right: 16, bottom: 38, left: 70 };
+// Half the widest a point's click target reaches to each side.
+const HISTORY_POINT_REACH = 20;
+// The strip along the x axis that holds the gap bands and missing marks.
+const HISTORY_STRIP = 12;
+
+function svgNode(name, attributes = {}, text = null) {
+  const node = document.createElementNS(SVG_NS, name);
+  Object.entries(attributes).forEach(([key, value]) => node.setAttribute(key, String(value)));
+  if (text !== null) node.textContent = text;
+  return node;
+}
+
+// A History row as the chart plots it: its yield for the chart's period and
+// last trade, or the table's own text for why it has no value.
+function historyChartPoint(row) {
+  if (row.state === "error") return { ...row, value: null, reason: historyErrorText(row) };
+  if (row.state === "no-market") return { ...row, value: null, reason: `No ${state.data.pair} data in this close.` };
+  if (row.state === "not-listed") return { ...row, value: null, reason: "Not listed on this close." };
+  if (!hasNumber(row.contract.last)) return { ...row, value: null, reason: "Listed, no price." };
+  const value = yieldValue(row.contract, state.yieldPeriod, row.market.spot?.last);
+  if (!hasNumber(value)) return { ...row, value: null, reason: "Listed, no yield on this close." };
+  const trade = lastTrades(row.market.contracts, row.generatedAt).get(row.contract);
+  return { ...row, value, trade };
+}
+
+// A point's accessible name: its date, yield and last trade, as the table
+// row shows them.
+function historyPointName(point) {
+  const settings = YIELD_PERIODS[state.yieldPeriod];
+  const tag = point.onScreen ? `, ${point.live ? "Live" : "On screen"}` : "";
+  const trade = point.trade.time ? `last trade ${point.trade.text}` : "no last trade time";
+  return `${formatDay(point.day)}${tag}: ${formatYield(point.value)} ` +
+    `${settings.label.toLowerCase()} yield (${settings.shortLabel}), ${trade}` +
+    (point.trade.stale ? ", stale" : "");
+}
+
+// A key entry: a small drawing and its text.
+function historyKeyItem(swatch, text) {
+  const item = document.createElement("span");
+  item.className = "history-key-item";
+  const icon = svgNode("svg", { width: 16, height: 14, viewBox: "0 0 16 14", "aria-hidden": "true" });
+  icon.append(...swatch);
+  item.append(icon, text);
+  return item;
+}
+
+function renderHistoryChart() {
+  const figure = elements.historyChart;
+  const svg = elements.historyChartSvg;
+  const chart = state.historyChart;
+  figure.hidden = !chart;
+  if (!chart) {
+    svg.replaceChildren();
+    elements.historyChartKey.replaceChildren();
+    return;
+  }
+  const settings = YIELD_PERIODS[state.yieldPeriod];
+  const rows = [...chart.rows].reverse().map(historyChartPoint);
+  const plotted = rows.filter((row) => row.value !== null);
+  const pad = HISTORY_CHART_PADDING;
+  const width = Math.max(240, Math.round(figure.clientWidth || 600));
+  const height = HISTORY_CHART_HEIGHT;
+  const left = pad.left;
+  const right = width - pad.right;
+  const top = pad.top;
+  const bottom = height - pad.bottom;
+
+  const first = rows[0].day;
+  const span = daysUntil(first, rows.at(-1).day);
+  // Dates sit 10px inside the axes, so the marks at either end stay clear of them.
+  const x = (day) => span
+    ? left + 10 + (daysUntil(first, day) / span) * (right - left - 20)
+    : (left + right) / 2;
+  const values = plotted.map((row) => row.value);
+  let low = values.length ? Math.min(...values) : 0;
+  let high = values.length ? Math.max(...values) : 1;
+  if (low === high) {
+    const margin = Math.abs(low) * 0.1 || 1;
+    low -= margin;
+    high += margin;
+  }
+  // Points stay clear of the plot's top and of the strip along its bottom.
+  const lowest = bottom - HISTORY_STRIP - 10;
+  const y = (value) => lowest - ((value - low) / (high - low)) * (lowest - top - 8);
+
+  elements.historyChartCaption.textContent =
+    `${chart.symbol} · ${settings.label} yield · ${settings.shortLabel} on each close, ` +
+    "oldest to newest. Each point opens its close; the table below lists every value.";
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("width", "100%");
+  svg.setAttribute("height", String(height));
+
+  // A redraw, such as a resize or the one-minute refresh, keeps focus on the
+  // same point.
+  const focused = svg.contains(document.activeElement)
+    ? document.activeElement.closest("a[data-history-day]")?.dataset.historyDay
+    : null;
+
+  const defs = svgNode("defs");
+  const hatch = svgNode("pattern", {
+    id: "history-gap-hatch", width: 6, height: 6,
+    patternUnits: "userSpaceOnUse", patternTransform: "rotate(45)",
+  });
+  hatch.append(svgNode("line", { x1: 0, y1: 0, x2: 0, y2: 6, class: "history-gap-line" }));
+  defs.append(hatch);
+
+  // Axes, and the yield's range and dates at their ends.
+  const axes = svgNode("g", { class: "history-axes", "aria-hidden": "true" });
+  axes.append(
+    svgNode("line", { x1: left, y1: top, x2: left, y2: bottom }),
+    svgNode("line", { x1: left, y1: bottom, x2: right, y2: bottom }),
+  );
+  if (values.length) {
+    const ticks = [...new Set([Math.max(...values), Math.min(...values)])];
+    ticks.forEach((value) => {
+      axes.append(
+        svgNode("line", { x1: left - 4, y1: y(value), x2: left, y2: y(value) }),
+        svgNode("text", { x: left - 7, y: y(value), class: "history-tick-y" }, formatYield(value)),
+      );
+    });
+  } else {
+    axes.append(svgNode("text", {
+      x: (left + right) / 2, y: (top + bottom) / 2, class: "history-empty",
+    }, `No close with a ${settings.label.toLowerCase()} yield to plot.`));
+  }
+  axes.append(svgNode("text", { x: left, y: height - 8, class: "history-tick-x is-first" }, formatDay(first)));
+  if (span) {
+    axes.append(svgNode("text", {
+      x: right, y: height - 8, class: "history-tick-x is-last",
+    }, formatDay(rows.at(-1).day)));
+  }
+
+  // Weekdays without an archived close: a hatched band along the axis
+  // between the two closes either side of them.
+  const gaps = svgNode("g", { class: "history-gaps", "aria-hidden": "true" });
+  // Runs of closes the line joins: consecutive, each with a value.
+  const segments = [];
+  let segment = [];
+  rows.forEach((row, index) => {
+    const previous = rows[index - 1];
+    const weekdays = previous ? weekdaysBetween(previous.day, row.day) : 0;
+    if (weekdays) {
+      const band = svgNode("rect", {
+        x: x(previous.day), y: bottom - HISTORY_STRIP,
+        width: Math.max(1, x(row.day) - x(previous.day)), height: HISTORY_STRIP,
+        fill: "url(#history-gap-hatch)", class: "history-gap", "data-gap": weekdays,
+      });
+      band.append(svgNode("title", {},
+        `No archived close for ${countText(weekdays, "weekday", "weekdays")} ` +
+        "(a holiday or a missed capture)."));
+      gaps.append(band);
+    }
+    if (row.value === null || weekdays) {
+      if (segment.length) segments.push(segment);
+      segment = [];
+    }
+    if (row.value !== null) segment.push(row);
+  });
+  if (segment.length) segments.push(segment);
+
+  const lines = svgNode("g", { class: "history-lines", "aria-hidden": "true" });
+  segments.filter((run) => run.length > 1).forEach((run) => {
+    lines.append(svgNode("polyline", {
+      points: run.map((row) => `${x(row.day)},${y(row.value)}`).join(" "),
+      "data-days": run.map((row) => row.day).join(" "),
+    }));
+  });
+
+  // Closes without a value: a cross on the axis, with the table's wording.
+  const marks = svgNode("g", { class: "history-marks", "aria-hidden": "true" });
+  rows.filter((row) => row.value === null).forEach((row) => {
+    const mark = svgNode("g", {
+      class: "history-missing-mark", "data-history-day": row.day, "data-state": row.state,
+      transform: `translate(${x(row.day)} ${bottom - HISTORY_STRIP / 2})`,
+    });
+    mark.append(
+      svgNode("path", { d: "M -4 -4 L 4 4 M -4 4 L 4 -4" }),
+      svgNode("title", {}, `${formatDay(row.day)}: ${row.reason}`),
+    );
+    marks.append(mark);
+  });
+
+  // The points. Each reaches halfway to its neighbours, at most
+  // HISTORY_POINT_REACH, so a tap lands on the nearest one.
+  const points = svgNode("g", { class: "history-points" });
+  plotted.forEach((row, index) => {
+    const px = x(row.day);
+    const py = y(row.value);
+    const before = index ? (px - x(plotted[index - 1].day)) / 2 : HISTORY_POINT_REACH;
+    const after = index < plotted.length - 1 ? (x(plotted[index + 1].day) - px) / 2 : HISTORY_POINT_REACH;
+    const reach = [Math.min(before, HISTORY_POINT_REACH), Math.min(after, HISTORY_POINT_REACH)];
+    const stale = row.trade.stale;
+    const marker = row.live
+      ? svgNode("rect", { x: px - 4.5, y: py - 4.5, width: 9, height: 9 })
+      : svgNode("circle", { cx: px, cy: py, r: stale ? 5.5 : 4.5 });
+    marker.setAttribute("class", `history-marker${stale ? " is-stale" : ""}`);
+    const node = row.onScreen
+      ? svgNode("g", { role: "img", class: "history-point is-on-screen" })
+      : svgNode("a", { href: historyDayHref(row.day), class: "history-point" });
+    node.setAttribute("aria-label", historyPointName(row));
+    node.dataset.historyDay = row.day;
+    node.dataset.value = String(row.value);
+    if (stale) node.dataset.stale = "";
+    node.append(svgNode("rect", {
+      class: "history-hit", x: px - reach[0], y: top,
+      width: Math.max(reach[0] + reach[1], 1), height: bottom - HISTORY_STRIP - top,
+    }));
+    if (row.onScreen) {
+      node.append(
+        svgNode("circle", { class: "history-halo", cx: px, cy: py, r: 10 }),
+        svgNode("text", {
+          class: "history-on-screen-label", x: Math.min(px + 6, right), y: Math.max(py - 14, 11),
+          "aria-hidden": "true",
+        }, row.live ? "Live" : "On screen"),
+      );
+    } else {
+      node.append(svgNode("circle", { class: "history-ring", cx: px, cy: py, r: 10 }));
+    }
+    node.append(marker);
+    points.append(node);
+  });
+
+  svg.replaceChildren(defs, gaps, axes, lines, marks, points);
+  if (focused) svg.querySelector(`a[data-history-day="${focused}"]`)?.focus();
+
+  // The key: always the day on screen, and each other kind of mark drawn.
+  const live = !state.renderedDate;
+  const items = [
+    historyKeyItem(
+      [
+        svgNode("circle", { class: "history-halo", cx: 8, cy: 7, r: 6 }),
+        live
+          ? svgNode("rect", { class: "history-marker", x: 5, y: 4, width: 6, height: 6 })
+          : svgNode("circle", { class: "history-marker", cx: 8, cy: 7, r: 3 }),
+      ],
+      live ? "Live: the snapshot on screen" : "On screen: the close you are viewing",
+    ),
+  ];
+  if (plotted.some((row) => row.trade.stale)) {
+    items.push(historyKeyItem(
+      [svgNode("circle", { class: "history-marker is-stale", cx: 8, cy: 7, r: 4.5 })],
+      "Hollow: last traded before that close’s latest quote day",
+    ));
+  }
+  if (rows.some((row) => row.value === null)) {
+    items.push(historyKeyItem(
+      [svgNode("path", { class: "history-missing-mark", d: "M 4 3 L 12 11 M 4 11 L 12 3" })],
+      "No yield on that close; the table says why",
+    ));
+  }
+  if (gaps.childElementCount) {
+    items.push(historyKeyItem(
+      [svgNode("rect", { x: 1, y: 1, width: 14, height: 12, fill: "url(#history-gap-hatch)", class: "history-key-gap" })],
+      "Weekdays with no archived close",
+    ));
+  }
+  const note = document.createElement("span");
+  note.className = "history-key-note";
+  note.textContent = "The line breaks at each of these; nothing is interpolated.";
+  items.push(note);
+  elements.historyChartKey.replaceChildren(...items);
 }
 
 // The contract board as a CSV file: one row per contract of the day on
@@ -2074,6 +2690,9 @@ function selectMarket(marketKey, updateUrl = false) {
   // A selection is kept across redraws of the same market while its maturity
   // is still listed.
   const switched = marketKey !== state.marketKey;
+  // Another market is another page, so Back returns to this one.
+  const navigating = updateUrl && switched;
+  if (navigating) beginNavigation();
   state.marketKey = marketKey;
   state.data = market;
   if (switched || !selectedContract()) updateSelection(null);
@@ -2092,11 +2711,8 @@ function selectMarket(marketKey, updateUrl = false) {
   renderComparisonLegends();
   renderCharts();
 
-  if (updateUrl) {
-    const url = new URL(window.location.href);
-    url.searchParams.set("market", marketKey);
-    window.history.replaceState({}, "", url);
-  }
+  if (updateUrl) updateUrlParam("market", marketKey);
+  if (navigating) finishNavigation(true);
 }
 
 function renderSnapshot(snapshot) {
@@ -2104,9 +2720,7 @@ function renderSnapshot(snapshot) {
   renderMarketRail(snapshot);
   renderCompareControl();
 
-  const queryMarket = new URLSearchParams(window.location.search)
-    .get("market")
-    ?.toUpperCase();
+  const queryMarket = currentUrl().searchParams.get("market")?.toUpperCase();
   const selectedMarket = snapshot.markets[state.marketKey]
     ? state.marketKey
     : snapshot.markets[queryMarket]
@@ -2173,12 +2787,51 @@ function addNotice(text) {
   showNotice(shown ? `${elements.historyNotice.textContent} ${text}` : text);
 }
 
+// The address of the view: the one a move under way is building, or the
+// address bar's.
+function currentUrl() {
+  return new URL(state.navigation?.url ?? window.location.href);
+}
+
+// Write the view's address. Adjustments to the view on screen replace the
+// history entry; a move to another view collects them until it lands.
+function writeUrl(url) {
+  if (state.navigation) {
+    state.navigation.url = url.href;
+  } else if (url.href !== window.location.href) {
+    window.history.replaceState({}, "", url);
+    state.shownSearch = window.location.search;
+  }
+}
+
 // Set a query parameter, or delete it with null, without a history entry.
 function updateUrlParam(name, value) {
-  const url = new URL(window.location.href);
+  const url = currentUrl();
   if (value === null) url.searchParams.delete(name);
   else url.searchParams.set(name, value);
-  if (url.href !== window.location.href) window.history.replaceState({}, "", url);
+  writeUrl(url);
+}
+
+// Start a move to another view, such as another close or market, that the
+// browser's Back and Forward buttons step through. The URL changes it makes,
+// and those of the adjustments that follow it as it loads, become one new
+// history entry when it finishes, so the entry it left keeps its address.
+// A move started while another is loading joins it.
+function beginNavigation() {
+  state.navigation ??= { url: window.location.href, push: true };
+}
+
+// Write the address a move built: a new history entry if it reached its view
+// and the address changed, or in place if it fell back. Only the latest load
+// finishes a move, so a superseded one never writes.
+function finishNavigation(reached) {
+  const navigation = state.navigation;
+  if (!navigation) return;
+  state.navigation = null;
+  if (navigation.url === window.location.href) return;
+  if (reached && navigation.push) window.history.pushState({}, "", navigation.url);
+  else window.history.replaceState({}, "", navigation.url);
+  state.shownSearch = window.location.search;
 }
 
 function hideNotice() {
@@ -2215,10 +2868,7 @@ function quickPicks(reference, days) {
 }
 
 function updateCompareUrl() {
-  const url = new URL(window.location.href);
-  if (state.compareDate) url.searchParams.set("compare", state.compareDate);
-  else url.searchParams.delete("compare");
-  if (url.href !== window.location.href) window.history.replaceState({}, "", url);
+  updateUrlParam("compare", state.compareDate);
 }
 
 function clearCompare() {
@@ -2288,6 +2938,8 @@ function renderComparison() {
   elements.yieldTooltip.hidden = true;
   renderComparisonLegends();
   renderInspectorComparison(selectedContract());
+  // The History links carry the comparison, so they follow it too.
+  renderInspectorHistory(selectedContract());
   renderCharts();
 }
 
@@ -2303,9 +2955,12 @@ async function setCompare(date) {
 
   const request = state.compareRequestId;
   try {
-    const data = await fetchSnapshot(`${HISTORY_URL}/${date}.json`);
+    // Archived closes are written once, so one already fetched is reused.
+    const data = state.historyCache.get(date)?.snapshot ??
+      await fetchSnapshot(`${HISTORY_URL}/${date}.json`);
     if (request !== state.compareRequestId) return;
     state.compareSnapshot = data;
+    state.historyCache.set(date, { snapshot: data });
   } catch (error) {
     if (request !== state.compareRequestId) return;
     console.error(error);
@@ -2332,10 +2987,7 @@ function renderViewState() {
   elements.spotTag.textContent = historical ? "Past close" : "≈ 15 min delay";
   document.body.dataset.view = historical ? "historical" : "live";
 
-  const url = new URL(window.location.href);
-  if (historical) url.searchParams.set("date", state.renderedDate);
-  else url.searchParams.delete("date");
-  if (url.href !== window.location.href) window.history.replaceState({}, "", url);
+  updateUrlParam("date", historical ? state.renderedDate : null);
 }
 
 async function loadHistoryIndex() {
@@ -2358,27 +3010,37 @@ async function loadHistoryIndex() {
 }
 
 // Load and render one view: an archived date, or null for the live snapshot.
-// A view that fails to load leaves the current one on screen.
-async function loadView(date) {
+// A view that fails to load leaves the current one on screen. With navigate,
+// the user asked to move to it, so it gets its own history entry once it is
+// on screen (see beginNavigation). Resolves true once the view is on screen,
+// false if it failed, or undefined if a later load took over.
+async function loadView(date, { navigate = false } = {}) {
+  if (navigate) beginNavigation();
   state.viewDate = date;
+  let reached = false;
   const request = ++state.requestId;
   elements.refreshButton.classList.add("is-loading");
   elements.refreshButton.disabled = true;
   try {
+    // Archived closes are written once, so one already fetched is reused.
     const data = date
-      ? await fetchSnapshot(`${HISTORY_URL}/${date}.json`)
+      ? state.historyCache.get(date)?.snapshot ?? await fetchSnapshot(`${HISTORY_URL}/${date}.json`)
       : await fetchSnapshot(`${DATA_URL}?v=${Date.now()}`, { cache: "no-store" });
     if (request !== state.requestId) return;
+    if (date) state.historyCache.set(date, { snapshot: data });
     // Only the live view moves on with the calendar; a past close is its own day.
     const today = istanbulToday();
     const shown = date ? data : rollSnapshotForward(data, today);
     state.renderedDate = date;
     state.adjustedDay = shown === data ? null : today;
     renderSnapshot(shown);
+    reached = true;
   } catch (error) {
     if (request !== state.requestId) return;
     console.error(error);
     state.viewDate = state.renderedDate;
+    // A move that falls back stays on its entry, which shows the fallback.
+    if (state.navigation) state.navigation.push = false;
     if (date) {
       showNotice(`The close of ${formatDay(date)} could not be loaded.`);
       if (!state.snapshot) {
@@ -2401,13 +3063,15 @@ async function loadView(date) {
       elements.refreshButton.classList.remove("is-loading");
       elements.refreshButton.disabled = false;
       renderViewState();
+      finishNavigation(reached);
     }
   }
+  return reached;
 }
 
 function goLive() {
   hideNotice();
-  loadView(null);
+  loadView(null, { navigate: true });
 }
 
 // Refresh always shows live data, so it also leaves a past close.
@@ -2417,7 +3081,7 @@ elements.liveButton.addEventListener("click", goLive);
 elements.historySelect.addEventListener("change", () => {
   const date = elements.historySelect.value;
   hideNotice();
-  loadView(state.historyDays.includes(date) ? date : null);
+  loadView(state.historyDays.includes(date) ? date : null, { navigate: true });
 });
 
 elements.compareSelect.addEventListener("change", () => {
@@ -2433,6 +3097,65 @@ elements.marketButtons.forEach((button) => {
 });
 
 elements.downloadCsv.addEventListener("click", downloadBoardCsv);
+
+// Fetch the selected contract's archived closes for the History table. Focus
+// waits on the loading status, then moves on to the table.
+elements.historyLoad.addEventListener("click", () => {
+  state.historyOpen = true;
+  renderInspectorHistory(selectedContract());
+  (elements.inspectorHistoryScroll.hidden
+    ? elements.inspectorHistoryStatus
+    : elements.inspectorHistoryScroll).focus();
+});
+
+// Fetch again only the closes on screen that failed to load. The table and
+// chart stay up with every loaded row while they are retried.
+elements.historyRetry.addEventListener("click", () => {
+  const button = elements.historyRetry;
+  if (button.getAttribute("aria-disabled") === "true") return;
+  const days = button.dataset.days.split(" ").filter(Boolean);
+  fetchHistoryDays(days, { retry: true });
+  renderInspectorHistory(selectedContract());
+});
+
+// A plain click on a History date or a History chart point opens that close
+// in place, like the View menu, with the same market, maturity and period. A
+// comparison that isn't earlier than that close is dropped, as the link
+// leaves it out.
+async function openHistoryLink(event) {
+  const link = event.target.closest("a[data-history-day]");
+  if (!link || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+    return;
+  }
+  event.preventDefault();
+  const day = link.dataset.historyDay;
+  hideNotice();
+  // Dropping the comparison is part of the move, so the entry it leaves keeps it.
+  beginNavigation();
+  state.requestedMaturity = state.selectedKey;
+  if (state.compareDate && !(state.compareDate < day)) {
+    clearCompare();
+    // Redrawn without it at once, so a close that then fails to load leaves
+    // no comparison on screen that the address and the menu have dropped.
+    renderComparison();
+  }
+  // A later load, such as Back's, may take over; it applies its own maturity.
+  if (await loadView(day, { navigate: true }) === undefined) return;
+  state.requestedMaturity = null;
+  if (focusLost()) {
+    (elements.inspectorHistoryScroll.hidden || elements.inspector.hidden
+      ? elements.curveTitle
+      : elements.inspectorHistoryScroll).focus();
+  }
+}
+
+// Whether the focused element was redrawn away, leaving focus on the page.
+function focusLost() {
+  return document.activeElement === document.body || !document.activeElement;
+}
+
+elements.inspectorHistoryRows.addEventListener("click", openHistoryLink);
+elements.historyChartSvg.addEventListener("click", openHistoryLink);
 
 // The button and the browser's own print command print the same page: both
 // fill the header as printing starts, and the charts redraw at the printed
@@ -2646,6 +3369,7 @@ function syncKeyboardPoint(chart) {
 function renderCharts() {
   renderChart();
   renderYieldChart();
+  if (state.historyChart) renderHistoryChart();
   syncKeyboardPoint(charts.price);
   syncKeyboardPoint(charts.yield);
 }
@@ -2745,44 +3469,107 @@ Object.values(charts).forEach((chart) => {
   });
 });
 
-async function init() {
-  const params = new URLSearchParams(window.location.search);
-  // The yield period applies before anything renders.
-  const requestedPeriod = params.get("period");
-  if (requestedPeriod !== null && Object.hasOwn(YIELD_PERIODS, requestedPeriod)) {
-    state.yieldPeriod = requestedPeriod;
-  } else if (requestedPeriod !== null) {
-    showNotice("That yield period is not 1D, 30D or 365D. Showing daily yields.");
+// The yield period a link asks for, or daily with a notice for one that isn't
+// a period. Doesn't redraw; the caller renders next.
+function applyLinkPeriod(params) {
+  const requested = params.get("period");
+  if (requested !== null && Object.hasOwn(YIELD_PERIODS, requested)) {
+    state.yieldPeriod = requested;
+  } else {
+    state.yieldPeriod = "daily";
+    if (requested !== null) {
+      addNotice("That yield period is not 1D, 30D or 365D. Showing daily yields.");
+    }
   }
   markYieldPeriod();
-  state.requestedMaturity = params.get("maturity");
+}
 
-  await loadHistoryIndex();
+// Apply the comparison a link asks for, once the archive's dates are known,
+// and return the view date it asks for: an archived close, or null for live.
+// Dates that aren't archived fall back with a notice.
+function applyLinkDates(params) {
   const requestedCompare = params.get("compare");
-  if (requestedCompare && state.historyDays.includes(requestedCompare)) {
-    // Checked against the view's date once that has rendered.
-    setCompare(requestedCompare);
-  } else if (requestedCompare) {
+  const compare = requestedCompare && state.historyDays.includes(requestedCompare)
+    ? requestedCompare
+    : null;
+  if (requestedCompare && !compare) {
     addNotice(
       HISTORY_DATE.test(requestedCompare)
         ? `No archived close for ${requestedCompare} to compare with.`
         : "That comparison date is not in the archive.",
     );
-    updateCompareUrl();
   }
+  // Checked against the view's date once that has rendered.
+  if (compare !== state.compareDate) setCompare(compare);
+  else updateCompareUrl();
+
   const requested = params.get("date");
-  if (requested && state.historyDays.includes(requested)) {
-    loadView(requested);
-  } else {
-    if (requested) {
-      addNotice(
-        HISTORY_DATE.test(requested)
-          ? `No archived close for ${requested}. Showing live data.`
-          : "That date is not in the archive. Showing live data.",
-      );
-    }
-    loadView(null);
+  if (requested && state.historyDays.includes(requested)) return requested;
+  if (requested) {
+    addNotice(
+      HISTORY_DATE.test(requested)
+        ? `No archived close for ${requested}. Showing live data.`
+        : "That date is not in the archive. Showing live data.",
+    );
   }
+  return null;
+}
+
+// Back and Forward restore an entry's address; show what it names in place,
+// as a fresh link would, without adding an entry. A close already loaded is
+// reused, and one that can't be loaded falls back as a link's does.
+window.addEventListener("popstate", async () => {
+  // A link to a fragment, such as the skip link, and Back or Forward over
+  // one change only the fragment: the view, its notice and any move still
+  // loading stay as they are.
+  if (window.location.search === state.shownSearch) return;
+  state.shownSearch = window.location.search;
+  // A move still loading is abandoned for the entry the browser went to.
+  state.navigation = null;
+  hideNotice();
+  const params = new URLSearchParams(window.location.search);
+  applyLinkPeriod(params);
+
+  // The maturity applies as the view renders, if it is listed then, with a
+  // notice as for a link.
+  const maturity = params.get("maturity");
+  if (maturity === null) updateSelection(null);
+  state.requestedMaturity = maturity;
+  // The market switches at once, with its data, so nothing drawn while the
+  // view loads mixes two markets.
+  if (state.snapshot) {
+    const market = params.get("market")?.toUpperCase();
+    const restored = state.snapshot.markets[market] ? market : state.snapshot.default_market;
+    if (restored !== state.marketKey) selectMarket(restored);
+  }
+
+  const date = applyLinkDates(params);
+  if (state.snapshot && date === state.viewDate && date === state.renderedDate) {
+    renderSnapshot(state.snapshot);
+    renderViewState();
+  } else {
+    let reached = await loadView(date);
+    // A close that can't be loaded any more falls back to live, as its link would.
+    if (reached === false && date) reached = await loadView(null);
+    // With nothing loadable, the view on screen stays, shown with the entry's
+    // market, maturity and period so the address matches it.
+    if (reached === false && state.snapshot) {
+      renderSnapshot(state.snapshot);
+      renderViewState();
+    }
+  }
+  // Focus left on a link or point that was redrawn returns to the charts.
+  if (focusLost()) elements.curveTitle.focus({ preventScroll: true });
+});
+
+async function init() {
+  const params = new URLSearchParams(window.location.search);
+  // The yield period applies before anything renders.
+  applyLinkPeriod(params);
+  state.requestedMaturity = params.get("maturity");
+
+  await loadHistoryIndex();
+  loadView(applyLinkDates(params));
   // The poll only refreshes the live view; a past close stays until the user leaves it.
   state.refreshTimer = window.setInterval(() => {
     if (!state.viewDate) loadView(null);

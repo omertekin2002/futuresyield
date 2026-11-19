@@ -672,6 +672,222 @@ h2 {
 .inspector-compare-table .inspector-change {
   border-left: 1px solid var(--ink);
 }
+/* The selected contract on each archived close, across the inspector's full
+   width. It stays a real table at every width and scrolls sideways inside
+   its own frame when a phone is too narrow for it. */
+.inspector-history {
+  grid-column: 1 / -1;
+}
+.inspector-history-note,
+.inspector-history-coverage {
+  margin: 0 0 8px;
+  font: 12px/1.4 var(--serif);
+}
+.inspector-history-status {
+  margin: 0;
+  font: 12px/1.4 var(--serif);
+}
+.inspector-history-status:focus {
+  outline: none;
+}
+.history-load,
+.history-retry {
+  min-height: 32px;
+  padding: 4px 10px;
+  border: 1px solid var(--ink);
+  background: var(--paper);
+  text-transform: uppercase;
+}
+/* The coverage line with its Retry button beside it, wrapping under it when
+   the line is too long for the width. */
+.inspector-history-coverage-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 12px;
+}
+.inspector-history-coverage-line .inspector-history-coverage {
+  flex: 1 1 16em;
+  min-width: 0;
+}
+.history-retry {
+  margin: 0 0 8px;
+}
+.history-retry[aria-disabled="true"] {
+  border-style: dashed;
+  cursor: wait;
+}
+.history-retry[aria-disabled="true"]:hover {
+  text-decoration: none;
+}
+/* The History chart: the table's closes on a calendar-time axis. Strokes
+   and fills differ in shape and dash as well as colour, so they hold in
+   grey print. */
+.history-chart {
+  margin: 0 0 12px;
+  padding: 0;
+  border: 1px solid var(--ink);
+  break-inside: avoid;
+}
+.history-chart-caption,
+.history-chart-key {
+  margin: 0;
+  padding: 6px 10px;
+  font: 12px/1.4 var(--serif);
+}
+.history-chart-caption {
+  border-bottom: 1px solid var(--ink);
+}
+.history-chart-key {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  border-top: 1px solid var(--ink);
+}
+.history-key-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.history-key-item svg {
+  flex: none;
+}
+.history-chart-svg {
+  display: block;
+  max-width: 100%;
+  overflow: visible;
+}
+.history-chart-svg text {
+  font: 11px var(--sans);
+  fill: var(--ink);
+}
+.history-axes line {
+  stroke: var(--ink);
+  stroke-width: 1;
+}
+.history-tick-y {
+  text-anchor: end;
+  dominant-baseline: middle;
+}
+.history-tick-x.is-last,
+.history-on-screen-label {
+  text-anchor: end;
+}
+.history-chart-svg .history-on-screen-label {
+  font-weight: 700;
+}
+.history-empty {
+  text-anchor: middle;
+  dominant-baseline: middle;
+  font-style: italic;
+}
+.history-gap-line {
+  stroke: var(--ink);
+  stroke-width: 1.5;
+}
+.history-gap,
+.history-key-gap {
+  stroke: var(--ink);
+  stroke-width: 0.5;
+}
+.history-lines polyline {
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: 2;
+  stroke-linejoin: round;
+}
+.history-missing-mark {
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: 2;
+}
+.history-marker {
+  fill: var(--ink);
+  stroke: var(--ink);
+  stroke-width: 2;
+}
+.history-marker.is-stale {
+  fill: var(--paper);
+  stroke-dasharray: 2.5 2.5;
+}
+.history-halo {
+  fill: var(--yellow);
+  stroke: var(--ink);
+  stroke-width: 1;
+}
+/* Only each point's bounded hit area takes the pointer, so a marker, ring or
+   halo that overlaps a neighbour never catches its tap. */
+.history-points * {
+  pointer-events: none;
+}
+.history-points .history-hit {
+  fill: transparent;
+  pointer-events: all;
+}
+.history-ring {
+  fill: none;
+  stroke: var(--link);
+  stroke-width: 3;
+  visibility: hidden;
+}
+.history-point:hover .history-ring,
+.history-point:focus-visible .history-ring {
+  visibility: visible;
+}
+.history-point:focus {
+  outline: none;
+}
+a.history-point {
+  cursor: pointer;
+}
+/* Positioned, so the stale tags' screen-reader text scrolls with the table
+   instead of widening the page. */
+.inspector-history-scroll {
+  position: relative;
+  overflow-x: auto;
+  container-type: inline-size;
+}
+.inspector-history-scroll:focus-visible {
+  outline: 3px solid var(--link);
+  outline-offset: 3px;
+}
+.inspector-history-table th,
+.inspector-history-table td {
+  padding: 6px 8px;
+  vertical-align: top;
+  white-space: nowrap;
+}
+.inspector-history-table th:first-child,
+.inspector-history-table td:first-child {
+  padding-left: 0;
+}
+.inspector-history-table thead th {
+  font: 700 11px/1.3 var(--sans);
+}
+.inspector-history-table tbody th {
+  font: 700 12px/1.35 var(--sans);
+  text-transform: none;
+  border-bottom: 1px solid var(--ink);
+}
+.inspector-history-table tbody tr:nth-child(even),
+.inspector-history-table tbody tr:hover {
+  background: transparent;
+}
+.inspector-history-table tbody tr.is-on-screen {
+  background: var(--yellow);
+}
+.inspector-history-table tbody tr:last-child th {
+  border-bottom: 0;
+}
+.inspector-history-table .history-missing {
+  font: italic 12px/1.35 var(--serif);
+  white-space: normal;
+}
+.inspector-history-table .history-gap td {
+  padding-left: 0;
+  font: italic 12px/1.35 var(--serif);
+  white-space: normal;
+}
 .curve-section h2:focus {
   outline: none;
 }
@@ -1498,6 +1714,40 @@ footer p {
   .inspector-compare-table td::before {
     content: none;
   }
+  .inspector-history-table {
+    display: table;
+  }
+  .inspector-history-table thead {
+    display: table-header-group;
+  }
+  .inspector-history-table tbody {
+    display: table-row-group;
+  }
+  .inspector-history-table tbody tr {
+    display: table-row;
+    padding: 0;
+  }
+  .inspector-history-table th,
+  .inspector-history-table td {
+    display: table-cell;
+    padding: 6px 4px;
+    border-bottom: 1px solid var(--ink);
+    text-align: left;
+  }
+  .inspector-history-table td:first-child {
+    grid-column: auto;
+  }
+  .inspector-history-table td::before {
+    content: none;
+  }
+  /* A gap's note stays in view while the table scrolls sideways. */
+  .inspector-history-table .history-gap span {
+    display: block;
+    position: sticky;
+    left: 0;
+    max-width: calc(100vw - 80px);
+    max-width: 100cqw;
+  }
   .contract-name strong {
     font-size: 14px;
   }
@@ -1596,8 +1846,15 @@ footer p {
   .chart-marker,
   .period-toggle,
   .market-rail-label,
-  .market-options button[aria-pressed="false"] {
+  .market-options button[aria-pressed="false"],
+  .history-load,
+  .history-retry,
+  .inspector-history-status,
+  .inspector-history:not(.is-loaded) {
     display: none !important;
+  }
+  .inspector-history-scroll {
+    overflow: visible;
   }
   /* Inset a little, so borders on the right edge aren't clipped. */
   .page-frame {

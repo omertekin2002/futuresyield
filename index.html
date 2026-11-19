@@ -271,6 +271,56 @@
                     <tbody id="inspector-compare-rows"></tbody>
                   </table>
                 </div>
+                <div
+                  class="inspector-group inspector-history"
+                  id="inspector-history-group"
+                  hidden
+                >
+                  <h3 id="inspector-history-title">History</h3>
+                  <p class="inspector-history-note" id="inspector-history-note"></p>
+                  <button type="button" class="history-load" id="history-load"></button>
+                  <p
+                    class="inspector-history-status"
+                    id="inspector-history-status"
+                    aria-live="polite"
+                    tabindex="-1"
+                  ></p>
+                  <div class="inspector-history-coverage-line">
+                    <p
+                      class="inspector-history-coverage"
+                      id="inspector-history-coverage"
+                      hidden
+                    ></p>
+                    <button type="button" class="history-retry" id="history-retry" hidden></button>
+                  </div>
+                  <figure class="history-chart" id="history-chart" hidden>
+                    <figcaption class="history-chart-caption" id="history-chart-caption"></figcaption>
+                    <svg
+                      class="history-chart-svg"
+                      id="history-chart-svg"
+                      role="group"
+                      aria-labelledby="history-chart-caption"
+                      aria-describedby="history-chart-key"
+                      aria-details="inspector-history-scroll"
+                    ></svg>
+                    <p class="history-chart-key" id="history-chart-key"></p>
+                  </figure>
+                  <div
+                    class="inspector-history-scroll"
+                    id="inspector-history-scroll"
+                    role="region"
+                    aria-labelledby="inspector-history-title"
+                    tabindex="0"
+                    hidden
+                  >
+                    <table class="inspector-history-table" aria-labelledby="inspector-history-title">
+                      <thead>
+                        <tr id="inspector-history-head"></tr>
+                      </thead>
+                      <tbody id="inspector-history-rows"></tbody>
+                    </table>
+                  </div>
+                </div>
               </div>
             </section>
 
