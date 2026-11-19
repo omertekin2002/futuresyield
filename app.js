@@ -169,6 +169,10 @@ const state = {
   // it is building, written once the view is on screen, and whether that
   // write adds a history entry. null when no move is under way.
   navigation: null,
+  // The query of the history entry on screen, as last written or restored.
+  // A popstate that keeps it, such as the skip link's change of fragment,
+  // names no other view.
+  shownSearch: window.location.search,
 };
 
 // Archived closes fetched at once for the History table.
@@ -2796,6 +2800,7 @@ function writeUrl(url) {
     state.navigation.url = url.href;
   } else if (url.href !== window.location.href) {
     window.history.replaceState({}, "", url);
+    state.shownSearch = window.location.search;
   }
 }
 
@@ -2826,6 +2831,7 @@ function finishNavigation(reached) {
   if (navigation.url === window.location.href) return;
   if (reached && navigation.push) window.history.pushState({}, "", navigation.url);
   else window.history.replaceState({}, "", navigation.url);
+  state.shownSearch = window.location.search;
 }
 
 function hideNotice() {
@@ -3127,7 +3133,12 @@ async function openHistoryLink(event) {
   // Dropping the comparison is part of the move, so the entry it leaves keeps it.
   beginNavigation();
   state.requestedMaturity = state.selectedKey;
-  if (state.compareDate && !(state.compareDate < day)) clearCompare();
+  if (state.compareDate && !(state.compareDate < day)) {
+    clearCompare();
+    // Redrawn without it at once, so a close that then fails to load leaves
+    // no comparison on screen that the address and the menu have dropped.
+    renderComparison();
+  }
   // A later load, such as Back's, may take over; it applies its own maturity.
   if (await loadView(day, { navigate: true }) === undefined) return;
   state.requestedMaturity = null;
@@ -3508,6 +3519,11 @@ function applyLinkDates(params) {
 // as a fresh link would, without adding an entry. A close already loaded is
 // reused, and one that can't be loaded falls back as a link's does.
 window.addEventListener("popstate", async () => {
+  // A link to a fragment, such as the skip link, and Back or Forward over
+  // one change only the fragment: the view, its notice and any move still
+  // loading stay as they are.
+  if (window.location.search === state.shownSearch) return;
+  state.shownSearch = window.location.search;
   // A move still loading is abandoned for the entry the browser went to.
   state.navigation = null;
   hideNotice();

@@ -2740,6 +2740,33 @@ class DashboardSmokeTests(unittest.TestCase):
             "Load history · 4 archived closes"
         )
 
+    def test_a_history_link_that_fails_to_load_draws_no_dropped_comparison(self):
+        failed = NO_PRICE_DAY
+        self.route_history_close(failed)
+        self.open_dashboard("?market=USDTRY&maturity=2028-01")
+        self.choose_compare("2026-09-30")
+        self.load_history(len(HISTORY_FIXTURE))
+        length = self.history_length()
+        # The comparison isn't earlier than that close, so opening it drops
+        # the comparison, and the close then fails to load.
+        self.page.locator(f'#inspector-history-rows a[data-history-day="{failed}"]').click()
+        expect(self.page.locator("#history-notice")).to_have_text(
+            f"The close of {HISTORY_LABELS[failed]} could not be loaded."
+        )
+        self.assert_live()
+        # Nothing on screen still shows the comparison the address dropped.
+        self.assert_not_comparing()
+        for canvas in ("#curve-chart", "#yield-chart"):
+            expect(self.page.locator(canvas)).not_to_have_attribute(
+                "aria-label", re.compile(re.escape(f"close of {HISTORY_LABELS['2026-09-30']}")),
+            )
+        self.assertEqual(self.history_length(), length)
+        self.expect_load_errors(1)
+        # The browser's own reports of the two 404s are the only other errors.
+        self.assertEqual(len(self.errors), 2, self.errors)
+        self.assertTrue(all("404" in error for error in self.errors), self.errors)
+        self.errors = []
+
     def test_history_says_which_close_could_not_be_loaded(self):
         failed = "2026-10-05"
         self.page.route(f"**/data/history/{failed}.json", lambda route: route.fulfill(status=404))
@@ -3852,6 +3879,28 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assert_market("USDTRY", self.history[day])
         self.assertEqual(self.url_params(), {"market": "USDTRY", "date": day})
         self.expect_load_errors(1)
+
+    def test_the_skip_link_leaves_the_view_and_its_notice_alone(self):
+        self.open_dashboard("?market=USDTRY&maturity=1999-01")
+        notice = self.page.locator("#history-notice")
+        text = "No Jan 1999 maturity listed for USD/TRY on 07 Oct 2026."
+        expect(notice).to_have_text(text)
+        length = self.history_length()
+        # The skip link and Back over it change only the fragment, which
+        # fires popstate but names no other view.
+        self.page.keyboard.press("Tab")
+        expect(self.page.locator(".skip-link")).to_be_focused()
+        self.page.keyboard.press("Enter")
+        self.page.wait_for_url(re.compile(r"#contracts$"))
+        self.assertEqual(self.history_length(), length + 1)
+        expect(notice).to_be_visible()
+        expect(notice).to_have_text(text)
+        self.go_back()
+        self.page.wait_for_url(re.compile(r"\?market=USDTRY$"))
+        expect(notice).to_be_visible()
+        expect(notice).to_have_text(text)
+        self.assert_live()
+        self.assertEqual(self.errors, [])
 
     def test_back_to_a_maturity_no_longer_listed_selects_nothing(self):
         self.open_dashboard("?market=USDTRY&maturity=2026-10")
