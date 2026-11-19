@@ -690,12 +690,35 @@ h2 {
 .inspector-history-status:focus {
   outline: none;
 }
-.history-load {
+.history-load,
+.history-retry {
   min-height: 32px;
   padding: 4px 10px;
   border: 1px solid var(--ink);
   background: var(--paper);
   text-transform: uppercase;
+}
+/* The coverage line with its Retry button beside it, wrapping under it when
+   the line is too long for the width. */
+.inspector-history-coverage-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 12px;
+}
+.inspector-history-coverage-line .inspector-history-coverage {
+  flex: 1 1 16em;
+  min-width: 0;
+}
+.history-retry {
+  margin: 0 0 8px;
+}
+.history-retry[aria-disabled="true"] {
+  border-style: dashed;
+  cursor: wait;
+}
+.history-retry[aria-disabled="true"]:hover {
+  text-decoration: none;
 }
 /* The History chart: the table's closes on a calendar-time axis. Strokes
    and fills differ in shape and dash as well as colour, so they hold in
@@ -1825,6 +1848,7 @@ footer p {
   .market-rail-label,
   .market-options button[aria-pressed="false"],
   .history-load,
+  .history-retry,
   .inspector-history-status,
   .inspector-history:not(.is-loaded) {
     display: none !important;

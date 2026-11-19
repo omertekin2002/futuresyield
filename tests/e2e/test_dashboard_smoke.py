@@ -2557,6 +2557,8 @@ class DashboardSmokeTests(unittest.TestCase):
         expect(self.page.locator("#inspector-history-coverage")).to_have_text(
             "Observed with a price on 3 of 5 archived closes, 07 Jul 2026 – 06 Oct 2026."
         )
+        # Every close loaded, so there is nothing to retry.
+        expect(self.page.locator("#history-retry")).to_be_hidden()
         self.assertEqual(
             self.history_header(),
             ["Close", "Last", "Premium", "Daily yield · 1D", "Days left", "Last trade"],
@@ -2762,6 +2764,214 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assertEqual(len(self.errors), 1, self.errors)
         self.assertIn("404", self.errors[0])
         self.errors = []
+
+    def route_history_close(self, day):
+        """Answer day's archived close as modes[0] says: "404", "500", "hold" or "pass".
+
+        Held requests are kept in held, to be fulfilled by the test.
+        """
+        modes, held = ["404"], []
+        def handle(route):
+            mode = modes[0]
+            if mode == "hold":
+                held.append(route)
+            elif mode == "pass":
+                route.fallback()
+            else:
+                route.fulfill(status=int(mode))
+        self.page.route(f"**/data/history/{day}.json", handle)
+        return modes, held
+
+    def history_retry_status(self):
+        button = self.page.locator("#history-retry")
+        return {
+            "text": button.text_content(),
+            "visible": button.is_visible(),
+            "unavailable": button.get_attribute("aria-disabled") == "true",
+            "status": self.page.locator("#inspector-history-status").text_content(),
+        }
+
+    def test_history_retries_only_the_closes_that_failed(self):
+        failed = "2026-10-05"
+        modes, _ = self.route_history_close(failed)
+        fetched = self.watch_history_fetches()
+        self.open_dashboard("?market=USDTRY&maturity=2028-01")
+        self.load_history(len(HISTORY_FIXTURE))
+        retry = self.page.locator("#history-retry")
+        expect(retry).to_be_visible()
+        expect(retry).to_have_text("Retry 1 close")
+        expect(self.page.locator("#inspector-history-status")).to_have_text(
+            "History loaded: 5 archived closes. 1 close could not be loaded."
+        )
+        expect(self.page.locator(f'.history-missing-mark[data-history-day="{failed}"]')).to_have_count(1)
+        self.assertEqual(sorted(fetched), sorted(HISTORY_FIXTURE))
+
+        # Once the close can be fetched, Retry asks for it alone, once.
+        fetched.clear()
+        modes[0] = "pass"
+        retry.click()
+        expect(retry).to_be_hidden()
+        self.assertEqual(fetched, [failed])
+        row = next(r for r in self.history_rows() if r["day"] == failed)
+        market, contract = self.history_symbol_on(failed)
+        self.assertEqual(row["state"], "listed")
+        self.assertEqual(row["cells"][:4], self.expected_history_row(market, contract))
+        expect(self.page.locator("#inspector-history-coverage")).to_have_text(
+            "Observed with a price on 3 of 5 archived closes, 07 Jul 2026 – 06 Oct 2026."
+        )
+        expect(self.page.locator("#inspector-history-status")).to_have_text(
+            "History loaded: 5 archived closes."
+        )
+        # The recovered close is a chart point that opens its close.
+        expect(self.page.locator(f'#history-chart-svg a[data-history-day="{failed}"]')).to_have_count(1)
+        expect(self.page.locator(f'.history-missing-mark[data-history-day="{failed}"]')).to_have_count(0)
+
+        # It is cached like any other close: another maturity fetches nothing.
+        self.select_button("Dec 2026").click()
+        self.assert_selected("Dec 2026")
+        expect(self.page.locator("#inspector-history-scroll")).to_be_visible()
+        expect(retry).to_be_hidden()
+        self.assertEqual(fetched, [failed])
+        # The browser's own report of the first 404 is the only error.
+        self.assertEqual(len(self.errors), 1, self.errors)
+        self.assertIn("404", self.errors[0])
+        self.errors = []
+
+    def test_history_retry_keeps_the_table_and_is_never_doubled(self):
+        failed = "2026-10-05"
+        live_requests = []
+        self.page.on(
+            "request",
+            lambda request: "data/market.json" in request.url and live_requests.append(request.url),
+        )
+        self.page.clock.install(time=FIXTURE_DAY_TIME)
+        modes, held = self.route_history_close(failed)
+        fetched = self.watch_history_fetches()
+        self.open_dashboard("?market=USDTRY&maturity=2028-01")
+        self.load_history(len(HISTORY_FIXTURE))
+        retry = self.page.locator("#history-retry")
+        expect(retry).to_have_text("Retry 1 close")
+        fetched.clear()
+
+        # Hold the retry open: the table and chart stay, with every loaded row.
+        modes[0] = "hold"
+        retry.click()
+        failed_row = self.page.locator(f'#inspector-history-rows tr[data-history-row="{failed}"]')
+        expect(failed_row).to_have_attribute("data-retrying", "true")
+        expect(failed_row.locator("td")).to_have_text(
+            "Could not be loaded: Market snapshot returned 404. Retrying…"
+        )
+        expect(self.page.locator("#inspector-history-status")).to_have_text("Retrying 1 close…")
+        expect(retry).to_have_attribute("aria-disabled", "true")
+        expect(retry).to_be_disabled()
+        expect(retry).to_be_visible()
+        expect(self.page.locator("#inspector-history-scroll")).to_be_visible()
+        expect(self.page.locator("#history-chart")).to_be_visible()
+        self.assertEqual(
+            [(r["day"], r["state"]) for r in self.history_rows() if r["state"] != "gap"],
+            [("2026-10-07", "listed"), ("2026-10-06", "listed"), (failed, "error"),
+             ("2026-09-30", "listed"), (NO_PRICE_DAY, "listed"), (ROLLED_DAY, "not-listed")],
+        )
+
+        # A second press, the live poll, a period, selection or market
+        # change never start another request for the close.
+        retry.click(force=True)
+        self.page.evaluate(
+            "() => { document.querySelector('#inspector-history-rows tr').__old = true; }"
+        )
+        self.page.clock.run_for("01:01")
+        self.page.wait_for_function(
+            "() => !document.querySelector('#inspector-history-rows tr').__old"
+        )
+        self.assertEqual(len(live_requests), 2)
+        expect(failed_row).to_have_attribute("data-retrying", "true")
+        expect(self.page.locator("#inspector-history-status")).to_have_text("Retrying 1 close…")
+        self.page.locator('[data-yield-period="monthly"]').click()
+        expect(self.page.locator("#inspector-history-head th").nth(3)).to_have_text(
+            "Monthly yield · 30D"
+        )
+        expect(self.page.locator("#inspector-history-status")).to_have_text("Retrying 1 close…")
+        self.select_button("Dec 2026").click()
+        self.assert_selected("Dec 2026")
+        expect(self.page.locator("#inspector-history-status")).to_have_text("Retrying 1 close…")
+        self.page.locator('.market-options [data-market="EURTRY"]').click()
+        self.assert_market("EURTRY")
+        self.select_button("Dec 2026", "EURTRY").click()
+        expect(self.page.locator("#inspector-history-status")).to_have_text("Retrying 1 close…")
+        self.page.locator('.market-options [data-market="USDTRY"]').click()
+        self.assert_market("USDTRY")
+        self.select_button("Jan 2028").click()
+        self.assert_selected("Jan 2028")
+        self.assertEqual(fetched, [failed])
+        self.assertEqual(len(held), 1)
+
+        # It fails again: the row keeps its error with the new reason, and
+        # Retry stays, available again.
+        held.pop().fulfill(status=500)
+        expect(failed_row.locator("td")).to_have_text(
+            "Could not be loaded: Market snapshot returned 500."
+        )
+        expect(failed_row).not_to_have_attribute("data-retrying", "true")
+        expect(retry).to_be_visible()
+        expect(retry).to_be_enabled()
+        expect(self.page.locator("#inspector-history-status")).to_have_text(
+            "History loaded: 5 archived closes. 1 close could not be loaded."
+        )
+        expect(self.page.locator("#inspector-history-coverage")).to_have_text(
+            "Observed with a price on 2 of 5 archived closes, 07 Jul 2026 – 06 Oct 2026. "
+            "1 close could not be loaded."
+        )
+        self.assertEqual(fetched, [failed])
+        self.assertEqual(len(self.errors), 2, self.errors)
+        self.assertIn("404", self.errors[0])
+        self.assertIn("500", self.errors[1])
+        self.errors = []
+
+    def test_history_retry_is_keyboard_operable_and_keeps_focus(self):
+        failed = "2026-10-05"
+        modes, _ = self.route_history_close(failed)
+        self.open_dashboard("?market=USDTRY&maturity=2028-01")
+        self.load_history(len(HISTORY_FIXTURE))
+        retry = self.page.locator("#history-retry")
+        expect(retry).to_have_text("Retry 1 close")
+
+        # It fails again: focus stays on Retry.
+        modes[0] = "500"
+        self.page.locator("#history-load").evaluate("(button) => button.blur()")
+        self.tab_to("#history-retry")
+        self.page.keyboard.press("Enter")
+        expect(
+            self.page.locator(f'#inspector-history-rows tr[data-history-row="{failed}"] td')
+        ).to_have_text("Could not be loaded: Market snapshot returned 500.")
+        expect(retry).to_be_visible()
+        expect(retry).to_be_focused()
+
+        # Every close loads: Retry goes, and focus moves on to the table.
+        modes[0] = "pass"
+        self.page.keyboard.press("Space")
+        expect(retry).to_be_hidden()
+        expect(self.page.locator("#inspector-history-scroll")).to_be_focused()
+        self.assertEqual(len(self.errors), 2, self.errors)
+        self.errors = []
+
+    def test_history_retry_fits_beside_the_coverage_line_on_a_phone(self):
+        failed = "2026-10-05"
+        for viewport in (None, {"width": 375, "height": 812}):
+            with self.subTest(viewport=viewport):
+                if viewport:
+                    self.reopen_at(FIXTURE_DAY_TIME, viewport=viewport)
+                self.route_history_close(failed)
+                self.open_dashboard("?market=USDTRY&maturity=2028-01")
+                self.load_history(len(HISTORY_FIXTURE))
+                retry = self.page.locator("#history-retry")
+                expect(retry).to_be_visible()
+                self.assert_no_sideways_scroll()
+                group = self.page.locator("#inspector-history-group").bounding_box()
+                box = retry.bounding_box()
+                self.assertLessEqual(box["x"] + box["width"], group["x"] + group["width"] + 0.5)
+                if Axe is not None:
+                    self.assert_accessible(f"history retry at {viewport or 'desktop'}")
+                self.errors = []
 
     def test_no_history_hides_the_history_group(self):
         self.open_dashboard("?market=USDTRY&maturity=2028-01", base_url=self.no_history_url)

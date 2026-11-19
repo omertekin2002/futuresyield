@@ -97,6 +97,7 @@ const elements = {
   inspectorHistoryGroup: document.querySelector("#inspector-history-group"),
   inspectorHistoryNote: document.querySelector("#inspector-history-note"),
   historyLoad: document.querySelector("#history-load"),
+  historyRetry: document.querySelector("#history-retry"),
   inspectorHistoryStatus: document.querySelector("#inspector-history-status"),
   inspectorHistoryCoverage: document.querySelector("#inspector-history-coverage"),
   inspectorHistoryScroll: document.querySelector("#inspector-history-scroll"),
@@ -155,7 +156,9 @@ const state = {
   // The inspector's History table: whether it was asked for, and each
   // archived close fetched for it, by date, as { snapshot } or { error }.
   // Closes being fetched are in historyPending. Nothing is fetched until the
-  // Load history button is pressed, and nothing is fetched twice.
+  // Load history button is pressed, and nothing is fetched twice, except a
+  // close that failed, again when Retry is pressed. A close being retried
+  // keeps its { error } entry until the new attempt settles.
   historyOpen: false,
   historyCache: new Map(),
   historyPending: new Set(),
@@ -1356,10 +1359,12 @@ function countText(count, one, many) {
 
 // Fetch the archived closes not cached or already on their way, a few at a
 // time, then redraw the History table. A close that fails to load is cached
-// with the reason, so it is not fetched again on every redraw.
-async function fetchHistoryDays(days) {
+// with the reason, so it is not fetched again on every redraw. With retry,
+// fetch instead the closes that failed and are not already being retried.
+async function fetchHistoryDays(days, { retry = false } = {}) {
   const queue = days.filter((day) =>
-    !state.historyCache.has(day) && !state.historyPending.has(day)
+    !state.historyPending.has(day) &&
+    (retry ? Boolean(state.historyCache.get(day)?.error) : !state.historyCache.has(day))
   );
   if (!queue.length) return;
   queue.forEach((day) => state.historyPending.add(day));
@@ -1411,6 +1416,12 @@ function historyDateCell(row) {
   return header;
 }
 
+// Why a History row has no value when its close could not be loaded, and
+// whether it is being fetched again.
+function historyErrorText(row) {
+  return `Could not be loaded: ${row.reason}.${row.retrying ? " Retrying…" : ""}`;
+}
+
 function historyMessageCell(text, className) {
   const cell = document.createElement("td");
   cell.colSpan = 5;
@@ -1428,7 +1439,8 @@ function historyRow(row) {
   if (row.onScreen) tr.classList.add("is-on-screen");
   tr.append(historyDateCell(row));
   if (row.state === "error") {
-    tr.append(historyMessageCell(`Could not be loaded: ${row.reason}.`, "history-missing"));
+    if (row.retrying) tr.dataset.retrying = "true";
+    tr.append(historyMessageCell(historyErrorText(row), "history-missing"));
     return tr;
   }
   if (row.state === "no-market") {
@@ -1496,6 +1508,7 @@ function renderInspectorHistory(contract) {
   elements.inspectorHistoryCoverage.hidden = !loaded;
   elements.inspectorHistoryScroll.hidden = !loaded;
   if (group.hidden || !loaded) {
+    renderHistoryRetry([]);
     elements.inspectorHistoryHead.replaceChildren();
     elements.inspectorHistoryRows.replaceChildren();
     state.historyChart = null;
@@ -1539,7 +1552,10 @@ function renderInspectorHistory(contract) {
     const onScreen = day === state.renderedDate;
     const entry = state.historyCache.get(day);
     if (entry.error) {
-      rows.push({ day, onScreen, archived: true, state: "error", reason: entry.error });
+      rows.push({
+        day, onScreen, archived: true, state: "error", reason: entry.error,
+        retrying: state.historyPending.has(day),
+      });
       return;
     }
     const market = entry.snapshot.markets?.[state.marketKey];
@@ -1592,13 +1608,37 @@ function renderInspectorHistory(contract) {
   }
   state.historyChart = { symbol: contract.symbol, rows };
   renderHistoryChart();
+  const retrying = failed.filter((row) => row.retrying);
   setHistoryStatus(
-    `History loaded: ${countText(archived.length, "archived close", "archived closes")}.`,
+    retrying.length
+      ? `Retrying ${countText(retrying.length, "close", "closes")}…`
+      : `History loaded: ${countText(archived.length, "archived close", "archived closes")}.` +
+        (failed.length
+          ? ` ${countText(failed.length, "close", "closes")} could not be loaded.`
+          : ""),
   );
-  // Focus left on the status while loading moves on to the table.
-  if (document.activeElement === elements.inspectorHistoryStatus) {
+  // Focus left on the status while loading, or on Retry once every close it
+  // retried has loaded, moves on to the table.
+  const retryFocused = document.activeElement === elements.historyRetry;
+  renderHistoryRetry(failed);
+  if (
+    document.activeElement === elements.inspectorHistoryStatus ||
+    (retryFocused && elements.historyRetry.hidden)
+  ) {
     elements.inspectorHistoryScroll.focus();
   }
+}
+
+// The Retry button beside the coverage line: shown while any close on screen
+// failed to load, naming how many, and unavailable while they are retried.
+// It stays focusable then, so the keyboard keeps its place.
+function renderHistoryRetry(failed) {
+  const button = elements.historyRetry;
+  button.hidden = !failed.length;
+  button.dataset.days = failed.map((row) => row.day).join(" ");
+  button.textContent = `Retry ${countText(failed.length, "close", "closes")}`;
+  if (failed.some((row) => row.retrying)) button.setAttribute("aria-disabled", "true");
+  else button.removeAttribute("aria-disabled");
 }
 
 // The History chart: the same rows as the History table, oldest first, with
@@ -1626,7 +1666,7 @@ function svgNode(name, attributes = {}, text = null) {
 // A History row as the chart plots it: its yield for the chart's period and
 // last trade, or the table's own text for why it has no value.
 function historyChartPoint(row) {
-  if (row.state === "error") return { ...row, value: null, reason: `Could not be loaded: ${row.reason}.` };
+  if (row.state === "error") return { ...row, value: null, reason: historyErrorText(row) };
   if (row.state === "no-market") return { ...row, value: null, reason: `No ${state.data.pair} data in this close.` };
   if (row.state === "not-listed") return { ...row, value: null, reason: "Not listed on this close." };
   if (!hasNumber(row.contract.last)) return { ...row, value: null, reason: "Listed, no price." };
@@ -3060,6 +3100,16 @@ elements.historyLoad.addEventListener("click", () => {
   (elements.inspectorHistoryScroll.hidden
     ? elements.inspectorHistoryStatus
     : elements.inspectorHistoryScroll).focus();
+});
+
+// Fetch again only the closes on screen that failed to load. The table and
+// chart stay up with every loaded row while they are retried.
+elements.historyRetry.addEventListener("click", () => {
+  const button = elements.historyRetry;
+  if (button.getAttribute("aria-disabled") === "true") return;
+  const days = button.dataset.days.split(" ").filter(Boolean);
+  fetchHistoryDays(days, { retry: true });
+  renderInspectorHistory(selectedContract());
 });
 
 // A plain click on a History date or a History chart point opens that close
