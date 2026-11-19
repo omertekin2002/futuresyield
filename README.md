@@ -406,7 +406,8 @@ with both legends and a tooltip showing, a tooltip opened from the keyboard on
 each chart, each yield period, a 390×844 mobile viewport, a selected maturity
 on desktop and on that mobile viewport with its inspector open, the
 inspector's comparison table and its "not listed" message on both, the
-History table and chart on both, with a chart point focused, the stale-point
+History table and chart on both, with a chart point focused and with a
+Retry button for a close that failed to load, the stale-point
 key on desktop and mobile, a market whose charts are empty, and the
 load-error state. It fails on any serious or critical violation and lists each one's
 rule, impact, element and help text. As an automated check, it can't judge
@@ -506,6 +507,18 @@ unusual point can be checked without reading across the board:
     N weekdays (a holiday or a missed capture)** between two closes that
     have weekdays between them. The archive doesn't say which of the two a
     gap is, so the table doesn't either, and gaps are never backfilled.
+  - **Retry.** While any close on screen could not be loaded, a **Retry**
+    button beside the coverage line names how many, such as "Retry 1 close".
+    It fetches only those closes again, a few at a time, and never the ones
+    that loaded. The table and chart stay on screen meanwhile: the failed
+    rows say they are being retried, the button is unavailable, and the
+    status reads "Retrying N closes…". A redraw in between, such as the
+    one-minute refresh or a period, selection or market change, never
+    fetches them twice. Recovered closes become normal rows and chart points
+    and are cached like the rest; a close that fails again keeps its row with
+    the new reason, and the button stays. Once every close has loaded the
+    button goes, and focus on it moves to the table. Nothing is retried
+    automatically.
   - **Links.** Each date opens that close's full dashboard with the same
     market, maturity and yield period
     (`?date=YYYY-MM-DD&market=…&maturity=YYYY-MM&period=…`, plus the
