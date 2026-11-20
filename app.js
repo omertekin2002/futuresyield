@@ -146,6 +146,12 @@ const state = {
   historyIndexReadAt: null,
   historyIndexFailed: false,
   historyIndexRequest: null,
+  // The close and comparison a link asked for while the history index had
+  // never been read, as { date, compare } with either null, kept until a
+  // read can settle them; null when nothing waits. linkRequestId counts the
+  // user's moves, so one made while a waiting link opens stops it there.
+  pendingLink: null,
+  linkRequestId: 0,
   // The requested view and the one on screen: an archived date, or null for live.
   viewDate: null,
   renderedDate: null,
@@ -2884,7 +2890,10 @@ function shareUrl() {
   const current = currentUrl();
   const url = new URL(current.pathname, current.origin);
   SHARE_PARAMS.forEach((name) => {
-    const value = name === "date" ? state.renderedDate : current.searchParams.get(name);
+    // The date and comparison on screen, never ones a link still waits for.
+    const value = name === "date"
+      ? state.renderedDate
+      : name === "compare" ? state.compareDate : current.searchParams.get(name);
     if (value) url.searchParams.set(name, value);
   });
   return url.href;
@@ -2979,8 +2988,9 @@ function quickPicks(reference, days) {
   return picks;
 }
 
+// The address keeps a comparison a link still waits for, so a reload retries it.
 function updateCompareUrl() {
-  updateUrlParam("compare", state.compareDate);
+  updateUrlParam("compare", state.compareDate ?? state.pendingLink?.compare ?? null);
 }
 
 function clearCompare() {
@@ -3108,7 +3118,8 @@ function renderViewState() {
   elements.spotTag.textContent = historical ? "Past close" : "≈ 15 min delay";
   document.body.dataset.view = historical ? "historical" : "live";
 
-  updateUrlParam("date", historical ? state.renderedDate : null);
+  // The address keeps a close a link still waits for, so a reload retries it.
+  updateUrlParam("date", historical ? state.renderedDate : state.pendingLink?.date ?? null);
 }
 
 // How long a successful read of the history index is used before the live
@@ -3151,6 +3162,7 @@ async function readHistoryIndex() {
   state.historyIndexFailed = false;
   state.historyIndexReadAt = Date.now();
   setHistoryDays([...new Set(days)].sort().reverse());
+  openPendingLink();
 }
 
 // Read the index again if the last read failed or is too old.
@@ -3190,7 +3202,10 @@ function setHistoryDays(days) {
 // on screen (see beginNavigation). Resolves true once the view is on screen,
 // false if it failed, or undefined if a later load took over.
 async function loadView(date, { navigate = false } = {}) {
-  if (navigate) beginNavigation();
+  if (navigate) {
+    beginNavigation();
+    cancelPendingLink();
+  }
   state.viewDate = date;
   renderShareLink();
   let reached = false;
@@ -3263,6 +3278,7 @@ elements.historySelect.addEventListener("change", () => {
 elements.compareSelect.addEventListener("change", () => {
   const date = elements.compareSelect.value;
   hideNotice();
+  cancelPendingLink();
   setCompare(compareDays().includes(date) ? date : null);
 });
 
@@ -3663,15 +3679,52 @@ function applyLinkPeriod(params) {
   markYieldPeriod();
 }
 
+// A link date as the notices name it: its day, or as given if it isn't one.
+function linkDayText(day) {
+  return Number.isNaN(parseMarketDate(day).getTime()) ? day : formatDay(day);
+}
+
+// Say which of a link's dates wait for the archive, and that they will open.
+function pendingLinkNotice({ date, compare }) {
+  const dateText = date && linkDayText(date);
+  const compareText = compare && linkDayText(compare);
+  if (date && compare) {
+    return `The archive could not be read, so the close of ${dateText} and its ` +
+      `comparison with the close of ${compareText} are not open yet. Showing live ` +
+      "data; they will open once the archive can be read.";
+  }
+  if (date) {
+    return `The archive could not be read, so the close of ${dateText} is not open ` +
+      "yet. Showing live data; it will open once the archive can be read.";
+  }
+  return `The archive could not be read, so the comparison with the close of ` +
+    `${compareText} is not shown yet. It will appear once the archive can be read.`;
+}
+
 // Apply the comparison a link asks for, once the archive's dates are known,
 // and return the view date it asks for: an archived close, or null for live.
-// Dates that aren't archived fall back with a notice.
+// Dates that aren't archived fall back with a notice. While the history index
+// has never been read, well-formed dates can't be checked yet: they wait in
+// state.pendingLink, and the address, for the first read that succeeds.
 function applyLinkDates(params) {
+  // The entry this link names replaces whatever another one waited for.
+  state.pendingLink = null;
+  state.linkRequestId += 1;
   const requestedCompare = params.get("compare");
+  const requested = params.get("date");
+  if (state.historyIndexReadAt === null) {
+    const pending = {
+      date: requested && HISTORY_DATE.test(requested) ? requested : null,
+      compare: requestedCompare && HISTORY_DATE.test(requestedCompare) ? requestedCompare : null,
+    };
+    if (pending.date || pending.compare) state.pendingLink = pending;
+  }
+  const waiting = state.pendingLink;
+
   const compare = requestedCompare && state.historyDays.includes(requestedCompare)
     ? requestedCompare
     : null;
-  if (requestedCompare && !compare) {
+  if (requestedCompare && !compare && !waiting?.compare) {
     addNotice(
       HISTORY_DATE.test(requestedCompare)
         ? `No archived close for ${requestedCompare} to compare with.`
@@ -3682,16 +3735,67 @@ function applyLinkDates(params) {
   if (compare !== state.compareDate) setCompare(compare);
   else updateCompareUrl();
 
-  const requested = params.get("date");
   if (requested && state.historyDays.includes(requested)) return requested;
-  if (requested) {
+  if (requested && !waiting?.date) {
     addNotice(
       HISTORY_DATE.test(requested)
         ? `No archived close for ${requested}. Showing live data.`
         : "That date is not in the archive. Showing live data.",
     );
   }
+  if (waiting) addNotice(pendingLinkNotice(waiting));
   return null;
+}
+
+// Drop a link's waiting dates because the user moved elsewhere, such as to
+// live data or a comparison, and take them out of the address. A market,
+// maturity or period change keeps them.
+function cancelPendingLink() {
+  state.linkRequestId += 1;
+  if (!state.pendingLink) return;
+  state.pendingLink = null;
+  updateUrlParam("date", state.renderedDate);
+  updateCompareUrl();
+}
+
+// Once the history index has been read, open what a link waited for in
+// place, as the link would have: its close, without a history entry and with
+// the market, maturity and period on screen, then its comparison. A date the
+// index doesn't list falls back as a link's does. A move the user makes
+// before it is on screen stops it.
+async function openPendingLink() {
+  const pending = state.pendingLink;
+  if (!pending) return;
+  state.pendingLink = null;
+  const request = ++state.linkRequestId;
+  hideNotice();
+
+  const date = pending.date && state.historyDays.includes(pending.date) ? pending.date : null;
+  if (date) {
+    state.requestedMaturity = state.selectedKey;
+    const reached = await loadView(date);
+    if (reached === undefined || request !== state.linkRequestId) return;
+    state.requestedMaturity = null;
+  } else if (pending.date) {
+    addNotice(`No archived close for ${pending.date}. Showing live data.`);
+    renderViewState();
+  }
+
+  if (!pending.compare) return;
+  const compare = state.historyDays.includes(pending.compare) ? pending.compare : null;
+  const reference = referenceDate();
+  if (!compare) {
+    addNotice(`No archived close for ${pending.compare} to compare with.`);
+  } else if (reference && !(compare < reference)) {
+    addNotice(
+      `The close of ${formatDay(compare)} is not earlier than ` +
+      `${formatDay(reference)}, so the comparison is off.`,
+    );
+  } else {
+    setCompare(compare);
+    return;
+  }
+  updateCompareUrl();
 }
 
 // Back and Forward restore an entry's address; show what it names in place,
