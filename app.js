@@ -18,6 +18,7 @@ const elements = {
   refreshButton: document.querySelector("#refresh-button"),
   historyControl: document.querySelector("#history-control"),
   historySelect: document.querySelector("#history-select"),
+  historyCoverage: document.querySelector("#history-coverage"),
   shareLink: document.querySelector("#share-link"),
   shareButton: document.querySelector("#share-button"),
   shareNote: document.querySelector("#share-note"),
@@ -1377,12 +1378,34 @@ function historyDaysOnScreen(reference = referenceDate()) {
 
 // Weekdays strictly between two ISO dates, the earlier one first.
 function weekdaysBetween(earlier, later) {
-  let count = 0;
-  for (let day = dayOffset(later, { days: 1 }); day > earlier; day = dayOffset(day, { days: 1 })) {
+  return weekdayDatesBetween(earlier, later).length;
+}
+
+// The weekdays strictly between two ISO dates, oldest first.
+function weekdayDatesBetween(earlier, later) {
+  const days = [];
+  for (let day = dayOffset(earlier, { days: -1 }); day < later; day = dayOffset(day, { days: -1 })) {
     const weekday = new Date(`${day}T00:00:00Z`).getUTCDay();
-    if (weekday >= 1 && weekday <= 5) count += 1;
+    if (weekday >= 1 && weekday <= 5) days.push(day);
   }
-  return count;
+  return days;
+}
+
+const WEEKDAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+// A day with its weekday, such as "Thu 29 Oct 2026".
+function formatWeekday(value) {
+  return `${WEEKDAY_NAMES[new Date(`${value}T00:00:00Z`).getUTCDay()]} ${formatDay(value)}`;
+}
+
+// Weekdays with no archived close, oldest first: every weekday strictly
+// between the earliest and latest close in days (newest first) that isn't one
+// of them. Weekdays after the latest close are left out, since a day's close
+// is archived only after 23:15.
+function uncapturedWeekdays(days) {
+  if (days.length < 2) return [];
+  const archived = new Set(days);
+  return weekdayDatesBetween(days[days.length - 1], days[0]).filter((day) => !archived.has(day));
 }
 
 function countText(count, one, many) {
@@ -3110,6 +3133,58 @@ function renderHistoryControl() {
     ...state.historyDays.map((day) => new Option(`Close · ${formatDay(day)}`, day)),
   );
   elements.historySelect.value = state.viewDate ?? "";
+  renderHistoryCoverage();
+}
+
+// How much the archive covers, beside the View menu: the number of closes
+// since the earliest, then the weekdays between the earliest and latest with
+// no close, listed in a disclosure. It reads only the history index and never
+// says why a day is missing.
+function renderHistoryCoverage() {
+  const container = elements.historyCoverage;
+  const days = state.historyDays;
+  container.hidden = !days.length;
+  if (!days.length) {
+    container.replaceChildren();
+    return;
+  }
+  const closes = document.createElement("span");
+  closes.className = "history-coverage-closes";
+  closes.textContent =
+    `${countText(days.length, "close", "closes")} since ${formatDay(days[days.length - 1])}`;
+  const separator = document.createTextNode(" · ");
+  const missing = uncapturedWeekdays(days);
+  if (!missing.length) {
+    const none = document.createElement("span");
+    none.textContent = "no weekday missing";
+    container.replaceChildren(closes, separator, none);
+    return;
+  }
+  // Keep the disclosure open across a re-read of the index.
+  const open = Boolean(container.querySelector("details")?.open);
+  const details = document.createElement("details");
+  details.className = "history-coverage-gaps";
+  details.id = "history-coverage-gaps";
+  details.open = open;
+  const summary = document.createElement("summary");
+  summary.textContent = `${countText(missing.length, "weekday", "weekdays")} not captured`;
+  const note = document.createElement("p");
+  note.textContent = "No archived close on these weekdays. Each may have been a public holiday or a missed capture.";
+  const list = document.createElement("ul");
+  list.append(...missing.map((day) => {
+    const item = document.createElement("li");
+    item.textContent = `${formatWeekday(day)}: no capture`;
+    return item;
+  }));
+  const panel = document.createElement("div");
+  panel.className = "history-coverage-list";
+  // A long list scrolls, so it takes focus for the keyboard to scroll it.
+  panel.tabIndex = 0;
+  panel.setAttribute("role", "region");
+  panel.setAttribute("aria-label", "Weekdays not captured");
+  panel.append(note, list);
+  details.append(summary, panel);
+  container.replaceChildren(closes, separator, details);
 }
 
 function renderViewState() {
