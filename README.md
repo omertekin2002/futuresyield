@@ -166,6 +166,17 @@ status. It lists **Live** and every archived close, newest first. Choosing a
 close renders the whole dashboard (spot, curves, yields, carry and the contract
 board) from that day's snapshot, for every market.
 
+- **Coverage.** Beside the menu, a line says how deep the archive is, for
+  example "19 closes since 26 Oct 2026 · 1 weekday not captured". It counts
+  the closes the history index lists and the weekdays strictly between the
+  earliest and latest of them that have no close; weekdays after the latest
+  close are not counted, since a day is archived only after 23:15. The
+  "not captured" part opens a list of those days, oldest first, such as
+  "Thu 29 Oct 2026: no capture". Each may have been a public holiday or a
+  missed capture; the page never says which, and never fills one in. Escape,
+  a click elsewhere or leaving the list closes it. With
+  none missing the line says "no weekday missing". It reads only the index
+  already loaded, updates when a re-read changes it, and hides with the menu.
 - **Unmistakable.** A "Past close" banner and a "Historical · close of …"
   status replace the live freshness state. The one-minute poll never replaces a
   past close; **Back to live**, **Refresh**, or choosing **Live** returns to live

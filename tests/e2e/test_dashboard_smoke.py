@@ -3143,6 +3143,283 @@ class DashboardSmokeTests(unittest.TestCase):
         self.load_history(len(HISTORY_FIXTURE))
         self.take_index_errors(1)
 
+    # The archive's coverage beside the View menu.
+
+    def serve_history_index(self, days):
+        """Answer the history index with one listing exactly days, which need no files."""
+        manifest = {
+            "schema_version": 1,
+            "days": [
+                {
+                    "date": day,
+                    "generated_at": f"{day}T23:20:00+03:00",
+                    "markets": self.snapshot["market_order"],
+                }
+                for day in sorted(days)
+            ],
+        }
+        self.page.route(
+            self.INDEX_URL,
+            lambda route: route.fulfill(
+                status=200, content_type="application/json", body=json.dumps(manifest)
+            ),
+        )
+
+    @staticmethod
+    def expected_uncaptured(days):
+        """Weekdays strictly between the earliest and latest of days with no close."""
+        first, last = date.fromisoformat(min(days)), date.fromisoformat(max(days))
+        listed = set(days)
+        missing, day = [], first + timedelta(days=1)
+        while day < last:
+            if day.weekday() < 5 and day.isoformat() not in listed:
+                missing.append(day.isoformat())
+            day += timedelta(days=1)
+        return missing
+
+    def coverage(self):
+        return self.page.locator("#history-coverage")
+
+    def disclosure_names(self):
+        """The accessible name of each disclosure summary, as Chromium exposes it."""
+        cdp = self.context.new_cdp_session(self.page)
+        nodes = cdp.send("Accessibility.getFullAXTree")["nodes"]
+        cdp.detach()
+        return [
+            node.get("name", {}).get("value")
+            for node in nodes
+            if node.get("role", {}).get("value") == "DisclosureTriangle"
+        ]
+
+    def coverage_open(self):
+        return self.page.evaluate(
+            "() => Boolean(document.querySelector('#history-coverage details')?.open)"
+        )
+
+    def coverage_gaps(self):
+        """The weekdays the open disclosure lists."""
+        return self.page.locator("#history-coverage-gaps li").all_inner_texts()
+
+    def test_coverage_counts_closes_and_lists_an_uncaptured_weekday(self):
+        self.serve_history_index(
+            ["2026-10-26", "2026-10-27", "2026-10-28", "2026-10-30", "2026-11-02"]
+        )
+        self.open_dashboard()
+        coverage = self.coverage()
+        expect(coverage).to_be_visible()
+        summary = coverage.locator("summary")
+        expect(summary).to_have_text("1 weekday not captured")
+        self.assertEqual(
+            coverage.evaluate("(node) => node.textContent"),
+            "5 closes since 26 Oct 2026 · 1 weekday not captured"
+            "No archived close on these weekdays. "
+            "Each may have been a public holiday or a missed capture."
+            "Thu 29 Oct 2026: no capture",
+        )
+        list_ = coverage.locator("ul")
+        expect(list_).to_be_hidden()
+        # The arrow is decoration, left out of the summary's name.
+        self.assertEqual(self.disclosure_names(), ["1 weekday not captured"])
+
+        # Opened from the keyboard, it lists exactly the one weekday, and
+        # reading it fetches nothing.
+        requests = []
+        self.page.on("request", lambda request: requests.append(request.url))
+        self.tab_to("#history-coverage summary")
+        self.page.keyboard.press("Enter")
+        expect(list_).to_be_visible()
+        expect(coverage.locator(".history-coverage-list p")).to_have_text(
+            "No archived close on these weekdays. "
+            "Each may have been a public holiday or a missed capture."
+        )
+        self.assertEqual(self.coverage_gaps(), ["Thu 29 Oct 2026: no capture"])
+        # A one-day list doesn't scroll, so it is no extra tab stop.
+        panel = coverage.locator(".history-coverage-list")
+        expect(panel).not_to_have_attribute("tabindex", "0")
+        expect(panel).not_to_have_attribute("role", "region")
+        self.page.keyboard.press("Space")
+        expect(list_).to_be_hidden()
+        self.assertEqual(requests, [])
+
+    def test_coverage_list_closes_on_escape_a_click_elsewhere_or_leaving_it(self):
+        self.open_dashboard()
+        coverage = self.coverage()
+        summary = coverage.locator("summary")
+        list_ = coverage.locator("ul")
+
+        # The fixture's long list scrolls, so it takes focus to be scrolled.
+        self.tab_to("#history-coverage summary")
+        self.page.keyboard.press("Enter")
+        expect(list_).to_be_visible()
+        panel = coverage.locator(".history-coverage-list")
+        expect(panel).to_have_attribute("tabindex", "0")
+        expect(panel).to_have_attribute("role", "region")
+        expect(panel).to_have_accessible_name("Weekdays not captured")
+        self.page.keyboard.press("Tab")
+        expect(panel).to_be_focused()
+        self.page.keyboard.press("Escape")
+        expect(list_).to_be_hidden()
+        expect(summary).to_be_focused()
+
+        # Tabbing on out of the list closes it.
+        self.page.keyboard.press("Enter")
+        expect(list_).to_be_visible()
+        self.page.keyboard.press("Tab")
+        self.page.keyboard.press("Tab")
+        self.assertFalse(self.coverage_open())
+        self.assertFalse(
+            self.page.evaluate(
+                "() => document.querySelector('#history-coverage').contains(document.activeElement)"
+            )
+        )
+
+        # A click inside keeps it open; one elsewhere closes it.
+        summary.click()
+        expect(list_).to_be_visible()
+        coverage.locator(".history-coverage-list p").click()
+        expect(list_).to_be_visible()
+        self.page.locator(".wordmark-sub").click()
+        expect(list_).to_be_hidden()
+        self.assert_live()
+
+    def test_coverage_lists_every_weekday_in_a_longer_gap_oldest_first(self):
+        # Mon 5 Oct, Fri 9 Oct and Wed 14 Oct: Tue–Thu, then Mon–Tue after a weekend.
+        self.serve_history_index(["2026-10-05", "2026-10-09", "2026-10-14"])
+        self.open_dashboard()
+        coverage = self.coverage()
+        expect(coverage).to_contain_text("3 closes since 05 Oct 2026 · 5 weekdays not captured")
+        coverage.locator("summary").click()
+        self.assertEqual(
+            self.coverage_gaps(),
+            [
+                "Tue 06 Oct 2026: no capture",
+                "Wed 07 Oct 2026: no capture",
+                "Thu 08 Oct 2026: no capture",
+                "Mon 12 Oct 2026: no capture",
+                "Tue 13 Oct 2026: no capture",
+            ],
+        )
+
+    def test_coverage_without_a_missing_weekday_has_no_disclosure(self):
+        for days, text in (
+            # Thu, Fri and the next Mon: the weekend between is not missing.
+            (["2026-10-01", "2026-10-02", "2026-10-05"],
+             "3 closes since 01 Oct 2026 · no weekday missing"),
+            (["2026-10-06"], "1 close since 06 Oct 2026 · no weekday missing"),
+        ):
+            with self.subTest(days=days):
+                self.reopen_at(FIXTURE_DAY_TIME)
+                self.serve_history_index(days)
+                self.open_dashboard()
+                expect(self.coverage()).to_be_visible()
+                expect(self.coverage()).to_have_text(text)
+                expect(self.coverage().locator("details")).to_have_count(0)
+
+    def test_coverage_is_hidden_with_the_view_menu(self):
+        self.open_dashboard(base_url=self.no_history_url)
+        expect(self.page.locator("#history-control")).to_be_hidden()
+        expect(self.coverage()).to_be_hidden()
+
+        # An index that has never been read hides both too.
+        self.reopen_at(FIXTURE_DAY_TIME)
+        control = self.route_history_index()
+        control["mode"] = "500"
+        self.open_dashboard()
+        self.index_read_settled()
+        expect(self.page.locator("#history-control")).to_be_hidden()
+        expect(self.coverage()).to_be_hidden()
+        self.take_index_errors(1)
+
+    def test_coverage_of_the_fixture_archive(self):
+        missing = self.expected_uncaptured(list(HISTORY_FIXTURE))
+        self.open_dashboard()
+        expect(self.coverage()).to_contain_text(
+            f"5 closes since 07 Jul 2026 · {len(missing)} weekdays not captured"
+        )
+        self.coverage().locator("summary").click()
+        gaps = self.coverage_gaps()
+        self.assertEqual(len(gaps), len(missing))
+        self.assertEqual(gaps[0], "Wed 08 Jul 2026: no capture")
+        self.assertEqual(gaps[-1], "Fri 02 Oct 2026: no capture")
+        self.assertNotIn("Sat", " ".join(gaps))
+        self.assertNotIn("Sun", " ".join(gaps))
+
+    def test_reread_index_updates_the_coverage_in_place(self):
+        added = "2026-10-05"
+        before = [day for day in HISTORY_FIXTURE if day != added]
+        control = self.route_history_index()
+        control["mode"] = before
+        self.page.clock.install(time=FIXTURE_DAY_TIME)
+        self.open_day(
+            "2026-10-06", "&compare=2026-09-30&market=USDTRY&maturity=2028-01&period=monthly"
+        )
+        self.assert_comparing("2026-09-30", current=HISTORY_LABELS["2026-10-06"])
+        self.assert_selected("Jan 2028")
+        missing = self.expected_uncaptured(before)
+        coverage = self.coverage()
+        expect(coverage).to_contain_text(
+            f"4 closes since 07 Jul 2026 · {len(missing)} weekdays not captured"
+        )
+        coverage.locator("summary").click()
+        self.assertIn("Mon 05 Oct 2026: no capture", self.coverage_gaps())
+        expect(coverage.locator("summary")).to_be_focused()
+        url, entries = self.page.url, self.entries()
+
+        control["mode"] = "pass"
+        self.page.clock.run_for("10:30")
+        expect(coverage).to_contain_text(
+            f"5 closes since 07 Jul 2026 · {len(missing) - 1} weekdays not captured"
+        )
+        # The open disclosure stays open and focused, without the newly
+        # archived day.
+        expect(coverage.locator("ul")).to_be_visible()
+        expect(coverage.locator("summary")).to_be_focused()
+        self.assertNotIn("Mon 05 Oct 2026: no capture", self.coverage_gaps())
+        self.assertEqual(len(self.coverage_gaps()), len(missing) - 1)
+        self.assert_historical("2026-10-06")
+        self.assert_comparing("2026-09-30", current=HISTORY_LABELS["2026-10-06"])
+        self.assert_selected("Jan 2028")
+        self.assert_period("monthly")
+        self.assertEqual(self.page.url, url)
+        self.assertEqual(self.entries(), entries)
+
+    def test_coverage_fits_a_phone_and_passes_the_audit(self):
+        viewports = (None, {"width": 680, "height": 900}, {"width": 375, "height": 812},
+                     MOBILE_VIEWPORT)
+        for viewport in viewports:
+            for day in (None, "2026-10-06"):
+                with self.subTest(viewport=viewport, day=day):
+                    self.reopen_at(FIXTURE_DAY_TIME, **({"viewport": viewport} if viewport else {}))
+                    if day:
+                        self.open_day(day)
+                    else:
+                        self.open_dashboard()
+                    coverage = self.coverage()
+                    coverage.locator("summary").click()
+                    expect(coverage.locator("ul")).to_be_visible()
+                    self.assert_no_sideways_scroll()
+                    band = self.page.locator(".service-band").bounding_box()
+                    box = coverage.bounding_box()
+                    self.assertLessEqual(box["x"] + box["width"], band["x"] + band["width"] + 0.5)
+                    # The open list stays on screen, wherever the line sits.
+                    panel = coverage.locator(".history-coverage-list").bounding_box()
+                    self.assertGreaterEqual(panel["x"], 0)
+                    self.assertLessEqual(
+                        panel["x"] + panel["width"],
+                        self.page.evaluate("() => window.innerWidth") + 0.5,
+                    )
+                    if Axe is not None:
+                        self.assert_accessible(
+                            f"coverage at {viewport or 'desktop'}, {day or 'live'}"
+                        )
+
+    def test_print_leaves_the_coverage_out(self):
+        self.open_dashboard()
+        expect(self.coverage()).to_be_visible()
+        self.page.emulate_media(media="print")
+        expect(self.coverage()).to_be_hidden()
+        expect(self.page.locator(".print-header")).to_be_visible()
+
     # A link's dates while the history index has never been read.
     PENDING_DAY, PENDING_COMPARE = "2026-10-06", "2026-09-30"
 
