@@ -18,6 +18,12 @@ const elements = {
   refreshButton: document.querySelector("#refresh-button"),
   historyControl: document.querySelector("#history-control"),
   historySelect: document.querySelector("#history-select"),
+  shareLink: document.querySelector("#share-link"),
+  shareButton: document.querySelector("#share-button"),
+  shareNote: document.querySelector("#share-note"),
+  shareStatus: document.querySelector("#share-status"),
+  shareFallback: document.querySelector("#share-fallback"),
+  shareField: document.querySelector("#share-field"),
   historyBanner: document.querySelector("#history-banner"),
   historyBannerDate: document.querySelector("#history-banner-date"),
   historyNotice: document.querySelector("#history-notice"),
@@ -178,6 +184,9 @@ const state = {
   // it is building, written once the view is on screen, and whether that
   // write adds a history entry. null when no move is under way.
   navigation: null,
+  // The link the Copy link button last copied, or offered to copy by hand,
+  // while it still matches the view on screen; null otherwise.
+  sharedHref: null,
   // The query of the history entry on screen, as last written or restored.
   // A popstate that keeps it, such as the skip link's change of fragment,
   // names no other view.
@@ -2816,6 +2825,7 @@ function writeUrl(url) {
     window.history.replaceState({}, "", url);
     state.shownSearch = window.location.search;
   }
+  renderShareLink();
 }
 
 // Set a query parameter, or delete it with null, without a history entry.
@@ -2833,6 +2843,7 @@ function updateUrlParam(name, value) {
 // A move started while another is loading joins it.
 function beginNavigation() {
   state.navigation ??= { url: window.location.href, push: true };
+  renderShareLink();
 }
 
 // Write the address a move built: a new history entry if it reached its view
@@ -2842,10 +2853,89 @@ function finishNavigation(reached) {
   const navigation = state.navigation;
   if (!navigation) return;
   state.navigation = null;
-  if (navigation.url === window.location.href) return;
-  if (reached && navigation.push) window.history.pushState({}, "", navigation.url);
-  else window.history.replaceState({}, "", navigation.url);
-  state.shownSearch = window.location.search;
+  if (navigation.url !== window.location.href) {
+    if (reached && navigation.push) window.history.pushState({}, "", navigation.url);
+    else window.history.replaceState({}, "", navigation.url);
+    state.shownSearch = window.location.search;
+  }
+  renderShareLink();
+}
+
+// Query parameters a shared link carries, in this order: everything that
+// names the view on screen, and nothing else, such as a fragment.
+const SHARE_PARAMS = ["date", "market", "compare", "maturity", "period"];
+
+// Whether the view is still changing, so its address isn't final yet: before
+// the first view renders, while a move or another view loads, and while a
+// comparison loads, which may still be dropped.
+function shareLinkPending() {
+  return !state.snapshot ||
+    Boolean(state.navigation) ||
+    state.viewDate !== state.renderedDate ||
+    Boolean(state.compareDate && !state.compareSnapshot);
+}
+
+// The link to the view on screen: its address without anything else. A live
+// view's never carries a date, so it always opens the newest data; an
+// archived close's carries its date, so it always opens that close.
+function shareUrl() {
+  const current = currentUrl();
+  const url = new URL(current.pathname, current.origin);
+  SHARE_PARAMS.forEach((name) => {
+    const value = name === "date" ? state.renderedDate : current.searchParams.get(name);
+    if (value) url.searchParams.set(name, value);
+  });
+  return url.href;
+}
+
+// Say what the copied link will show: the newest data, which changes, or one
+// close's stored values, which don't. The button waits while the view is
+// still changing, and a copy made for another view is cleared.
+function renderShareLink() {
+  const date = state.renderedDate;
+  const pending = shareLinkPending();
+  elements.shareLink.hidden = !state.snapshot;
+  elements.shareButton.setAttribute("aria-disabled", String(pending));
+  elements.shareButton.textContent = date
+    ? `Copy link to the close of ${formatDay(date)}`
+    : "Copy live link";
+  elements.shareNote.textContent = date
+    ? `This link always shows the stored values of the close of ${formatDay(date)}.`
+    : "This link shows the latest data when opened; prices and yields will differ later." +
+      (state.historyDays.length ? " For a link that stays fixed, open a close from View first." : "");
+  if (state.sharedHref !== null && (pending || shareUrl() !== state.sharedHref)) {
+    state.sharedHref = null;
+    elements.shareStatus.textContent = "";
+    elements.shareFallback.hidden = true;
+    elements.shareField.value = "";
+  }
+}
+
+// Copy the link to the view on screen without changing the view, the address
+// or the browser's history. Without the Clipboard API, or when it refuses,
+// the link is shown selected in a field to copy by hand.
+async function copyShareLink() {
+  if (shareLinkPending()) return;
+  const href = shareUrl();
+  const date = state.renderedDate;
+  state.sharedHref = href;
+  elements.shareFallback.hidden = true;
+  elements.shareStatus.textContent = "";
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error("The Clipboard API is unavailable.");
+    await navigator.clipboard.writeText(href);
+  } catch {
+    elements.shareField.value = href;
+    elements.shareFallback.hidden = false;
+    elements.shareStatus.textContent =
+      "The link could not be copied automatically. It is selected below; copy it from there.";
+    elements.shareField.focus();
+    elements.shareField.select();
+    return;
+  }
+  elements.shareStatus.textContent = date
+    ? `Copied a link to the close of ${formatDay(date)}.`
+    : "Copied a live link. It will show newer data when opened later.";
 }
 
 function hideNotice() {
@@ -2956,6 +3046,7 @@ function renderComparisonLegends() {
 
 function renderComparison() {
   showCompareControl();
+  renderShareLink();
   elements.tooltip.hidden = true;
   elements.yieldTooltip.hidden = true;
   renderComparisonLegends();
@@ -3071,6 +3162,7 @@ function setHistoryDays(days) {
     return;
   }
   state.historyDays = days;
+  renderShareLink();
   if (state.historyOpen) {
     days
       .filter((day) => !previous.includes(day) && !state.historyCache.has(day))
@@ -3092,6 +3184,7 @@ function setHistoryDays(days) {
 async function loadView(date, { navigate = false } = {}) {
   if (navigate) beginNavigation();
   state.viewDate = date;
+  renderShareLink();
   let reached = false;
   const request = ++state.requestId;
   elements.refreshButton.classList.add("is-loading");
@@ -3172,6 +3265,9 @@ elements.marketButtons.forEach((button) => {
 });
 
 elements.downloadCsv.addEventListener("click", downloadBoardCsv);
+elements.shareButton.addEventListener("click", copyShareLink);
+// The whole link stays selected, ready to copy, whenever the field is focused.
+elements.shareField.addEventListener("focus", () => elements.shareField.select());
 
 // Fetch the selected contract's archived closes for the History table. Focus
 // waits on the loading status, then moves on to the table.
