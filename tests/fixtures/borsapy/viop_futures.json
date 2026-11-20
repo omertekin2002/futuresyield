@@ -1,0 +1,256 @@
+{
+  "columns": [
+    "code",
+    "contract",
+    "price",
+    "change",
+    "volume_tl",
+    "volume_qty",
+    "category"
+  ],
+  "dtypes": {
+    "code": "str",
+    "contract": "str",
+    "price": "float64",
+    "change": "float64",
+    "volume_tl": "float64",
+    "volume_qty": "float64",
+    "category": "str"
+  },
+  "records": [
+    {
+      "code": "F_ENJSA1226",
+      "contract": "ENJSA Aralik 2026 Vadeli",
+      "price": 114.3,
+      "change": -2.35,
+      "volume_tl": -2.75,
+      "volume_qty": 4137755.0,
+      "category": "stock"
+    },
+    {
+      "code": "F_EURTRY1226",
+      "contract": "EURTRY Aralik 2026 Vadeli",
+      "price": 57.485,
+      "change": -0.21,
+      "volume_tl": -0.119,
+      "volume_qty": 20119520.0,
+      "category": "currency"
+    },
+    {
+      "code": "F_USDTRY1226",
+      "contract": "USDTRY Aralik 2026 Vadeli",
+      "price": 52.262,
+      "change": 0.02,
+      "volume_tl": 0.01,
+      "volume_qty": 11922511259.0,
+      "category": "currency"
+    },
+    {
+      "code": "F_USDTRY0127",
+      "contract": "USDTRY Ocak 2027 Vadeli",
+      "price": 53.514,
+      "change": 0.0,
+      "volume_tl": -0.002,
+      "volume_qty": 8745003380.0,
+      "category": "currency"
+    },
+    {
+      "code": "F_USDTRY0227",
+      "contract": "USDTRY Subat 2027 Vadeli",
+      "price": 54.742,
+      "change": 0.06,
+      "volume_tl": 0.034,
+      "volume_qty": 1634998571.0,
+      "category": "currency"
+    },
+    {
+      "code": "F_USDTRY0327",
+      "contract": "USDTRY Mart 2027 Vadeli",
+      "price": 56.18,
+      "change": 0.17,
+      "volume_tl": 0.094,
+      "volume_qty": 1184701819.0,
+      "category": "currency"
+    },
+    {
+      "code": "F_USDTRY0427",
+      "contract": "USDTRY Nisan 2027 Vadeli",
+      "price": 57.373,
+      "change": 0.07,
+      "volume_tl": 0.04,
+      "volume_qty": 587790845.0,
+      "category": "currency"
+    },
+    {
+      "code": "F_USDTRY0527",
+      "contract": "USDTRY Mayis 2027 Vadeli",
+      "price": 58.77,
+      "change": -0.04,
+      "volume_tl": -0.026,
+      "volume_qty": 601861877.0,
+      "category": "currency"
+    },
+    {
+      "code": "F_USDTRY0627",
+      "contract": "USDTRY Haziran 2027 Vadeli",
+      "price": 60.13,
+      "change": 0.2,
+      "volume_tl": 0.123,
+      "volume_qty": 16370795.0,
+      "category": "currency"
+    },
+    {
+      "code": "F_USDTRY0727",
+      "contract": "USDTRY Temmuz 2027 Vadeli",
+      "price": 61.366,
+      "change": 0.26,
+      "volume_tl": 0.158,
+      "volume_qty": 429562.0,
+      "category": "currency"
+    },
+    {
+      "code": "F_USDTRY0827",
+      "contract": "USDTRY Agustos 2027 Vadeli",
+      "price": 62.987,
+      "change": 0.16,
+      "volume_tl": 0.099,
+      "volume_qty": 62987.0,
+      "category": "currency"
+    },
+    {
+      "code": "F_USDTRY0927",
+      "contract": "USDTRY Eylul 2027 Vadeli",
+      "price": 64.295,
+      "change": 0.16,
+      "volume_tl": 0.101,
+      "volume_qty": 8342035.0,
+      "category": "currency"
+    },
+    {
+      "code": "F_USDTRY1027",
+      "contract": "USDTRY Ekim 2027 Vadeli",
+      "price": 65.601,
+      "change": 0.12,
+      "volume_tl": 0.079,
+      "volume_qty": 27982306.0,
+      "category": "currency"
+    },
+    {
+      "code": "F_USDTRY1127",
+      "contract": "USDTRY Kasim 2027 Vadeli",
+      "price": 67.2,
+      "change": 0.27,
+      "volume_tl": 0.18,
+      "volume_qty": 3221684.0,
+      "category": "currency"
+    },
+    {
+      "code": "F_EURTRY1227",
+      "contract": "EURTRY Aralik 2027 Vadeli",
+      "price": 76.6,
+      "change": -0.04,
+      "volume_tl": -0.033,
+      "volume_qty": 1609506.0,
+      "category": "currency"
+    },
+    {
+      "code": "F_USDTRY1227",
+      "contract": "USDTRY Aralik 2027 Vadeli",
+      "price": 68.711,
+      "change": 0.18,
+      "volume_tl": 0.122,
+      "volume_qty": 16601414.0,
+      "category": "currency"
+    },
+    {
+      "code": "F_USDTRY0128",
+      "contract": "USDTRY Ocak 2028 Vadeli",
+      "price": 70.195,
+      "change": 0.13,
+      "volume_tl": 0.093,
+      "volume_qty": 1753847.0,
+      "category": "currency"
+    },
+    {
+      "code": "TM_F_USDTRY261126",
+      "contract": "USDTRY 26/11/2026 Vadeli",
+      "price": 50.709,
+      "change": 0.1,
+      "volume_tl": 0.052,
+      "volume_qty": 101418.0,
+      "category": "currency"
+    },
+    {
+      "code": "F_USDTRY1126",
+      "contract": "USDTRY Kasim 2026 Vadeli",
+      "price": 50.905,
+      "change": 0.0,
+      "volume_tl": 0.0,
+      "volume_qty": 25297824269.0,
+      "category": "currency"
+    },
+    {
+      "code": "F_EURTRY1126",
+      "contract": "EURTRY Kasim 2026 Vadeli",
+      "price": 55.82,
+      "change": -0.31,
+      "volume_tl": -0.173,
+      "volume_qty": 17483222.0,
+      "category": "currency"
+    },
+    {
+      "code": "F_USDTRY0228",
+      "contract": "USDTRY Subat 2028 Vadeli",
+      "price": 71.695,
+      "change": 0.09,
+      "volume_tl": 0.062,
+      "volume_qty": 931959.0,
+      "category": "currency"
+    },
+    {
+      "code": "F_EURTRY0227",
+      "contract": "EURTRY Subat 2027 Vadeli",
+      "price": 60.2,
+      "change": -0.22,
+      "volume_tl": -0.13,
+      "volume_qty": 241130.0,
+      "category": "currency"
+    },
+    {
+      "code": "F_XAUTRYM0227",
+      "contract": "XAUTRY Subat 2027 Vadeli",
+      "price": 6396.1,
+      "change": -3.53,
+      "volume_tl": -234.1,
+      "volume_qty": 66377942.0,
+      "category": "commodity"
+    },
+    {
+      "code": "F_XAUTRYM1226",
+      "contract": "XAUTRY Aralik 2026 Vadeli",
+      "price": 6044.0,
+      "change": -3.7,
+      "volume_tl": -232.1,
+      "volume_qty": 804149827.0,
+      "category": "commodity"
+    },
+    {
+      "code": "F_XAUTRYM0427",
+      "contract": "XAUTRY Nisan 2027 Vadeli",
+      "price": 6829.4,
+      "change": -3.06,
+      "volume_tl": -215.8,
+      "volume_qty": 15363578.0,
+      "category": "commodity"
+    },
+    {
+      "code": "F_PETKM1226",
+      "contract": "PETKM Aralik 2026 Vadeli",
+      "price": 15.55,
+      "change": -2.81,
+      "volume_tl": -0.45,
+      "volume_qty": 30807090.0,
+      "category": "stock"
+    }
+  ]
+}
