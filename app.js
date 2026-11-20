@@ -152,6 +152,8 @@ const state = {
   // user's moves, so one made while a waiting link opens stops it there.
   pendingLink: null,
   linkRequestId: 0,
+  // The requestId of the load opening a waiting close, while it runs, or null.
+  linkLoad: null,
   // The requested view and the one on screen: an archived date, or null for live.
   viewDate: null,
   renderedDate: null,
@@ -3756,6 +3758,17 @@ function applyLinkDates(params) {
 // maturity or period change keeps them.
 function cancelPendingLink() {
   state.linkRequestId += 1;
+  // A waiting close still loading is dropped before it can render, and the
+  // view on screen stays.
+  if (state.linkLoad !== null && state.linkLoad === state.requestId) {
+    state.requestId += 1;
+    state.viewDate = state.renderedDate;
+    elements.refreshButton.classList.remove("is-loading");
+    elements.refreshButton.disabled = false;
+    renderViewState();
+    renderShareLink();
+  }
+  state.linkLoad = null;
   if (!state.pendingLink) return;
   state.pendingLink = null;
   updateUrlParam("date", state.renderedDate);
@@ -3776,7 +3789,10 @@ async function openPendingLink() {
 
   const date = pending.date && state.historyDays.includes(pending.date) ? pending.date : null;
   if (date) {
-    const reached = await loadView(date, { keepSelection: true });
+    const load = loadView(date, { keepSelection: true });
+    state.linkLoad = state.requestId;
+    const reached = await load;
+    if (state.linkLoad === state.requestId) state.linkLoad = null;
     if (reached === undefined || request !== state.linkRequestId) return;
   } else if (pending.date) {
     addNotice(`No archived close for ${pending.date}. Showing live data.`);
