@@ -187,6 +187,8 @@ const state = {
   // The link the Copy link button last copied, or offered to copy by hand,
   // while it still matches the view on screen; null otherwise.
   sharedHref: null,
+  // Counts copies, so only the latest one may report how it went.
+  shareRequestId: 0,
   // The query of the history entry on screen, as last written or restored.
   // A popstate that keeps it, such as the skip link's change of fragment,
   // names no other view.
@@ -2913,18 +2915,23 @@ function renderShareLink() {
 
 // Copy the link to the view on screen without changing the view, the address
 // or the browser's history. Without the Clipboard API, or when it refuses,
-// the link is shown selected in a field to copy by hand.
+// the link is shown selected in a field to copy by hand. A copy that settles
+// after the view changed, or after a later copy, says nothing, so no message
+// or field for another view appears under this one.
 async function copyShareLink() {
   if (shareLinkPending()) return;
   const href = shareUrl();
   const date = state.renderedDate;
+  const request = ++state.shareRequestId;
   state.sharedHref = href;
   elements.shareFallback.hidden = true;
   elements.shareStatus.textContent = "";
+  const current = () => request === state.shareRequestId && state.sharedHref === href;
   try {
     if (!navigator.clipboard?.writeText) throw new Error("The Clipboard API is unavailable.");
     await navigator.clipboard.writeText(href);
   } catch {
+    if (!current()) return;
     elements.shareField.value = href;
     elements.shareFallback.hidden = false;
     elements.shareStatus.textContent =
@@ -2933,6 +2940,7 @@ async function copyShareLink() {
     elements.shareField.select();
     return;
   }
+  if (!current()) return;
   elements.shareStatus.textContent = date
     ? `Copied a link to the close of ${formatDay(date)}.`
     : "Copied a live link. It will show newer data when opened later.";

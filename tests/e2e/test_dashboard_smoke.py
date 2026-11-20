@@ -1545,6 +1545,9 @@ class DashboardSmokeTests(unittest.TestCase):
                 self.assertEqual(keyboard, pointer)
                 # The pointer takes over from the keyboard marker.
                 expect(self.page.locator(marker)).to_be_hidden()
+                # Park the pointer off the charts, or the page scrolling under it
+                # as Tab reaches the next chart can move it onto that chart.
+                self.page.mouse.move(0, 0)
 
     def test_home_end_escape_and_blur(self):
         self.open_dashboard("?market=USDTRY")
@@ -5225,6 +5228,28 @@ class DashboardSmokeTests(unittest.TestCase):
                 self.page.locator('.market-options [data-market="USDTRY"]').click()
                 expect(self.page.locator("#share-fallback")).to_be_hidden()
                 expect(self.page.locator("#share-status")).to_have_text("")
+
+    def test_copy_link_settling_after_the_view_changed_says_nothing(self):
+        # The page settles each clipboard write itself, as a slow permission would.
+        self.page.add_init_script(
+            """navigator.clipboard.writeText = () => new Promise((resolve, reject) => {
+                window.__settleCopy = { resolve, reject };
+            });"""
+        )
+        for outcome in ("reject", "resolve"):
+            with self.subTest(outcome=outcome):
+                self.open_day("2026-10-06", "&market=XAUTRY")
+                self.share_button().click()
+                self.page.wait_for_function("() => window.__settleCopy")
+                self.page.locator('.market-options [data-market="USDTRY"]').click()
+                self.assert_market("USDTRY", self.history["2026-10-06"])
+                self.page.evaluate(
+                    f"() => window.__settleCopy.{outcome}(new Error('Denied'))"
+                )
+                self.page.evaluate("() => new Promise((done) => setTimeout(done, 50))")
+                expect(self.page.locator("#share-fallback")).to_be_hidden()
+                expect(self.page.locator("#share-status")).to_have_text("")
+                self.page.evaluate("() => { window.__settleCopy = null; }")
 
     def test_copy_link_without_history_copies_the_live_link(self):
         self.open_with_clipboard()
