@@ -3180,6 +3180,22 @@ class DashboardSmokeTests(unittest.TestCase):
     def coverage(self):
         return self.page.locator("#history-coverage")
 
+    def disclosure_names(self):
+        """The accessible name of each disclosure summary, as Chromium exposes it."""
+        cdp = self.context.new_cdp_session(self.page)
+        nodes = cdp.send("Accessibility.getFullAXTree")["nodes"]
+        cdp.detach()
+        return [
+            node.get("name", {}).get("value")
+            for node in nodes
+            if node.get("role", {}).get("value") == "DisclosureTriangle"
+        ]
+
+    def coverage_open(self):
+        return self.page.evaluate(
+            "() => Boolean(document.querySelector('#history-coverage details')?.open)"
+        )
+
     def coverage_gaps(self):
         """The weekdays the open disclosure lists."""
         return self.page.locator("#history-coverage-gaps li").all_inner_texts()
@@ -3202,6 +3218,8 @@ class DashboardSmokeTests(unittest.TestCase):
         )
         list_ = coverage.locator("ul")
         expect(list_).to_be_hidden()
+        # The arrow is decoration, left out of the summary's name.
+        self.assertEqual(self.disclosure_names(), ["1 weekday not captured"])
 
         # Opened from the keyboard, it lists exactly the one weekday, and
         # reading it fetches nothing.
@@ -3215,9 +3233,54 @@ class DashboardSmokeTests(unittest.TestCase):
             "Each may have been a public holiday or a missed capture."
         )
         self.assertEqual(self.coverage_gaps(), ["Thu 29 Oct 2026: no capture"])
+        # A one-day list doesn't scroll, so it is no extra tab stop.
+        panel = coverage.locator(".history-coverage-list")
+        expect(panel).not_to_have_attribute("tabindex", "0")
+        expect(panel).not_to_have_attribute("role", "region")
         self.page.keyboard.press("Space")
         expect(list_).to_be_hidden()
         self.assertEqual(requests, [])
+
+    def test_coverage_list_closes_on_escape_a_click_elsewhere_or_leaving_it(self):
+        self.open_dashboard()
+        coverage = self.coverage()
+        summary = coverage.locator("summary")
+        list_ = coverage.locator("ul")
+
+        # The fixture's long list scrolls, so it takes focus to be scrolled.
+        self.tab_to("#history-coverage summary")
+        self.page.keyboard.press("Enter")
+        expect(list_).to_be_visible()
+        panel = coverage.locator(".history-coverage-list")
+        expect(panel).to_have_attribute("tabindex", "0")
+        expect(panel).to_have_attribute("role", "region")
+        expect(panel).to_have_accessible_name("Weekdays not captured")
+        self.page.keyboard.press("Tab")
+        expect(panel).to_be_focused()
+        self.page.keyboard.press("Escape")
+        expect(list_).to_be_hidden()
+        expect(summary).to_be_focused()
+
+        # Tabbing on out of the list closes it.
+        self.page.keyboard.press("Enter")
+        expect(list_).to_be_visible()
+        self.page.keyboard.press("Tab")
+        self.page.keyboard.press("Tab")
+        self.assertFalse(self.coverage_open())
+        self.assertFalse(
+            self.page.evaluate(
+                "() => document.querySelector('#history-coverage').contains(document.activeElement)"
+            )
+        )
+
+        # A click inside keeps it open; one elsewhere closes it.
+        summary.click()
+        expect(list_).to_be_visible()
+        coverage.locator(".history-coverage-list p").click()
+        expect(list_).to_be_visible()
+        self.page.locator(".wordmark-sub").click()
+        expect(list_).to_be_hidden()
+        self.assert_live()
 
     def test_coverage_lists_every_weekday_in_a_longer_gap_oldest_first(self):
         # Mon 5 Oct, Fri 9 Oct and Wed 14 Oct: Tue–Thu, then Mon–Tue after a weekend.
@@ -3299,6 +3362,7 @@ class DashboardSmokeTests(unittest.TestCase):
         )
         coverage.locator("summary").click()
         self.assertIn("Mon 05 Oct 2026: no capture", self.coverage_gaps())
+        expect(coverage.locator("summary")).to_be_focused()
         url, entries = self.page.url, self.entries()
 
         control["mode"] = "pass"
@@ -3306,8 +3370,10 @@ class DashboardSmokeTests(unittest.TestCase):
         expect(coverage).to_contain_text(
             f"5 closes since 07 Jul 2026 · {len(missing) - 1} weekdays not captured"
         )
-        # The open disclosure stays open, without the newly archived day.
+        # The open disclosure stays open and focused, without the newly
+        # archived day.
         expect(coverage.locator("ul")).to_be_visible()
+        expect(coverage.locator("summary")).to_be_focused()
         self.assertNotIn("Mon 05 Oct 2026: no capture", self.coverage_gaps())
         self.assertEqual(len(self.coverage_gaps()), len(missing) - 1)
         self.assert_historical("2026-10-06")

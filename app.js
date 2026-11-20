@@ -3160,12 +3160,14 @@ function renderHistoryCoverage() {
     container.replaceChildren(closes, separator, none);
     return;
   }
-  // Keep the disclosure open across a re-read of the index.
-  const open = Boolean(container.querySelector("details")?.open);
+  // Keep the disclosure open, and keyboard focus on it, across a re-read of
+  // the index.
+  const previous = container.querySelector("details");
+  const open = Boolean(previous?.open);
+  const focused = Boolean(previous?.contains(document.activeElement));
   const details = document.createElement("details");
   details.className = "history-coverage-gaps";
   details.id = "history-coverage-gaps";
-  details.open = open;
   const summary = document.createElement("summary");
   summary.textContent = `${countText(missing.length, "weekday", "weekdays")} not captured`;
   const note = document.createElement("p");
@@ -3178,13 +3180,36 @@ function renderHistoryCoverage() {
   }));
   const panel = document.createElement("div");
   panel.className = "history-coverage-list";
-  // A long list scrolls, so it takes focus for the keyboard to scroll it.
-  panel.tabIndex = 0;
-  panel.setAttribute("role", "region");
-  panel.setAttribute("aria-label", "Weekdays not captured");
   panel.append(note, list);
   details.append(summary, panel);
+  details.addEventListener("toggle", () => syncCoverageScroll(details));
   container.replaceChildren(closes, separator, details);
+  details.open = open;
+  syncCoverageScroll(details);
+  if (focused) summary.focus();
+}
+
+// A list long enough to scroll takes focus, so the keyboard can scroll it;
+// a shorter one is no extra tab stop.
+function syncCoverageScroll(details) {
+  const panel = details.querySelector(".history-coverage-list");
+  if (details.open && panel.scrollHeight > panel.clientHeight) {
+    panel.tabIndex = 0;
+    panel.setAttribute("role", "region");
+    panel.setAttribute("aria-label", "Weekdays not captured");
+  } else {
+    panel.removeAttribute("tabindex");
+    panel.removeAttribute("role");
+    panel.removeAttribute("aria-label");
+  }
+}
+
+// Close the coverage list, returning focus to its summary if asked.
+function closeCoverageList({ focus = false } = {}) {
+  const details = elements.historyCoverage.querySelector("details");
+  if (!details?.open) return;
+  details.open = false;
+  if (focus) details.querySelector("summary").focus();
 }
 
 function renderViewState() {
@@ -3349,6 +3374,22 @@ function goLive() {
 // Refresh always shows live data, so it also leaves a past close.
 elements.refreshButton.addEventListener("click", goLive);
 elements.liveButton.addEventListener("click", goLive);
+
+// The open coverage list lies over the page on wider screens, so Escape,
+// a click elsewhere or moving focus out of it closes it.
+elements.historyCoverage.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || !elements.historyCoverage.querySelector("details[open]")) return;
+  event.preventDefault();
+  closeCoverageList({ focus: true });
+});
+elements.historyCoverage.addEventListener("focusout", (event) => {
+  if (event.relatedTarget && !elements.historyCoverage.contains(event.relatedTarget)) {
+    closeCoverageList();
+  }
+});
+document.addEventListener("pointerdown", (event) => {
+  if (!elements.historyCoverage.contains(event.target)) closeCoverageList();
+});
 
 elements.historySelect.addEventListener("change", () => {
   const date = elements.historySelect.value;

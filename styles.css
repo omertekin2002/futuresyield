@@ -234,22 +234,28 @@ button:hover {
 }
 .history-coverage-gaps summary {
   display: inline;
+  list-style: none;
   cursor: pointer;
   text-decoration: underline;
   text-decoration-style: dotted;
   text-underline-offset: 3px;
 }
+.history-coverage-gaps summary::-webkit-details-marker {
+  display: none;
+}
+/* The arrow is decoration: its empty alternative keeps it out of the name. */
 .history-coverage-gaps summary::after {
-  content: " ▸";
+  content: " ▸" / "";
 }
 .history-coverage-gaps[open] summary::after {
-  content: " ▾";
+  content: " ▾" / "";
 }
 .history-coverage-gaps summary:focus-visible {
   outline: 3px solid var(--link);
   outline-offset: 2px;
 }
-/* The list drops below the line without moving the band around it. */
+/* The list drops below the line, over the page, without moving the band
+   around it; Escape, a click elsewhere or leaving it closes it. */
 .history-coverage-list {
   position: absolute;
   top: calc(100% + 6px);

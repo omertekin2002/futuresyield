@@ -173,7 +173,8 @@ board) from that day's snapshot, for every market.
   close are not counted, since a day is archived only after 23:15. The
   "not captured" part opens a list of those days, oldest first, such as
   "Thu 29 Oct 2026: no capture". Each may have been a public holiday or a
-  missed capture; the page never says which, and never fills one in. With
+  missed capture; the page never says which, and never fills one in. Escape,
+  a click elsewhere or leaving the list closes it. With
   none missing the line says "no weekday missing". It reads only the index
   already loaded, updates when a re-read changes it, and hides with the menu.
 - **Unmistakable.** A "Past close" banner and a "Historical · close of …"
