@@ -1,0 +1,327 @@
+{
+  "USDTRY": [
+    {
+      "symbol": "USDTRY1!",
+      "full_name": "BIST:USDTRY1!",
+      "description": "",
+      "base": "USDTRY",
+      "month_code": "",
+      "year": "",
+      "is_continuous": true,
+      "exchange": "BIST",
+      "type": "futures"
+    },
+    {
+      "symbol": "USDTRY2!",
+      "full_name": "BIST:USDTRY2!",
+      "description": "",
+      "base": "USDTRY",
+      "month_code": "",
+      "year": "",
+      "is_continuous": true,
+      "exchange": "BIST",
+      "type": "futures"
+    },
+    {
+      "symbol": "USDTRYX2026",
+      "full_name": "BIST:USDTRYX2026",
+      "description": "Nov 2026",
+      "base": "USDTRY",
+      "month_code": "X",
+      "year": "2026",
+      "is_continuous": false,
+      "exchange": "BIST",
+      "type": "futures"
+    },
+    {
+      "symbol": "USDTRYZ2026",
+      "full_name": "BIST:USDTRYZ2026",
+      "description": "Dec 2026",
+      "base": "USDTRY",
+      "month_code": "Z",
+      "year": "2026",
+      "is_continuous": false,
+      "exchange": "BIST",
+      "type": "futures"
+    },
+    {
+      "symbol": "USDTRYF2027",
+      "full_name": "BIST:USDTRYF2027",
+      "description": "Jan 2027",
+      "base": "USDTRY",
+      "month_code": "F",
+      "year": "2027",
+      "is_continuous": false,
+      "exchange": "BIST",
+      "type": "futures"
+    },
+    {
+      "symbol": "USDTRYG2027",
+      "full_name": "BIST:USDTRYG2027",
+      "description": "Feb 2027",
+      "base": "USDTRY",
+      "month_code": "G",
+      "year": "2027",
+      "is_continuous": false,
+      "exchange": "BIST",
+      "type": "futures"
+    },
+    {
+      "symbol": "USDTRYH2027",
+      "full_name": "BIST:USDTRYH2027",
+      "description": "Mar 2027",
+      "base": "USDTRY",
+      "month_code": "H",
+      "year": "2027",
+      "is_continuous": false,
+      "exchange": "BIST",
+      "type": "futures"
+    },
+    {
+      "symbol": "USDTRYJ2027",
+      "full_name": "BIST:USDTRYJ2027",
+      "description": "Apr 2027",
+      "base": "USDTRY",
+      "month_code": "J",
+      "year": "2027",
+      "is_continuous": false,
+      "exchange": "BIST",
+      "type": "futures"
+    },
+    {
+      "symbol": "USDTRYK2027",
+      "full_name": "BIST:USDTRYK2027",
+      "description": "May 2027",
+      "base": "USDTRY",
+      "month_code": "K",
+      "year": "2027",
+      "is_continuous": false,
+      "exchange": "BIST",
+      "type": "futures"
+    },
+    {
+      "symbol": "USDTRYM2027",
+      "full_name": "BIST:USDTRYM2027",
+      "description": "Jun 2027",
+      "base": "USDTRY",
+      "month_code": "M",
+      "year": "2027",
+      "is_continuous": false,
+      "exchange": "BIST",
+      "type": "futures"
+    },
+    {
+      "symbol": "USDTRYN2027",
+      "full_name": "BIST:USDTRYN2027",
+      "description": "Jul 2027",
+      "base": "USDTRY",
+      "month_code": "N",
+      "year": "2027",
+      "is_continuous": false,
+      "exchange": "BIST",
+      "type": "futures"
+    },
+    {
+      "symbol": "USDTRYQ2027",
+      "full_name": "BIST:USDTRYQ2027",
+      "description": "Aug 2027",
+      "base": "USDTRY",
+      "month_code": "Q",
+      "year": "2027",
+      "is_continuous": false,
+      "exchange": "BIST",
+      "type": "futures"
+    },
+    {
+      "symbol": "USDTRYU2027",
+      "full_name": "BIST:USDTRYU2027",
+      "description": "Sep 2027",
+      "base": "USDTRY",
+      "month_code": "U",
+      "year": "2027",
+      "is_continuous": false,
+      "exchange": "BIST",
+      "type": "futures"
+    },
+    {
+      "symbol": "USDTRYV2027",
+      "full_name": "BIST:USDTRYV2027",
+      "description": "Oct 2027",
+      "base": "USDTRY",
+      "month_code": "V",
+      "year": "2027",
+      "is_continuous": false,
+      "exchange": "BIST",
+      "type": "futures"
+    },
+    {
+      "symbol": "USDTRYX2027",
+      "full_name": "BIST:USDTRYX2027",
+      "description": "Nov 2027",
+      "base": "USDTRY",
+      "month_code": "X",
+      "year": "2027",
+      "is_continuous": false,
+      "exchange": "BIST",
+      "type": "futures"
+    },
+    {
+      "symbol": "USDTRYZ2027",
+      "full_name": "BIST:USDTRYZ2027",
+      "description": "Dec 2027",
+      "base": "USDTRY",
+      "month_code": "Z",
+      "year": "2027",
+      "is_continuous": false,
+      "exchange": "BIST",
+      "type": "futures"
+    },
+    {
+      "symbol": "USDTRYF2028",
+      "full_name": "BIST:USDTRYF2028",
+      "description": "Jan 2028",
+      "base": "USDTRY",
+      "month_code": "F",
+      "year": "2028",
+      "is_continuous": false,
+      "exchange": "BIST",
+      "type": "futures"
+    },
+    {
+      "symbol": "USDTRYG2028",
+      "full_name": "BIST:USDTRYG2028",
+      "description": "Feb 2028",
+      "base": "USDTRY",
+      "month_code": "G",
+      "year": "2028",
+      "is_continuous": false,
+      "exchange": "BIST",
+      "type": "futures"
+    }
+  ],
+  "EURTRY": [
+    {
+      "symbol": "EURTRY1!",
+      "full_name": "BIST:EURTRY1!",
+      "description": "",
+      "base": "EURTRY",
+      "month_code": "",
+      "year": "",
+      "is_continuous": true,
+      "exchange": "BIST",
+      "type": "futures"
+    },
+    {
+      "symbol": "EURTRY2!",
+      "full_name": "BIST:EURTRY2!",
+      "description": "",
+      "base": "EURTRY",
+      "month_code": "",
+      "year": "",
+      "is_continuous": true,
+      "exchange": "BIST",
+      "type": "futures"
+    },
+    {
+      "symbol": "EURTRYX2026",
+      "full_name": "BIST:EURTRYX2026",
+      "description": "Nov 2026",
+      "base": "EURTRY",
+      "month_code": "X",
+      "year": "2026",
+      "is_continuous": false,
+      "exchange": "BIST",
+      "type": "futures"
+    },
+    {
+      "symbol": "EURTRYZ2026",
+      "full_name": "BIST:EURTRYZ2026",
+      "description": "Dec 2026",
+      "base": "EURTRY",
+      "month_code": "Z",
+      "year": "2026",
+      "is_continuous": false,
+      "exchange": "BIST",
+      "type": "futures"
+    },
+    {
+      "symbol": "EURTRYG2027",
+      "full_name": "BIST:EURTRYG2027",
+      "description": "Feb 2027",
+      "base": "EURTRY",
+      "month_code": "G",
+      "year": "2027",
+      "is_continuous": false,
+      "exchange": "BIST",
+      "type": "futures"
+    },
+    {
+      "symbol": "EURTRYZ2027",
+      "full_name": "BIST:EURTRYZ2027",
+      "description": "Dec 2027",
+      "base": "EURTRY",
+      "month_code": "Z",
+      "year": "2027",
+      "is_continuous": false,
+      "exchange": "BIST",
+      "type": "futures"
+    }
+  ],
+  "XAUTRY": [
+    {
+      "symbol": "XAUTRY1!",
+      "full_name": "BIST:XAUTRY1!",
+      "description": "",
+      "base": "XAUTRY",
+      "month_code": "",
+      "year": "",
+      "is_continuous": true,
+      "exchange": "BIST",
+      "type": "futures"
+    },
+    {
+      "symbol": "XAUTRY2!",
+      "full_name": "BIST:XAUTRY2!",
+      "description": "",
+      "base": "XAUTRY",
+      "month_code": "",
+      "year": "",
+      "is_continuous": true,
+      "exchange": "BIST",
+      "type": "futures"
+    },
+    {
+      "symbol": "XAUTRYZ2026",
+      "full_name": "BIST:XAUTRYZ2026",
+      "description": "Dec 2026",
+      "base": "XAUTRY",
+      "month_code": "Z",
+      "year": "2026",
+      "is_continuous": false,
+      "exchange": "BIST",
+      "type": "futures"
+    },
+    {
+      "symbol": "XAUTRYG2027",
+      "full_name": "BIST:XAUTRYG2027",
+      "description": "Feb 2027",
+      "base": "XAUTRY",
+      "month_code": "G",
+      "year": "2027",
+      "is_continuous": false,
+      "exchange": "BIST",
+      "type": "futures"
+    },
+    {
+      "symbol": "XAUTRYJ2027",
+      "full_name": "BIST:XAUTRYJ2027",
+      "description": "Apr 2027",
+      "base": "XAUTRY",
+      "month_code": "J",
+      "year": "2027",
+      "is_continuous": false,
+      "exchange": "BIST",
+      "type": "futures"
+    }
+  ]
+}

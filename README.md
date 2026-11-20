@@ -420,6 +420,19 @@ python -m http.server 8000
 
 Then open <http://localhost:8000>.
 
+**Recorded-response tests.** `tests/test_update_data_replay.py` runs the
+updater end to end, offline, against real borsapy 0.10.2 responses recorded in
+`tests/fixtures/borsapy/`: FX intraday and daily history, FX current quotes,
+the VİOP futures table, contract discovery and TradingView stream quotes. It
+replaces only the `bp` module in `scripts/update_data.py`, so every fetch,
+fallback and normalization step runs for real. It checks the happy path, known
+upstream quirks such as missing bids or trade times, malformed numbers, a dead
+stream or table, and an expired contract. It checks runs that must fail without
+writing a snapshot, and renamed or remapped upstream columns. The quirk and
+drift cases edit copies of the recordings and say so. After a borsapy upgrade
+the suite fails on purpose until the responses are re-recorded; the
+[fixtures README](tests/fixtures/borsapy/README.md) has the capture commands.
+
 To assemble the deployable site into `_site/` exactly as the Pages workflow
 does, run `bash scripts/build_site.sh`.
 

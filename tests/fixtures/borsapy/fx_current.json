@@ -1,0 +1,26 @@
+{
+  "USD": {
+    "symbol": "USD",
+    "last": 50.4651,
+    "open": 50.4401,
+    "high": 50.6126,
+    "low": 50.4262,
+    "update_time": "2026-11-19T03:00:00"
+  },
+  "EUR": {
+    "symbol": "EUR",
+    "last": 55.5458,
+    "open": 55.4201,
+    "high": 55.762,
+    "low": 55.3913,
+    "update_time": "2026-11-19T03:00:00"
+  },
+  "gram-altin": {
+    "symbol": "gram-altin",
+    "last": 5945.913,
+    "open": 6040.19,
+    "high": 6098.63,
+    "low": 5936.74,
+    "update_time": "2026-11-19T03:00:00"
+  }
+}

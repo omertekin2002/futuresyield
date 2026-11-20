@@ -425,14 +425,28 @@ def fetch_viop_tables() -> dict[str, dict[str, dict[str, Any]]]:
 
             # In borsapy 0.10.2 these normalized names map to the live table as:
             # volume_tl -> absolute price change, volume_qty -> TRY turnover.
+            last = finite_number(raw.get("price"))
+            change = finite_number(raw.get("volume_tl"))
+            turnover = finite_number(raw.get("volume_qty"))
+            # A daily change as large as the price would mean a previous close
+            # at or below zero, so volume_tl is no longer the price change and
+            # the remap above has drifted upstream. Drop both remapped fields
+            # rather than publish a volume as a change or a quantity as TRY.
+            if change is not None and last is not None and abs(change) >= last:
+                print(
+                    f"Warning: VİOP table row {code} no longer matches the "
+                    "borsapy 0.10.2 column remap; dropping its change and turnover"
+                )
+                change = None
+                turnover = None
             rows[market.key][symbol] = {
                 "symbol": symbol,
                 "code": code,
                 "description": str(raw.get("contract") or ""),
-                "last": finite_number(raw.get("price")),
-                "change": finite_number(raw.get("volume_tl")),
+                "last": last,
+                "change": change,
                 "change_percent": finite_number(raw.get("change")),
-                "turnover_try": finite_number(raw.get("volume_qty")),
+                "turnover_try": turnover,
             }
             break
     return rows
