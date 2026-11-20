@@ -26,6 +26,9 @@ redeployed by GitHub Actions every hour during VİOP trading hours on weekdays,
 - One exact contract's archived closes as a **History** table in the inspector,
   loaded on demand, with every missing value and capture gap shown as such,
   and a small chart of its yield on those closes whose points open their day
+- A **Copy link** button that says whether the link it copies will change:
+  a live link that opens the newest data, or a link pinned to the archived
+  close on screen
 - A **Download CSV** of the contract board, with the compared close when one is on
 - A **Print** layout, from the button beside it or the browser's own print
   command: a header names the market, the live snapshot time or archived
@@ -255,6 +258,29 @@ logic lives in `scripts/archive_snapshot.py`, and
 `scripts/archive_history.sh SNAPSHOT [WORKTREE]` runs it against a checkout of
 the branch, creating the branch as an orphan holding only `history/` on the
 first run.
+
+### Sharing a view
+
+The **Copy link** button under the data status copies the address of the view
+on screen, and the note beside it says what the recipient will see. Only an
+archived close is reproducible; a live link is not.
+
+- **Live link.** On the live view the button reads **Copy live link**. The
+  link carries the market, comparison, maturity and yield period, but never a
+  `?date=`, so it opens whatever the newest snapshot is when it is followed:
+  prices, days left and yields will differ from what you saw. When the site
+  has archived closes, the note points to the **View** menu for a link that
+  stays fixed.
+- **Link to a close.** On an archived close the button reads **Copy link to
+  the close of …**. The link adds `?date=` for that close, so it always opens
+  the same stored end-of-day values, since archived closes are written once
+  and never change.
+- **Nothing else changes.** Copying leaves the view, the address bar and the
+  browser history as they are. While another view or a comparison is still
+  loading, the button waits, so it never copies an address the page has not
+  reached. A copy is confirmed in a status message; if the browser blocks the
+  clipboard, the link appears selected in a read-only field to copy by hand.
+  The button is left out of printouts, which show the page's address instead.
 
 ### Downloading the board as CSV
 
