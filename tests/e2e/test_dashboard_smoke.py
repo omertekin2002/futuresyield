@@ -3316,34 +3316,55 @@ class DashboardSmokeTests(unittest.TestCase):
                 expect(self.page.locator("#history-notice")).to_be_hidden()
                 self.take_index_errors(1)
 
-    def test_a_comparison_chosen_while_the_waiting_close_loads_cancels_it(self):
-        day, compare = self.PENDING_DAY, "2026-10-05"
-        control = self.open_with_unreadable_index(f"?date={day}&market=USDTRY")
-        modes, held = self.route_history_close(day)
-        modes[0] = "hold"
-        control["mode"] = "pass"
-        self.page.clock.run_for("01:01")
-        self.page.wait_for_function("() => state.viewDate !== null")
-        for _ in range(200):
-            if held:
-                break
-            self.page.evaluate("() => 0")
-        self.assertEqual(len(held), 1)
+    def test_a_move_made_while_the_waiting_close_loads_cancels_it(self):
+        day, waiting_compare, compare = self.PENDING_DAY, "2026-09-30", "2026-10-05"
+        # Refresh is disabled while any view loads, so these are the moves left.
+        for move in ("compare", "live"):
+            with self.subTest(move=move):
+                control = self.open_with_unreadable_index(
+                    f"?date={day}&compare={waiting_compare}&market=USDTRY", reopen=True,
+                )
+                modes, held = self.route_history_close(day)
+                modes[0] = "hold"
+                control["mode"] = "pass"
+                self.page.clock.run_for("01:01")
+                self.page.wait_for_function("() => state.viewDate !== null")
+                for _ in range(200):
+                    if held:
+                        break
+                    self.page.evaluate("() => 0")
+                self.assertEqual(len(held), 1)
 
-        # The read listed the closes, so the comparison is chosen from the menu.
-        self.choose_compare(compare)
-        self.assert_live()
-        expect(self.page.locator("#refresh-button")).to_be_enabled()
-        expect(self.page.locator("#history-select")).to_have_value("")
-        with self.page.expect_response(re.compile(rf"/history/{day}\.json")):
-            held[0].fallback()
-        # Let the page take the close's body: another fetch completes after it.
-        self.page.evaluate("() => fetch('data/market.json').then((response) => response.json())")
-        self.assertIsNone(self.page.evaluate("() => state.renderedDate"))
-        self.assert_live()
-        self.assert_comparing(compare)
-        self.assertEqual(self.url_params(), {"market": "USDTRY", "compare": compare})
-        self.take_index_errors(1)
+                # The read listed the closes, so the menus offer them now.
+                if move == "compare":
+                    self.choose_compare(compare)
+                    expected = {"market": "USDTRY", "compare": compare}
+                else:
+                    self.page.locator("#history-select").select_option("")
+                    expected = {"market": "USDTRY"}
+                self.page.wait_for_function("() => state.viewDate === null")
+                expect(self.page.locator("#refresh-button")).to_be_enabled()
+                self.assertEqual(self.url_params(), expected)
+
+                with self.page.expect_response(re.compile(rf"/history/{day}\.json")):
+                    held[0].fallback()
+                # Let the page take the close's body: another fetch completes after it.
+                self.page.evaluate(
+                    "() => fetch('data/market.json').then((response) => response.json())"
+                )
+                self.assertIsNone(self.page.evaluate("() => state.renderedDate"))
+                self.assert_live()
+                expect(self.page.locator("#history-select")).to_have_value("")
+                if move == "compare":
+                    self.assert_comparing(compare)
+                else:
+                    self.assert_not_comparing()
+                self.assertEqual(self.url_params(), expected)
+                # A reload shows the same view.
+                self.page.reload()
+                self.assert_live()
+                self.assertEqual(self.url_params(), expected)
+                self.take_index_errors(1)
 
     def test_waiting_dates_the_index_does_not_list_fall_back_once_read(self):
         day, compare = self.PENDING_DAY, self.PENDING_COMPARE

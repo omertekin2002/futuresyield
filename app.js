@@ -3759,13 +3759,15 @@ function applyLinkDates(params) {
 function cancelPendingLink() {
   state.linkRequestId += 1;
   // A waiting close still loading is dropped before it can render, and the
-  // view on screen stays.
+  // view on screen stays, with an address that names neither it nor the
+  // comparison that was to follow it.
   if (state.linkLoad !== null && state.linkLoad === state.requestId) {
     state.requestId += 1;
     state.viewDate = state.renderedDate;
     elements.refreshButton.classList.remove("is-loading");
     elements.refreshButton.disabled = false;
     renderViewState();
+    updateCompareUrl();
     renderShareLink();
   }
   state.linkLoad = null;
