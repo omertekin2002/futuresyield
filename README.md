@@ -188,6 +188,14 @@ board) from that day's snapshot, for every market.
   `_site/data/history/`, so the files are served from the same origin. A close
   archived by a run appears in the next run's deploy. Without the branch the
   site ships an empty manifest and the menu stays hidden.
+- **Re-read while open.** An open page reads `history/index.json` again on
+  the one-minute poll once its last read is 10 minutes old, and at once when
+  the tab becomes visible again; a read that failed, such as the one at
+  start-up, is retried on the next poll. A newly archived close then appears
+  in the View and Compare menus, and in a loaded History table after it is
+  fetched, without a reload. The view, comparison, maturity, period and URL
+  stay as they are. A failed re-read keeps the closes already listed, and a
+  close the index stops listing only drops out of the menus.
 - **One contract across the archive.** With a maturity selected, the
   inspector's **History** group lists that exact contract on every archived
   close up to the day on screen, each date linking to that close. See

@@ -135,6 +135,11 @@ const state = {
   resizeTimer: null,
   // Archived end-of-day dates, newest first.
   historyDays: [],
+  // The history index's reads: when one last succeeded, by Date.now(), or
+  // null; whether the latest one failed; and the read in flight, or null.
+  historyIndexReadAt: null,
+  historyIndexFailed: false,
+  historyIndexRequest: null,
   // The requested view and the one on screen: an archived date, or null for live.
   viewDate: null,
   renderedDate: null,
@@ -162,6 +167,10 @@ const state = {
   historyOpen: false,
   historyCache: new Map(),
   historyPending: new Set(),
+  // Closes a re-read of the history index listed while History was open.
+  // Until each is fetched, the table stays up without it rather than going
+  // back to loading.
+  historyArriving: new Set(),
   // The loaded History rows the chart above the table draws, newest first,
   // with the contract's symbol, or null while the table isn't loaded.
   historyChart: null,
@@ -1504,9 +1513,14 @@ function setHistoryStatus(text) {
 // pressed, and each only once.
 function renderInspectorHistory(contract) {
   const group = elements.inspectorHistoryGroup;
-  const days = historyDaysOnScreen();
-  group.hidden = !contract || !days.length;
-  const loaded = !group.hidden && state.historyOpen &&
+  const listed = historyDaysOnScreen();
+  // The table's closes: every listed close except a newly listed one that
+  // is still on its way.
+  const days = listed.filter((day) =>
+    state.historyCache.has(day) || !state.historyArriving.has(day)
+  );
+  group.hidden = !contract || !listed.length;
+  const loaded = !group.hidden && state.historyOpen && days.length > 0 &&
     days.every((day) => state.historyCache.has(day));
   group.classList.toggle("is-loaded", loaded);
   elements.inspectorHistoryCoverage.hidden = !loaded;
@@ -1526,17 +1540,17 @@ function renderInspectorHistory(contract) {
     "newest first, matched by its exact VİOP symbol. Missing values are never filled in.";
   elements.historyLoad.hidden = state.historyOpen;
   elements.historyLoad.textContent =
-    `Load history · ${countText(days.length, "archived close", "archived closes")}`;
+    `Load history · ${countText(listed.length, "archived close", "archived closes")}`;
   if (!state.historyOpen) {
     setHistoryStatus("");
     return;
   }
+  const missing = listed.filter((day) => !state.historyCache.has(day));
+  if (missing.length) fetchHistoryDays(missing);
   if (!loaded) {
-    const missing = days.filter((day) => !state.historyCache.has(day));
     setHistoryStatus(
       `Loading ${countText(missing.length, "archived close", "archived closes")}…`,
     );
-    fetchHistoryDays(missing);
     return;
   }
 
@@ -2905,7 +2919,8 @@ function renderCompareControl() {
     elements.compareSelect.replaceChildren(...options);
   }
 
-  if (state.compareDate && reference && !days.includes(state.compareDate)) {
+  // A comparison the index no longer lists stays: it is already loaded.
+  if (state.compareDate && reference && !(state.compareDate < reference)) {
     addNotice(
       `The close of ${formatDay(state.compareDate)} is not earlier than ` +
       `${formatDay(reference)}, so the comparison is off.`,
@@ -2990,23 +3005,76 @@ function renderViewState() {
   updateUrlParam("date", historical ? state.renderedDate : null);
 }
 
-async function loadHistoryIndex() {
+// How long a successful read of the history index is used before the live
+// poll or a return to the tab reads it again. A failed read is retried on
+// the next poll.
+const HISTORY_INDEX_MAX_AGE_MS = 10 * MINUTE_MS;
+
+// Read the history index, one read at a time: a call while one is in
+// flight shares it.
+function loadHistoryIndex() {
+  state.historyIndexRequest ??= readHistoryIndex().finally(() => {
+    state.historyIndexRequest = null;
+  });
+  return state.historyIndexRequest;
+}
+
+async function readHistoryIndex() {
+  let days;
   try {
     const response = await fetch(`${HISTORY_URL}/index.json?v=${Date.now()}`, {
       cache: "no-store",
     });
     if (!response.ok) throw new Error(`History index returned ${response.status}`);
     const manifest = await response.json();
-    const days = (Array.isArray(manifest?.days) ? manifest.days : [])
+    days = (Array.isArray(manifest?.days) ? manifest.days : [])
       .map((entry) => entry?.date)
       .filter((day) => typeof day === "string" && HISTORY_DATE.test(day));
-    state.historyDays = [...new Set(days)].sort().reverse();
   } catch (error) {
-    // History is optional; the live dashboard works without it.
-    console.warn("Archived snapshots are unavailable.", error);
-    state.historyDays = [];
+    // History is optional; the live dashboard works without it. A failed
+    // re-read keeps the closes already listed.
+    console.warn(
+      state.historyIndexReadAt === null
+        ? "Archived snapshots are unavailable."
+        : "The history index could not be read again; keeping the closes already listed.",
+      error,
+    );
+    state.historyIndexFailed = true;
+    return;
+  }
+  state.historyIndexFailed = false;
+  state.historyIndexReadAt = Date.now();
+  setHistoryDays([...new Set(days)].sort().reverse());
+}
+
+// Read the index again if the last read failed or is too old.
+function refreshHistoryIndex() {
+  const fresh = !state.historyIndexFailed && state.historyIndexReadAt !== null &&
+    Date.now() - state.historyIndexReadAt < HISTORY_INDEX_MAX_AGE_MS;
+  if (!fresh) loadHistoryIndex();
+}
+
+// Use a new list of archived closes and redraw what offers them: the View
+// and Compare menus and the History group. The view, comparison, selection,
+// period and URL stay as they are; a close no longer listed only drops out
+// of the menus.
+function setHistoryDays(days) {
+  const previous = state.historyDays;
+  if (days.length === previous.length && days.every((day, index) => day === previous[index])) {
+    return;
+  }
+  state.historyDays = days;
+  if (state.historyOpen) {
+    days
+      .filter((day) => !previous.includes(day) && !state.historyCache.has(day))
+      .forEach((day) => state.historyArriving.add(day));
   }
   renderHistoryControl();
+  // Before the first view renders, it draws the rest.
+  if (!state.snapshot) return;
+  state.compareReference = null;
+  renderCompareControl();
+  renderInspectorHistory(selectedContract());
 }
 
 // Load and render one view: an archived date, or null for the live snapshot.
@@ -3570,10 +3638,16 @@ async function init() {
 
   await loadHistoryIndex();
   loadView(applyLinkDates(params));
-  // The poll only refreshes the live view; a past close stays until the user leaves it.
+  // The poll only refreshes the live view; a past close stays until the user
+  // leaves it. The history index is read again on any view once it is stale.
   state.refreshTimer = window.setInterval(() => {
     if (!state.viewDate) loadView(null);
+    refreshHistoryIndex();
   }, 60_000);
+  // A tab coming back, such as a laptop waking, catches up at once.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") refreshHistoryIndex();
+  });
 }
 
 init();
