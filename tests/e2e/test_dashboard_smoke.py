@@ -3196,6 +3196,21 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assertEqual(self.page.url, url)
         self.assertEqual(self.entries(), entries)
 
+        # With no earlier close listed at all, the menu stays while the
+        # comparison does, so None can still turn it off.
+        control["mode"] = [day]
+        self.page.clock.set_system_time(FIXTURE_DAY_TIME + timedelta(minutes=22))
+        self.show_tab()
+        expect(self.page.locator("#history-select option")).to_have_text(
+            ["Live", f"Close · {HISTORY_LABELS[day]}"]
+        )
+        expect(self.page.locator("#compare-control")).to_be_visible()
+        expect(self.page.locator("#compare-select option")).to_have_text(["None"])
+        expect(self.page.locator("#curve-legend")).to_be_visible()
+        self.compare_select().select_option("")
+        self.assert_not_comparing()
+        expect(self.page.locator("#compare-control")).to_be_hidden()
+
     def test_loaded_history_fetches_only_a_newly_listed_close(self):
         added = "2026-09-30"
         control = self.route_history_index()

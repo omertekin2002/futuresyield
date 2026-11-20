@@ -2898,7 +2898,6 @@ function clearCompare() {
 function renderCompareControl() {
   const reference = referenceDate();
   const days = compareDays(reference);
-  elements.compareControl.hidden = !days.length;
 
   if (reference !== state.compareReference) {
     state.compareReference = reference;
@@ -2928,6 +2927,13 @@ function renderCompareControl() {
     clearCompare();
   }
   elements.compareSelect.value = state.compareDate ?? "";
+  showCompareControl();
+}
+
+// The Compare menu shows while there is an earlier close to choose, or a
+// comparison to turn off: one kept after the index stopped listing it.
+function showCompareControl() {
+  elements.compareControl.hidden = !compareDays().length && !state.compareDate;
 }
 
 function renderComparisonLegends() {
@@ -2949,6 +2955,7 @@ function renderComparisonLegends() {
 }
 
 function renderComparison() {
+  showCompareControl();
   elements.tooltip.hidden = true;
   elements.yieldTooltip.hidden = true;
   renderComparisonLegends();
