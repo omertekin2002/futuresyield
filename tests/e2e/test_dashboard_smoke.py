@@ -150,7 +150,7 @@ PRINT_ROWS = ("Market", "View", "Yield period", "Page", "Printed")
 # Interactive-only controls that print drops.
 PRINT_HIDDEN = (
     "#refresh-button", "#history-control", "#compare-control", "#live-button",
-    "#selection-clear", "#download-csv", "#print-page", "#chart-tooltip",
+    "#selection-clear", "#download-csv", "#print-page", "#share-link", "#chart-tooltip",
     "#yield-tooltip", "#curve-marker", "#yield-marker", ".period-toggle",
     ".select-button", '.market-options [aria-pressed="false"]',
 )
@@ -161,6 +161,19 @@ PRINT_VISIBLE = (
     "#carry-footnote", "#contracts .table-footnote", "footer .disclaimer",
     '.market-options [aria-pressed="true"]',
 )
+# The Copy link control: what it says on a live view, with and without
+# archived closes to point to, and after copying.
+SHARE_LIVE_NOTE = (
+    "This link shows the latest data when opened; prices and yields will differ later."
+)
+SHARE_VIEW_POINTER = " For a link that stays fixed, open a close from View first."
+SHARE_LIVE_COPIED = "Copied a live link. It will show newer data when opened later."
+SHARE_FALLBACK_STATUS = (
+    "The link could not be copied automatically. It is selected below; copy it from there."
+)
+CLIPBOARD_PERMISSIONS = ["clipboard-read", "clipboard-write"]
+# Phone widths the layout must fit without sideways scrolling.
+NARROW_VIEWPORTS = ({"width": 375, "height": 812}, {"width": 320, "height": 640})
 # A sensible ceiling for one market's printout: the header, sidebar and
 # inspector, two charts, the carry table and the board.
 MAX_PRINTED_PAGES = 8
@@ -1532,6 +1545,9 @@ class DashboardSmokeTests(unittest.TestCase):
                 self.assertEqual(keyboard, pointer)
                 # The pointer takes over from the keyboard marker.
                 expect(self.page.locator(marker)).to_be_hidden()
+                # Park the pointer off the charts, or the page scrolling under it
+                # as Tab reaches the next chart can move it onto that chart.
+                self.page.mouse.move(0, 0)
 
     def test_home_end_escape_and_blur(self):
         self.open_dashboard("?market=USDTRY")
@@ -5044,6 +5060,260 @@ class DashboardSmokeTests(unittest.TestCase):
         expect(self.page.locator("#history-notice")).to_be_visible()
         self.assert_accessible("link fallback notice")
 
+
+    # Copy link: a live link that changes, or a link pinned to the close on screen.
+
+    def open_with_clipboard(self, **options):
+        """Replace the page with one that may read and write the clipboard."""
+        self.reopen_at(FIXTURE_DAY_TIME, permissions=CLIPBOARD_PERMISSIONS, **options)
+
+    def share_button(self):
+        return self.page.locator("#share-button")
+
+    def copy_link(self, status):
+        """Copy the view's link, wait for status, and return what was copied."""
+        self.share_button().click()
+        expect(self.page.locator("#share-status")).to_have_text(status)
+        return self.page.evaluate("() => navigator.clipboard.readText()")
+
+    def query(self, url):
+        parts = urlsplit(url)
+        self.assertEqual(parts.fragment, "")
+        return dict(parse_qsl(parts.query))
+
+    def assert_share_live(self, pointer=True):
+        expect(self.share_button()).to_have_text("Copy live link")
+        expect(self.share_button()).to_have_attribute("aria-disabled", "false")
+        expect(self.page.locator("#share-note")).to_have_text(
+            SHARE_LIVE_NOTE + (SHARE_VIEW_POINTER if pointer else "")
+        )
+
+    def assert_share_close(self, day):
+        label = HISTORY_LABELS[day]
+        expect(self.share_button()).to_have_text(f"Copy link to the close of {label}")
+        expect(self.share_button()).to_have_attribute("aria-disabled", "false")
+        expect(self.page.locator("#share-note")).to_have_text(
+            f"This link always shows the stored values of the close of {label}."
+        )
+
+    def test_copy_live_link_keeps_the_view_but_never_a_date(self):
+        self.open_with_clipboard()
+        self.open_dashboard("?market=USDTRY&maturity=2028-01&period=annualized#dashboard-content")
+        self.assert_selected("Jan 2028")
+        self.assert_share_live()
+        url, entries = self.page.url, self.entries()
+
+        copied = self.copy_link(SHARE_LIVE_COPIED)
+        self.assertEqual(
+            self.query(copied),
+            {"market": "USDTRY", "maturity": "2028-01", "period": "annualized"},
+        )
+        self.assertTrue(copied.startswith(self.base_url))
+        # Copying changes nothing: not the view, the address or the history.
+        self.assertEqual(self.page.url, url)
+        self.assertEqual(self.entries(), entries)
+        self.assert_selected("Jan 2028")
+        self.assert_live()
+
+        # The next copy follows the market and comparison on screen.
+        self.page.locator('.market-options [data-market="EURTRY"]').click()
+        self.assert_market("EURTRY")
+        expect(self.page.locator("#share-status")).to_have_text("")
+        self.choose_compare("2026-09-30")
+        copied = self.copy_link(SHARE_LIVE_COPIED)
+        self.assertEqual(
+            self.query(copied),
+            {"market": "EURTRY", "compare": "2026-09-30", "period": "annualized"},
+        )
+
+        # The copied link opens the same live view in a fresh page.
+        self.page.goto(copied)
+        self.assert_live()
+        self.assert_market("EURTRY")
+        self.assert_comparing("2026-09-30")
+        self.assert_period("annualized")
+        self.assert_share_live()
+
+    def test_copy_link_to_a_close_carries_its_date_and_view(self):
+        day, compare = "2026-10-06", "2026-09-30"
+        self.open_with_clipboard()
+        self.open_day(day, f"&compare={compare}&market=USDTRY&maturity=2028-01&period=monthly")
+        self.assert_comparing(compare, current=HISTORY_LABELS[day])
+        self.assert_share_close(day)
+        url, entries = self.page.url, self.entries()
+
+        copied = self.copy_link(f"Copied a link to the close of {HISTORY_LABELS[day]}.")
+        self.assertEqual(self.query(copied), {
+            "date": day, "market": "USDTRY", "compare": compare,
+            "maturity": "2028-01", "period": "monthly",
+        })
+        self.assertEqual(self.page.url, url)
+        self.assertEqual(self.entries(), entries)
+
+        # The copied link reopens that close, comparison, maturity and period.
+        self.page.goto(copied)
+        self.assert_historical(day)
+        self.assert_comparing(compare, current=HISTORY_LABELS[day])
+        self.assert_selected("Jan 2028")
+        self.assert_period("monthly")
+        self.assert_market("USDTRY", self.history[day])
+        self.assert_share_close(day)
+
+        # Back to live, the button and its note say the link will change.
+        self.page.locator("#live-button").click()
+        self.assert_live()
+        self.assert_share_live()
+        copied = self.copy_link(SHARE_LIVE_COPIED)
+        self.assertNotIn("date", self.query(copied))
+
+    def test_copy_link_waits_for_a_move_still_loading(self):
+        day = "2026-10-05"
+        held = []
+        self.open_with_clipboard()
+        self.page.route(re.compile(rf"/data/history/{day}\.json$"), lambda route: held.append(route))
+        self.open_dashboard("?market=USDTRY&period=monthly")
+        self.page.evaluate("() => navigator.clipboard.writeText('untouched')")
+        entries = self.entries()
+
+        self.page.locator("#history-select").select_option(day)
+        self.page.wait_for_function("() => state.navigation !== null")
+        expect(self.share_button()).to_have_attribute("aria-disabled", "true")
+        # Playwright waits for an aria-disabled button, so the click is forced.
+        self.share_button().click(force=True)
+        self.assertEqual(self.page.evaluate("() => navigator.clipboard.readText()"), "untouched")
+        expect(self.page.locator("#share-status")).to_have_text("")
+        self.assertEqual(self.entries(), entries)
+
+        for _ in range(50):
+            if held:
+                break
+            self.page.wait_for_timeout(50)
+        self.assertEqual(len(held), 1)
+        held.pop().fallback()
+        self.assert_historical(day)
+        self.assert_share_close(day)
+        copied = self.copy_link(f"Copied a link to the close of {HISTORY_LABELS[day]}.")
+        self.assertEqual(self.query(copied), self.query(self.page.url))
+        self.assertEqual(self.query(copied)["date"], day)
+
+    def test_copy_link_falls_back_to_a_selected_field(self):
+        stubs = {
+            "rejected": "navigator.clipboard.writeText = () => "
+                        "Promise.reject(new DOMException('Denied', 'NotAllowedError'));",
+            "missing": "Object.defineProperty(navigator, 'clipboard', { value: undefined });",
+        }
+        for case, stub in stubs.items():
+            with self.subTest(case=case):
+                self.reopen_at(FIXTURE_DAY_TIME)
+                self.page.add_init_script(stub)
+                self.open_day("2026-10-06", "&market=XAUTRY&period=annualized")
+                url, entries = self.page.url, self.entries()
+                self.share_button().click()
+                expect(self.page.locator("#share-status")).to_have_text(SHARE_FALLBACK_STATUS)
+                field = self.page.get_by_role("textbox", name="Copy this link by hand")
+                expect(field).to_be_visible()
+                expect(field).to_have_attribute("readonly", "")
+                expect(field).to_be_focused()
+                value = field.input_value()
+                self.assertEqual(self.query(value), {
+                    "date": "2026-10-06", "market": "XAUTRY", "period": "annualized",
+                })
+                self.assertEqual(
+                    field.evaluate("node => [node.selectionStart, node.selectionEnd]"),
+                    [0, len(value)],
+                )
+                self.assertEqual(self.page.url, url)
+                self.assertEqual(self.entries(), entries)
+                # A field for another view goes once the view changes.
+                self.page.locator('.market-options [data-market="USDTRY"]').click()
+                expect(self.page.locator("#share-fallback")).to_be_hidden()
+                expect(self.page.locator("#share-status")).to_have_text("")
+
+    def test_copy_link_settling_after_the_view_changed_says_nothing(self):
+        # The page settles each clipboard write itself, as a slow permission would.
+        self.page.add_init_script(
+            """navigator.clipboard.writeText = () => new Promise((resolve, reject) => {
+                window.__settleCopy = { resolve, reject };
+            });"""
+        )
+        for outcome in ("reject", "resolve"):
+            with self.subTest(outcome=outcome):
+                self.open_day("2026-10-06", "&market=XAUTRY")
+                self.share_button().click()
+                self.page.wait_for_function("() => window.__settleCopy")
+                self.page.locator('.market-options [data-market="USDTRY"]').click()
+                self.assert_market("USDTRY", self.history["2026-10-06"])
+                self.page.evaluate(
+                    f"() => window.__settleCopy.{outcome}(new Error('Denied'))"
+                )
+                self.page.evaluate("() => new Promise((done) => setTimeout(done, 50))")
+                expect(self.page.locator("#share-fallback")).to_be_hidden()
+                expect(self.page.locator("#share-status")).to_have_text("")
+                self.page.evaluate("() => { window.__settleCopy = null; }")
+
+    def test_copy_link_without_history_copies_the_live_link(self):
+        self.open_with_clipboard()
+        self.open_dashboard("?market=EURTRY&period=monthly", base_url=self.no_history_url)
+        self.assert_share_live(pointer=False)
+        copied = self.copy_link(SHARE_LIVE_COPIED)
+        self.assertEqual(self.query(copied), {"market": "EURTRY", "period": "monthly"})
+        self.assertTrue(copied.startswith(self.no_history_url))
+
+    def test_copy_link_note_follows_a_later_history_index_read(self):
+        control = self.route_history_index()
+        control["mode"] = "500"
+        self.page.clock.install(time=FIXTURE_DAY_TIME)
+        self.open_dashboard("?market=USDTRY")
+        self.index_read_settled()
+        self.assert_share_live(pointer=False)
+        control["mode"] = "pass"
+        self.page.clock.run_for("01:01")
+        expect(self.page.locator("#history-control")).to_be_visible()
+        self.assert_share_live()
+        self.take_index_errors(1)
+
+    def test_copy_link_is_keyboard_operable(self):
+        self.open_with_clipboard()
+        self.open_dashboard("?market=USDTRY")
+        self.tab_to("#share-button")
+        self.page.keyboard.press("Enter")
+        expect(self.page.locator("#share-status")).to_have_text(SHARE_LIVE_COPIED)
+        self.assertNotIn("date", self.query(
+            self.page.evaluate("() => navigator.clipboard.readText()")
+        ))
+
+    @unittest.skipIf(Axe is None, "axe-playwright-python is not installed")
+    def test_accessibility_and_layout_of_copy_link(self):
+        views = (
+            ("live", "?market=USDTRY"),
+            ("archived", "?date=2026-10-06&market=XAUTRY"),
+            ("comparison", "?date=2026-10-06&compare=2026-09-30&market=USDTRY"
+                           "&maturity=2026-12&period=annualized"),
+        )
+        for viewport in (None,) + NARROW_VIEWPORTS:
+            for name, query in views:
+                with self.subTest(viewport=viewport, view=name):
+                    self.reopen_at(
+                        FIXTURE_DAY_TIME, permissions=CLIPBOARD_PERMISSIONS,
+                        **({"viewport": viewport} if viewport else {}),
+                    )
+                    self.page.goto(self.base_url + query)
+                    expect(self.share_button()).to_have_attribute("aria-disabled", "false")
+                    self.share_button().click()
+                    expect(self.page.locator("#share-status")).to_contain_text("Copied")
+                    self.assert_no_sideways_scroll()
+                    self.assert_accessible(f"copy link, {name} at {viewport or 'desktop'}")
+        # The by-hand field, at the narrowest width.
+        self.reopen_at(FIXTURE_DAY_TIME, viewport=NARROW_VIEWPORTS[-1])
+        self.page.add_init_script(
+            "navigator.clipboard.writeText = () => Promise.reject(new Error('Denied'));"
+        )
+        self.page.goto(self.base_url + views[2][1])
+        expect(self.share_button()).to_have_attribute("aria-disabled", "false")
+        self.share_button().click()
+        expect(self.page.locator("#share-fallback")).to_be_visible()
+        self.assert_no_sideways_scroll()
+        self.assert_accessible("copy link fallback at 320px")
 
 if __name__ == "__main__":
     unittest.main()

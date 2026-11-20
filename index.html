@@ -99,6 +99,22 @@
           </span>
         </div>
       </div>
+      <div class="share-link" id="share-link" hidden>
+        <button
+          class="share-button"
+          id="share-button"
+          type="button"
+          aria-describedby="share-note"
+        >
+          Copy live link
+        </button>
+        <p class="share-note" id="share-note"></p>
+        <p class="share-status" id="share-status" role="status"></p>
+        <div class="share-fallback" id="share-fallback" hidden>
+          <label for="share-field">Copy this link by hand</label>
+          <input id="share-field" type="text" readonly spellcheck="false" />
+        </div>
+      </div>
       <div class="history-banner" id="history-banner" hidden>
         <p>
           <strong>Past close</strong> You are viewing the end-of-day snapshot
