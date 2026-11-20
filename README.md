@@ -279,7 +279,11 @@ never blocks or undoes the Pages deploy. It is the only job with
 logic lives in `scripts/archive_snapshot.py`, and
 `scripts/archive_history.sh SNAPSHOT [WORKTREE]` runs it against a checkout of
 the branch, creating the branch as an orphan holding only `history/` on the
-first run.
+first run. `tests/test_archive_history.py` runs that script end to end against
+a throwaway local bare origin that refuses non-fast-forward updates: orphan
+creation, one fast-forward commit per new day, write-once days, no-op repeats,
+invalid snapshots, an unreachable origin, and a concurrent update that must not
+be overwritten.
 
 ### Sharing a view
 
