@@ -608,10 +608,15 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assert_market(self.snapshot["default_market"])
 
     def test_no_history_ignores_date_link(self):
-        self.open_dashboard(f"?date={max(HISTORY_FIXTURE)}", base_url=self.no_history_url)
+        # The site without history ships an empty index, which reads fine, so
+        # the date is known not to be archived: it is rejected, not kept waiting.
+        day = max(HISTORY_FIXTURE)
+        self.open_dashboard(f"?date={day}", base_url=self.no_history_url)
         self.assert_live()
         expect(self.page.locator("#history-control")).to_be_hidden()
-        expect(self.page.locator("#history-notice")).to_be_visible()
+        expect(self.page.locator("#history-notice")).to_have_text(
+            f"No archived close for {day}. Showing live data."
+        )
 
     def serve_snapshot(self, pattern, snapshot):
         self.page.route(
@@ -3137,6 +3142,397 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assertEqual(self.index_reads(), 2)
         self.load_history(len(HISTORY_FIXTURE))
         self.take_index_errors(1)
+
+    # A link's dates while the history index has never been read.
+    PENDING_DAY, PENDING_COMPARE = "2026-10-06", "2026-09-30"
+
+    def open_with_unreadable_index(self, query, reopen=False, **options):
+        """Open query with the history index failing, on fake timers."""
+        if reopen:
+            self.reopen_at(FIXTURE_DAY_TIME, **options)
+        control = self.route_history_index()
+        control["mode"] = "500"
+        self.page.clock.install(time=FIXTURE_DAY_TIME)
+        self.open_dashboard(query)
+        self.index_read_settled()
+        return control
+
+    def assert_waiting_live(self, date=None, compare=None):
+        """Live data on screen, with the waiting dates kept in the address."""
+        state = self.page.locator("#data-state")
+        expect(state).to_have_class(re.compile(r"\bis-delayed\b"))
+        expect(self.page.locator("#history-banner")).to_be_hidden()
+        expect(self.compare_select()).to_have_value("")
+        expect(self.page.locator("#curve-legend")).to_be_hidden()
+        params = self.url_params()
+        self.assertEqual(params.get("date"), date)
+        self.assertEqual(params.get("compare"), compare)
+        notice = self.page.locator("#history-notice")
+        expect(notice).to_be_visible()
+        expect(notice).to_contain_text("The archive could not be read")
+        expect(notice).not_to_contain_text("No archived close")
+
+    def test_a_date_link_waits_for_an_unreadable_index_and_opens_once_read(self):
+        day = self.PENDING_DAY
+        control = self.open_with_unreadable_index(
+            f"?date={day}&market=USDTRY&maturity=2028-01&period=monthly"
+        )
+        self.assert_waiting_live(date=day)
+        expect(self.page.locator("#history-notice")).to_have_text(
+            f"The archive could not be read, so the close of {HISTORY_LABELS[day]} is not "
+            "open yet. Showing live data; it will open once the archive can be read."
+        )
+        self.assert_selected("Jan 2028")
+        self.assert_period("monthly")
+        entries = self.entries()
+
+        # A poll that still can't read it keeps waiting.
+        self.page.clock.run_for("01:01")
+        self.index_read_settled()
+        self.assert_waiting_live(date=day)
+
+        control["mode"] = "pass"
+        self.page.clock.run_for("01:01")
+        self.assert_historical(day)
+        self.assert_market("USDTRY", self.history[day])
+        self.assert_selected("Jan 2028")
+        self.assert_period("monthly")
+        expect(self.page.locator("#history-notice")).to_be_hidden()
+        self.assertEqual(
+            self.url_params(),
+            {"date": day, "market": "USDTRY", "maturity": "2028-01", "period": "monthly"},
+        )
+        self.assertEqual(self.entries(), entries)
+        self.take_index_errors(2)
+
+    def test_a_reload_while_a_date_link_waits_retries_it(self):
+        day = self.PENDING_DAY
+        control = self.open_with_unreadable_index(f"?date={day}&market=EURTRY")
+        self.assert_waiting_live(date=day)
+        control["mode"] = "pass"
+        self.page.reload()
+        self.assert_historical(day)
+        self.assert_market("EURTRY", self.history[day])
+        expect(self.page.locator("#history-notice")).to_be_hidden()
+        self.take_index_errors(1)
+
+    def test_a_compare_link_waits_for_an_unreadable_index(self):
+        compare = self.PENDING_COMPARE
+        control = self.open_with_unreadable_index(f"?compare={compare}&market=USDTRY")
+        self.assert_waiting_live(compare=compare)
+        expect(self.page.locator("#history-notice")).to_have_text(
+            "The archive could not be read, so the comparison with the close of "
+            f"{HISTORY_LABELS[compare]} is not shown yet. It will appear once the "
+            "archive can be read."
+        )
+        entries = self.entries()
+        control["mode"] = "pass"
+        self.page.clock.run_for("01:01")
+        self.assert_comparing(compare)
+        self.assert_live()
+        self.assert_market("USDTRY")
+        expect(self.page.locator("#history-notice")).to_be_hidden()
+        self.assertEqual(self.url_params(), {"compare": compare, "market": "USDTRY"})
+        self.assertEqual(self.entries(), entries)
+        self.take_index_errors(1)
+
+    def test_a_date_and_compare_link_compares_only_once_the_close_is_on_screen(self):
+        day, compare = self.PENDING_DAY, self.PENDING_COMPARE
+        control = self.open_with_unreadable_index(
+            f"?date={day}&compare={compare}&market=USDTRY&maturity=2026-12"
+        )
+        self.assert_waiting_live(date=day, compare=compare)
+        expect(self.page.locator("#history-notice")).to_contain_text(
+            f"the close of {HISTORY_LABELS[day]} and its comparison with the close of "
+            f"{HISTORY_LABELS[compare]} are not open yet"
+        )
+        entries = self.entries()
+
+        # Hold the close: nothing is compared with the live view meanwhile.
+        modes, held = self.route_history_close(day)
+        modes[0] = "hold"
+        control["mode"] = "pass"
+        self.page.clock.run_for("01:01")
+        self.page.wait_for_function("() => state.viewDate !== null")
+        for _ in range(200):
+            if held:
+                break
+            self.page.evaluate("() => 0")
+        self.assertEqual(len(held), 1)
+        self.assertEqual(
+            self.page.evaluate("() => [state.renderedDate, state.compareDate]"), [None, None]
+        )
+        expect(self.page.locator("#curve-legend")).to_be_hidden()
+
+        held[0].fallback()
+        self.assert_historical(day)
+        self.assert_comparing(compare, current=HISTORY_LABELS[day])
+        self.assert_selected("Dec 2026")
+        expect(self.page.locator("#history-notice")).to_be_hidden()
+        self.assertEqual(
+            self.url_params(),
+            {"date": day, "compare": compare, "market": "USDTRY", "maturity": "2026-12"},
+        )
+        self.assertEqual(self.entries(), entries)
+        self.take_index_errors(1)
+
+    def test_a_maturity_chosen_while_the_waiting_close_loads_is_kept(self):
+        day = self.PENDING_DAY
+        for choice in ("2026-12", None, "EURTRY"):
+            with self.subTest(choice=choice):
+                control = self.open_with_unreadable_index(
+                    f"?date={day}&market=USDTRY&maturity=2028-01", reopen=True,
+                )
+                self.assert_selected("Jan 2028")
+                modes, held = self.route_history_close(day)
+                modes[0] = "hold"
+                control["mode"] = "pass"
+                self.page.clock.run_for("01:01")
+                self.page.wait_for_function("() => state.viewDate !== null")
+                for _ in range(200):
+                    if held:
+                        break
+                    self.page.evaluate("() => 0")
+                self.assertEqual(len(held), 1)
+
+                # The live board stays usable while the close loads: another
+                # maturity, none, or another market, which selects none.
+                if choice == "EURTRY":
+                    self.page.locator('.market-options [data-market="EURTRY"]').click()
+                    self.assert_market("EURTRY")
+                else:
+                    self.page.evaluate(f"() => setSelection({json.dumps(choice)})")
+                held[0].fallback()
+                self.assert_historical(day)
+                if choice == "2026-12":
+                    self.assert_selected("Dec 2026")
+                    self.assertEqual(self.url_params().get("maturity"), choice)
+                else:
+                    self.assert_no_selection()
+                    self.assertNotIn("maturity", self.url_params())
+                if choice == "EURTRY":
+                    self.assert_market("EURTRY", self.history[day])
+                self.assertIsNone(self.page.evaluate("() => state.requestedMaturity"))
+                expect(self.page.locator("#history-notice")).to_be_hidden()
+                self.take_index_errors(1)
+
+    def test_a_move_made_while_the_waiting_close_loads_cancels_it(self):
+        day, waiting_compare, compare = self.PENDING_DAY, "2026-09-30", "2026-10-05"
+        # Refresh is disabled while any view loads, so these are the moves left.
+        for move in ("compare", "live"):
+            with self.subTest(move=move):
+                control = self.open_with_unreadable_index(
+                    f"?date={day}&compare={waiting_compare}&market=USDTRY", reopen=True,
+                )
+                modes, held = self.route_history_close(day)
+                modes[0] = "hold"
+                control["mode"] = "pass"
+                self.page.clock.run_for("01:01")
+                self.page.wait_for_function("() => state.viewDate !== null")
+                for _ in range(200):
+                    if held:
+                        break
+                    self.page.evaluate("() => 0")
+                self.assertEqual(len(held), 1)
+
+                # The read listed the closes, so the menus offer them now.
+                if move == "compare":
+                    self.choose_compare(compare)
+                    expected = {"market": "USDTRY", "compare": compare}
+                else:
+                    self.page.locator("#history-select").select_option("")
+                    expected = {"market": "USDTRY"}
+                self.page.wait_for_function("() => state.viewDate === null")
+                expect(self.page.locator("#refresh-button")).to_be_enabled()
+                self.assertEqual(self.url_params(), expected)
+
+                with self.page.expect_response(re.compile(rf"/history/{day}\.json")):
+                    held[0].fallback()
+                # Let the page take the close's body: another fetch completes after it.
+                self.page.evaluate(
+                    "() => fetch('data/market.json').then((response) => response.json())"
+                )
+                self.assertIsNone(self.page.evaluate("() => state.renderedDate"))
+                self.assert_live()
+                expect(self.page.locator("#history-select")).to_have_value("")
+                if move == "compare":
+                    self.assert_comparing(compare)
+                else:
+                    self.assert_not_comparing()
+                self.assertEqual(self.url_params(), expected)
+                # A reload shows the same view.
+                self.page.reload()
+                self.assert_live()
+                self.assertEqual(self.url_params(), expected)
+                self.take_index_errors(1)
+
+    def test_waiting_dates_the_index_does_not_list_fall_back_once_read(self):
+        day, compare = self.PENDING_DAY, self.PENDING_COMPARE
+        control = self.open_with_unreadable_index(
+            f"?date={day}&compare={compare}&market=USDTRY"
+        )
+        self.assert_waiting_live(date=day, compare=compare)
+        control["mode"] = ["2026-10-05"]
+        self.page.clock.run_for("01:01")
+        notice = self.page.locator("#history-notice")
+        expect(notice).to_contain_text(f"No archived close for {day}. Showing live data.")
+        expect(notice).to_contain_text(f"No archived close for {compare} to compare with.")
+        expect(notice).not_to_contain_text("could not be read")
+        self.assert_live()
+        self.assert_not_comparing()
+        self.assertEqual(self.url_params(), {"market": "USDTRY"})
+        self.take_index_errors(1)
+
+    def test_a_waiting_comparison_not_earlier_than_the_close_is_dropped(self):
+        day, compare = "2026-09-30", "2026-10-05"
+        control = self.open_with_unreadable_index(f"?date={day}&compare={compare}")
+        self.assert_waiting_live(date=day, compare=compare)
+        control["mode"] = "pass"
+        self.page.clock.run_for("01:01")
+        self.assert_historical(day)
+        self.assert_not_comparing()
+        expect(self.page.locator("#history-notice")).to_have_text(
+            f"The close of {HISTORY_LABELS[compare]} is not earlier than "
+            f"{HISTORY_LABELS[day]}, so the comparison is off."
+        )
+        self.take_index_errors(1)
+
+    def test_the_users_own_move_drops_a_waiting_link(self):
+        day, compare = self.PENDING_DAY, self.PENDING_COMPARE
+        # The View and Compare menus list no closes before a read, so their
+        # choices are made as the page's change handlers receive them.
+        moves = {
+            "refresh": lambda: self.page.locator("#refresh-button").click(),
+            "view": lambda: self.page.evaluate(
+                f"""() => {{
+                    elements.historySelect.append(new Option("Close", "{day}"));
+                    elements.historySelect.value = "{day}";
+                    elements.historySelect.dispatchEvent(new Event("change"));
+                }}"""
+            ),
+            "live": lambda: self.page.evaluate(
+                """() => {
+                    elements.historySelect.value = "";
+                    elements.historySelect.dispatchEvent(new Event("change"));
+                }"""
+            ),
+            "compare": lambda: self.page.evaluate(
+                """() => {
+                    elements.compareSelect.value = "";
+                    elements.compareSelect.dispatchEvent(new Event("change"));
+                }"""
+            ),
+        }
+        for name, move in moves.items():
+            with self.subTest(move=name):
+                control = self.open_with_unreadable_index(
+                    f"?date={day}&compare={compare}&market=EURTRY&period=annualized",
+                    reopen=True,
+                )
+                self.assert_waiting_live(date=day, compare=compare)
+                move()
+                self.page.wait_for_function("() => state.pendingLink === null")
+                expect(self.page.locator("#refresh-button")).to_be_enabled()
+                self.assertEqual(self.url_params(), {"market": "EURTRY", "period": "annualized"})
+                expect(self.page.locator("#history-notice")).to_be_hidden()
+
+                # The read that then succeeds leaves the view where the user put it.
+                control["mode"] = "pass"
+                self.page.clock.run_for("01:01")
+                expect(self.page.locator("#history-control")).to_be_visible()
+                self.index_read_settled()
+                self.assert_live()
+                self.assert_market("EURTRY")
+                self.assert_not_comparing()
+                self.assert_period("annualized")
+                expect(self.page.locator("#history-select")).to_have_value("")
+                expect(self.page.locator("#history-notice")).to_be_hidden()
+                self.take_index_errors(1)
+
+    def test_market_maturity_and_period_changes_keep_a_waiting_link(self):
+        day = self.PENDING_DAY
+        control = self.open_with_unreadable_index(f"?date={day}&market=USDTRY")
+        self.page.locator('.market-options [data-market="EURTRY"]').click()
+        self.assert_market("EURTRY")
+        self.page.locator('[data-yield-period="annualized"]').click()
+        self.assert_period("annualized")
+        self.assert_waiting_live(date=day)
+        control["mode"] = "pass"
+        self.page.clock.run_for("01:01")
+        self.assert_historical(day)
+        self.assert_market("EURTRY", self.history[day])
+        self.assert_period("annualized")
+        self.take_index_errors(1)
+
+    def test_back_and_forward_follow_the_waiting_rules(self):
+        day = self.PENDING_DAY
+        control = self.open_with_unreadable_index(f"?date={day}&market=USDTRY")
+        self.assert_waiting_live(date=day)
+        entries = self.entries()
+
+        # Refresh drops the waiting date as a move to a new entry.
+        self.page.locator("#refresh-button").click()
+        self.page.wait_for_function(f"() => history.length === {entries + 1}")
+        self.assertEqual(self.url_params(), {"market": "USDTRY"})
+
+        # Back to the waiting entry waits again, as its link would.
+        self.go_back()
+        self.page.wait_for_function("() => state.pendingLink !== null")
+        self.assert_waiting_live(date=day)
+        # Forward to the other entry drops it again.
+        self.go_forward()
+        self.page.wait_for_function("() => state.pendingLink === null")
+        expect(self.page.locator("#history-notice")).to_be_hidden()
+        self.assertEqual(self.url_params(), {"market": "USDTRY"})
+
+        # Back once more, then the index becomes readable: the close opens in place.
+        self.go_back()
+        self.page.wait_for_function("() => state.pendingLink !== null")
+        control["mode"] = "pass"
+        self.page.clock.run_for("01:01")
+        self.assert_historical(day)
+        self.assertEqual(self.entries(), entries + 1)
+        self.go_forward()
+        self.assert_live()
+        self.take_index_errors(1)
+
+    def test_a_malformed_link_date_is_rejected_at_once_while_the_index_is_unreadable(self):
+        self.open_with_unreadable_index("?date=not-a-date&compare=2026-9-3&market=EURTRY")
+        notice = self.page.locator("#history-notice")
+        expect(notice).to_contain_text("That comparison date is not in the archive.")
+        expect(notice).to_contain_text("That date is not in the archive. Showing live data.")
+        expect(notice).not_to_contain_text("could not be read")
+        self.assert_live()
+        self.assert_not_comparing()
+        self.assertEqual(self.url_params(), {"market": "EURTRY"})
+        self.take_index_errors(1)
+
+    def test_copy_link_while_a_link_waits_copies_the_live_view(self):
+        day, compare = self.PENDING_DAY, self.PENDING_COMPARE
+        self.open_with_unreadable_index(
+            f"?date={day}&compare={compare}&market=USDTRY&maturity=2028-01",
+            reopen=True, permissions=CLIPBOARD_PERMISSIONS,
+        )
+        self.assert_waiting_live(date=day, compare=compare)
+        self.assert_share_live(pointer=False)
+        copied = self.copy_link(SHARE_LIVE_COPIED)
+        self.assertEqual(self.query(copied), {"market": "USDTRY", "maturity": "2028-01"})
+        # Copying leaves the waiting dates in the address.
+        self.assert_waiting_live(date=day, compare=compare)
+        self.take_index_errors(1)
+
+    @unittest.skipIf(Axe is None, "axe-playwright-python is not installed")
+    def test_accessibility_of_the_waiting_link_notice(self):
+        for viewport in (None, MOBILE_VIEWPORT):
+            with self.subTest(viewport=viewport):
+                self.open_with_unreadable_index(
+                    f"?date={self.PENDING_DAY}&compare={self.PENDING_COMPARE}&market=USDTRY",
+                    reopen=True, **({"viewport": viewport} if viewport else {}),
+                )
+                self.assert_waiting_live(date=self.PENDING_DAY, compare=self.PENDING_COMPARE)
+                self.assert_no_sideways_scroll()
+                self.assert_accessible(f"waiting link notice at {viewport or 'desktop'}")
+                self.take_index_errors(1)
 
     def test_a_close_added_to_the_index_joins_the_menus_and_keeps_the_view(self):
         added = "2026-09-30"

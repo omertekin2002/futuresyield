@@ -199,6 +199,17 @@ board) from that day's snapshot, for every market.
   fetched, without a reload. The view, comparison, maturity, period and URL
   stay as they are. A failed re-read keeps the closes already listed, and a
   close the index stops listing only drops out of the menus.
+- **Links wait for an unreadable archive.** If the index has never been read,
+  because it failed at start-up, a well-formed `?date=` or `?compare=` is not
+  rejected: the page shows live data with a notice that the archive could not
+  be read and the close will open once it can, and keeps the dates in the URL
+  so a reload retries them. When a later read succeeds, the close opens in
+  place (no new history entry, same market, maturity and period), then its
+  comparison; a date the index doesn't list then falls back with the usual
+  notice. Choosing **Live**, **Refresh**, a close or a comparison first, or
+  going Back or Forward to another entry, drops the waiting dates. A malformed
+  date is still rejected at once, and **Copy link** copies the live view on
+  screen while dates wait.
 - **One contract across the archive.** With a maturity selected, the
   inspector's **History** group lists that exact contract on every archived
   close up to the day on screen, each date linking to that close. See
