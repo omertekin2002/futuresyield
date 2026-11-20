@@ -3199,9 +3199,11 @@ function setHistoryDays(days) {
 // Load and render one view: an archived date, or null for the live snapshot.
 // A view that fails to load leaves the current one on screen. With navigate,
 // the user asked to move to it, so it gets its own history entry once it is
-// on screen (see beginNavigation). Resolves true once the view is on screen,
-// false if it failed, or undefined if a later load took over.
-async function loadView(date, { navigate = false } = {}) {
+// on screen (see beginNavigation). With keepSelection, the maturity selected
+// when it renders is kept as a link's would be, with a notice if that close
+// doesn't list it. Resolves true once the view is on screen, false if it
+// failed, or undefined if a later load took over.
+async function loadView(date, { navigate = false, keepSelection = false } = {}) {
   if (navigate) {
     beginNavigation();
     cancelPendingLink();
@@ -3224,6 +3226,8 @@ async function loadView(date, { navigate = false } = {}) {
     const shown = date ? data : rollSnapshotForward(data, today);
     state.renderedDate = date;
     state.adjustedDay = shown === data ? null : today;
+    // Read now, not when the load began, so a choice made meanwhile counts.
+    if (keepSelection) state.requestedMaturity = state.selectedKey;
     renderSnapshot(shown);
     reached = true;
   } catch (error) {
@@ -3772,10 +3776,8 @@ async function openPendingLink() {
 
   const date = pending.date && state.historyDays.includes(pending.date) ? pending.date : null;
   if (date) {
-    state.requestedMaturity = state.selectedKey;
-    const reached = await loadView(date);
+    const reached = await loadView(date, { keepSelection: true });
     if (reached === undefined || request !== state.linkRequestId) return;
-    state.requestedMaturity = null;
   } else if (pending.date) {
     addNotice(`No archived close for ${pending.date}. Showing live data.`);
     renderViewState();

@@ -3276,6 +3276,46 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assertEqual(self.entries(), entries)
         self.take_index_errors(1)
 
+    def test_a_maturity_chosen_while_the_waiting_close_loads_is_kept(self):
+        day = self.PENDING_DAY
+        for choice in ("2026-12", None, "EURTRY"):
+            with self.subTest(choice=choice):
+                control = self.open_with_unreadable_index(
+                    f"?date={day}&market=USDTRY&maturity=2028-01", reopen=True,
+                )
+                self.assert_selected("Jan 2028")
+                modes, held = self.route_history_close(day)
+                modes[0] = "hold"
+                control["mode"] = "pass"
+                self.page.clock.run_for("01:01")
+                self.page.wait_for_function("() => state.viewDate !== null")
+                for _ in range(200):
+                    if held:
+                        break
+                    self.page.evaluate("() => 0")
+                self.assertEqual(len(held), 1)
+
+                # The live board stays usable while the close loads: another
+                # maturity, none, or another market, which selects none.
+                if choice == "EURTRY":
+                    self.page.locator('.market-options [data-market="EURTRY"]').click()
+                    self.assert_market("EURTRY")
+                else:
+                    self.page.evaluate(f"() => setSelection({json.dumps(choice)})")
+                held[0].fallback()
+                self.assert_historical(day)
+                if choice == "2026-12":
+                    self.assert_selected("Dec 2026")
+                    self.assertEqual(self.url_params().get("maturity"), choice)
+                else:
+                    self.assert_no_selection()
+                    self.assertNotIn("maturity", self.url_params())
+                if choice == "EURTRY":
+                    self.assert_market("EURTRY", self.history[day])
+                self.assertIsNone(self.page.evaluate("() => state.requestedMaturity"))
+                expect(self.page.locator("#history-notice")).to_be_hidden()
+                self.take_index_errors(1)
+
     def test_waiting_dates_the_index_does_not_list_fall_back_once_read(self):
         day, compare = self.PENDING_DAY, self.PENDING_COMPARE
         control = self.open_with_unreadable_index(
