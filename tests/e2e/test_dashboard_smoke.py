@@ -255,17 +255,7 @@ class DashboardSmokeTests(unittest.TestCase):
         history_dir.mkdir(parents=True)
         for day, snapshot in cls.history.items():
             (history_dir / f"{day}.json").write_text(json.dumps(snapshot), encoding="utf-8")
-        manifest = {
-            "schema_version": 1,
-            "days": [
-                {
-                    "date": day,
-                    "generated_at": snapshot["generated_at"],
-                    "markets": snapshot["market_order"],
-                }
-                for day, snapshot in sorted(cls.history.items())
-            ],
-        }
+        manifest = cls.history_manifest(cls.history)
         (history_dir / "index.json").write_text(json.dumps(manifest), encoding="utf-8")
 
         # Two sites: one with the fixture history, one built without any.
@@ -282,6 +272,21 @@ class DashboardSmokeTests(unittest.TestCase):
 
         cls.playwright = sync_playwright().start()
         cls.browser = cls.playwright.chromium.launch()
+
+    @staticmethod
+    def history_manifest(history):
+        """A history index listing each of history's days, oldest first."""
+        return {
+            "schema_version": 1,
+            "days": [
+                {
+                    "date": day,
+                    "generated_at": snapshot["generated_at"],
+                    "markets": snapshot["market_order"],
+                }
+                for day, snapshot in sorted(history.items())
+            ],
+        }
 
     @classmethod
     def tearDownClass(cls):
@@ -3005,6 +3010,349 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assert_selected("Jan 2028")
         expect(self.page.locator("#inspector-history-group")).to_be_hidden()
         expect(self.page.locator("#history-load")).to_be_hidden()
+
+    # Re-reading the history index while the page is open.
+    INDEX_URL = re.compile(r"/data/history/index\.json(\?|$)")
+
+    def route_history_index(self):
+        """Answer the history index as control["mode"] says.
+
+        "pass" serves the built index, a list of days serves an index listing
+        only those, "500" fails and "hold" keeps the request in
+        control["held"]. The page counts each index read it starts in
+        window.__indexReads, as it starts it.
+        """
+        control = {"mode": "pass", "held": []}
+
+        def handle(route):
+            mode = control["mode"]
+            if mode == "pass":
+                route.fallback()
+            elif mode == "hold":
+                control["held"].append(route)
+            elif isinstance(mode, list):
+                listed = {day: self.history[day] for day in mode}
+                route.fulfill(
+                    status=200, content_type="application/json",
+                    body=json.dumps(self.history_manifest(listed)),
+                )
+            else:
+                route.fulfill(status=int(mode))
+
+        self.page.route(self.INDEX_URL, handle)
+        self.page.add_init_script(
+            """(() => {
+                window.__indexReads = 0;
+                const fetch = window.fetch;
+                window.fetch = (...args) => {
+                    if (String(args[0]).includes("history/index.json")) window.__indexReads += 1;
+                    return fetch(...args);
+                };
+            })()"""
+        )
+        return control
+
+    def index_reads(self):
+        return self.page.evaluate("() => window.__indexReads")
+
+    def index_read_settled(self):
+        self.page.wait_for_function("() => state.historyIndexRequest === null")
+
+    def take_index_errors(self, count):
+        """Take the browser's reports of count failed index reads off the errors."""
+        failed = [error for error in self.errors if "500" in error]
+        self.assertEqual(len(failed), count, self.errors)
+        self.errors = [error for error in self.errors if error not in failed]
+
+    def menu_options(self, select):
+        return self.page.locator(f"{select} option").all_text_contents()
+
+    def show_tab(self):
+        """Tell the page its tab became visible again, as when a laptop wakes."""
+        self.page.evaluate("() => document.dispatchEvent(new Event('visibilitychange'))")
+
+    def watch_live_polls(self):
+        requests = []
+        self.page.on(
+            "request",
+            lambda request: "data/market.json" in request.url and requests.append(request.url),
+        )
+        return requests
+
+    def entries(self):
+        return self.page.evaluate("() => history.length")
+
+    def test_history_index_that_failed_at_start_is_read_again_on_the_next_poll(self):
+        control = self.route_history_index()
+        control["mode"] = "500"
+        self.page.clock.install(time=FIXTURE_DAY_TIME)
+        self.open_dashboard("?market=USDTRY&maturity=2028-01&period=monthly")
+        self.assert_selected("Jan 2028")
+        self.index_read_settled()
+        for hidden in ("#history-control", "#compare-control", "#inspector-history-group"):
+            expect(self.page.locator(hidden)).to_be_hidden()
+        self.assertEqual(self.index_reads(), 1)
+        url, entries = self.page.url, self.entries()
+
+        control["mode"] = "pass"
+        self.page.clock.run_for("01:01")
+        expect(self.page.locator("#history-control")).to_be_visible()
+        expect(self.page.locator("#compare-control")).to_be_visible()
+        expect(self.page.locator("#inspector-history-group")).to_be_visible()
+        expect(self.page.locator("#history-load")).to_have_text("Load history · 5 archived closes")
+        self.assertEqual(self.index_reads(), 2)
+        self.assertEqual(
+            self.menu_options("#history-select"),
+            ["Live"] + [f"Close · {HISTORY_LABELS[day]}"
+                        for day in sorted(HISTORY_FIXTURE, reverse=True)],
+        )
+        self.assertIn("1 week ago · 30 Sept 2026", self.menu_options("#compare-select"))
+        expect(self.page.locator("#history-select")).to_have_value("")
+        self.assert_not_comparing()
+        self.assert_selected("Jan 2028")
+        expect(self.page.locator('[data-yield-period="monthly"]')).to_have_attribute(
+            "aria-pressed", "true"
+        )
+        self.assertEqual(self.page.url, url)
+        self.assertEqual(self.entries(), entries)
+
+        # A successful read is used until it is 10 minutes old.
+        self.page.clock.run_for("08:00")
+        self.assertEqual(self.index_reads(), 2)
+        self.load_history(len(HISTORY_FIXTURE))
+        self.take_index_errors(1)
+
+    def test_a_close_added_to_the_index_joins_the_menus_and_keeps_the_view(self):
+        added = "2026-09-30"
+        control = self.route_history_index()
+        control["mode"] = [day for day in HISTORY_FIXTURE if day != added]
+        live_polls = self.watch_live_polls()
+        self.page.clock.install(time=FIXTURE_DAY_TIME)
+        day, compare = "2026-10-06", "2026-10-05"
+        self.open_day(day, f"&compare={compare}&market=USDTRY&maturity=2028-01&period=monthly")
+        self.assert_comparing(compare, current=HISTORY_LABELS[day])
+        self.assert_selected("Jan 2028")
+        # From 06 Oct no listed close lies within 3 days of 1 week earlier.
+        self.assertEqual(self.menu_options("#compare-select"), [
+            "None", "1 month ago · 07 Sept 2026", "3 months ago · 07 Jul 2026",
+            "Close · 05 Oct 2026", "Close · 07 Sept 2026", "Close · 07 Jul 2026",
+        ])
+        url, entries = self.page.url, self.entries()
+
+        control["mode"] = "pass"
+        self.page.clock.run_for("09:30")
+        self.assertEqual(self.index_reads(), 1, "read the index again within 10 minutes")
+        self.page.clock.run_for("01:00")
+        self.assertEqual(self.index_reads(), 2)
+        expect(self.page.locator("#compare-select option")).to_have_text([
+            "None", "1 week ago · 30 Sept 2026", "1 month ago · 07 Sept 2026",
+            "3 months ago · 07 Jul 2026", "Close · 05 Oct 2026", "Close · 30 Sept 2026",
+            "Close · 07 Sept 2026", "Close · 07 Jul 2026",
+        ])
+        self.assertEqual(
+            self.menu_options("#history-select"),
+            ["Live"] + [f"Close · {HISTORY_LABELS[d]}"
+                        for d in sorted(HISTORY_FIXTURE, reverse=True)],
+        )
+        # The view, comparison, selection, period and address are untouched,
+        # and the past close on screen never polled live data.
+        self.assert_historical(day)
+        self.assert_comparing(compare, current=HISTORY_LABELS[day])
+        self.assert_selected("Jan 2028")
+        expect(self.page.locator('[data-yield-period="monthly"]')).to_have_attribute(
+            "aria-pressed", "true"
+        )
+        expect(self.page.locator("#history-notice")).to_be_hidden()
+        self.assertEqual(self.page.url, url)
+        self.assertEqual(self.entries(), entries)
+        self.assertEqual(live_polls, [])
+
+    def test_a_close_the_index_stops_listing_stays_on_screen(self):
+        day, compare = "2026-10-06", "2026-10-05"
+        control = self.route_history_index()
+        self.page.clock.install(time=FIXTURE_DAY_TIME)
+        self.open_day(day, f"&compare={compare}&market=USDTRY&maturity=2028-01")
+        self.assert_comparing(compare, current=HISTORY_LABELS[day])
+        url, entries = self.page.url, self.entries()
+
+        control["mode"] = [d for d in HISTORY_FIXTURE if d not in (day, compare)]
+        self.page.clock.set_system_time(FIXTURE_DAY_TIME + timedelta(minutes=11))
+        self.show_tab()
+        expect(self.page.locator("#compare-select option")).to_have_text([
+            "None", "1 week ago · 30 Sept 2026", "1 month ago · 07 Sept 2026",
+            "3 months ago · 07 Jul 2026", "Close · 30 Sept 2026", "Close · 07 Sept 2026",
+            "Close · 07 Jul 2026",
+        ])
+        self.assertEqual(self.menu_options("#history-select"), [
+            "Live", "Close · 30 Sept 2026", "Close · 07 Sept 2026", "Close · 07 Jul 2026",
+        ])
+        # Both closes are already loaded: the view and comparison stay, without a notice.
+        expect(self.page.locator("#history-banner-date")).to_have_text(HISTORY_LABELS[day])
+        for legend in ("#curve-legend", "#yield-legend"):
+            expect(self.page.locator(legend)).to_contain_text(
+                f"Close · {HISTORY_LABELS[compare]}"
+            )
+        expect(self.page.locator("#history-notice")).to_be_hidden()
+        self.assertEqual(self.page.url, url)
+        self.assertEqual(self.entries(), entries)
+
+        # With no earlier close listed at all, the menu stays while the
+        # comparison does, so None can still turn it off.
+        control["mode"] = [day]
+        self.page.clock.set_system_time(FIXTURE_DAY_TIME + timedelta(minutes=22))
+        self.show_tab()
+        expect(self.page.locator("#history-select option")).to_have_text(
+            ["Live", f"Close · {HISTORY_LABELS[day]}"]
+        )
+        expect(self.page.locator("#compare-control")).to_be_visible()
+        expect(self.page.locator("#compare-select option")).to_have_text(["None"])
+        expect(self.page.locator("#curve-legend")).to_be_visible()
+        self.compare_select().select_option("")
+        self.assert_not_comparing()
+        expect(self.page.locator("#compare-control")).to_be_hidden()
+
+    def test_loaded_history_fetches_only_a_newly_listed_close(self):
+        added = "2026-09-30"
+        control = self.route_history_index()
+        control["mode"] = [day for day in HISTORY_FIXTURE if day != added]
+        self.page.clock.install(time=FIXTURE_DAY_TIME)
+        fetched = self.watch_history_fetches()
+        self.open_dashboard("?market=USDTRY&maturity=2028-01")
+        self.load_history(len(HISTORY_FIXTURE) - 1)
+        self.assertEqual(sorted(fetched), sorted(day for day in HISTORY_FIXTURE if day != added))
+        status = self.page.locator("#inspector-history-status")
+        coverage = self.page.locator("#inspector-history-coverage")
+        expect(status).to_have_text("History loaded: 4 archived closes.")
+        expect(coverage).to_have_text(
+            "Observed with a price on 2 of 4 archived closes, 07 Jul 2026 – 06 Oct 2026."
+        )
+        fetched.clear()
+
+        # While the new close loads, the table and chart stay up without it.
+        modes, held = self.route_history_close(added)
+        modes[0] = "hold"
+        control["mode"] = "pass"
+        self.page.clock.run_for("10:30")
+        self.page.wait_for_function(f"() => state.historyPending.has('{added}')")
+        self.assertEqual(self.index_reads(), 2)
+        expect(self.page.locator("#inspector-history-scroll")).to_be_visible()
+        expect(self.page.locator("#history-chart")).to_be_visible()
+        self.assertNotIn(added, [row["day"] for row in self.history_rows()])
+        expect(status).to_have_text("History loaded: 4 archived closes.")
+
+        modes[0] = "pass"
+        held.pop().fallback()
+        expect(status).to_have_text("History loaded: 5 archived closes.")
+        expect(coverage).to_have_text(
+            "Observed with a price on 3 of 5 archived closes, 07 Jul 2026 – 06 Oct 2026."
+        )
+        self.assertEqual(
+            [(r["day"], r["state"]) for r in self.history_rows() if r["state"] != "gap"],
+            [("2026-10-07", "listed"), ("2026-10-06", "listed"), ("2026-10-05", "listed"),
+             (added, "listed"), (NO_PRICE_DAY, "listed"), (ROLLED_DAY, "not-listed")],
+        )
+        self.assertIn(
+            added, self.page.evaluate("() => state.historyChart.rows.map((row) => row.day)")
+        )
+        self.assertEqual(fetched, [added])
+
+        # Later reads and polls fetch no close again.
+        self.page.clock.run_for("10:30")
+        self.assertEqual(self.index_reads(), 3)
+        self.index_read_settled()
+        expect(status).to_have_text("History loaded: 5 archived closes.")
+        self.assertEqual(fetched, [added])
+
+    def test_unopened_history_only_recounts_a_newly_listed_close(self):
+        added = "2026-09-30"
+        control = self.route_history_index()
+        control["mode"] = [day for day in HISTORY_FIXTURE if day != added]
+        self.page.clock.install(time=FIXTURE_DAY_TIME)
+        fetched = self.watch_history_fetches()
+        self.open_dashboard("?market=USDTRY&maturity=2028-01")
+        load = self.page.locator("#history-load")
+        expect(load).to_have_text("Load history · 4 archived closes")
+        control["mode"] = "pass"
+        self.page.clock.set_system_time(FIXTURE_DAY_TIME + timedelta(minutes=11))
+        self.show_tab()
+        expect(load).to_have_text("Load history · 5 archived closes")
+        expect(self.page.locator("#inspector-history-scroll")).to_be_hidden()
+        self.assertEqual(fetched, [])
+
+    def test_a_failed_index_read_after_a_good_one_keeps_everything(self):
+        control = self.route_history_index()
+        self.page.clock.install(time=FIXTURE_DAY_TIME)
+        fetched = self.watch_history_fetches()
+        self.open_dashboard("?market=USDTRY&maturity=2028-01")
+        self.choose_compare("2026-09-30")
+        self.load_history(len(HISTORY_FIXTURE))
+        menus = (self.menu_options("#history-select"), self.menu_options("#compare-select"))
+        rows = self.history_rows()
+        status = self.page.locator("#inspector-history-status").text_content()
+        fetched.clear()
+
+        control["mode"] = "500"
+        self.page.clock.run_for("10:30")
+        self.assertEqual(self.index_reads(), 2)
+        # A failed read is tried again on the next poll.
+        self.page.clock.run_for("01:00")
+        self.assertEqual(self.index_reads(), 3)
+        self.index_read_settled()
+        self.assertEqual(
+            (self.menu_options("#history-select"), self.menu_options("#compare-select")), menus
+        )
+        self.assertEqual(self.history_rows(), rows)
+        expect(self.page.locator("#inspector-history-status")).to_have_text(status)
+        expect(self.page.locator("#inspector-history-group")).to_be_visible()
+        self.assert_comparing("2026-09-30")
+        self.assert_selected("Jan 2028")
+        self.assertEqual(fetched, [])
+        self.take_index_errors(2)
+
+    def test_one_index_read_at_a_time_and_only_once_it_is_stale(self):
+        control = self.route_history_index()
+        self.page.clock.install(time=FIXTURE_DAY_TIME)
+        self.open_dashboard()
+        self.index_read_settled()
+        self.assertEqual(self.index_reads(), 1)
+        # Fresh: neither the poll nor a return to the tab reads it again.
+        self.show_tab()
+        self.page.clock.run_for("05:00")
+        self.assertEqual(self.index_reads(), 1)
+
+        # Stale, with the read held open: later polls and returns share it.
+        control["mode"] = "hold"
+        self.page.clock.run_for("05:30")
+        self.assertEqual(self.index_reads(), 2)
+        self.show_tab()
+        self.show_tab()
+        self.page.clock.run_for("03:00")
+        self.assertEqual(self.index_reads(), 2)
+        self.page.wait_for_function("() => state.historyIndexRequest !== null")
+        self.assertEqual(len(control["held"]), 1)
+
+        control["held"].pop().fallback()
+        self.index_read_settled()
+        self.show_tab()
+        self.page.clock.run_for("02:00")
+        self.assertEqual(self.index_reads(), 2)
+
+    def test_returning_to_the_tab_reads_a_stale_index_at_once(self):
+        added = "2026-09-30"
+        control = self.route_history_index()
+        control["mode"] = [day for day in HISTORY_FIXTURE if day != added]
+        self.page.clock.install(time=FIXTURE_DAY_TIME)
+        self.open_dashboard()
+        self.index_read_settled()
+        control["mode"] = "pass"
+        # The tab was hidden for 20 minutes, and no poll ran meanwhile.
+        self.page.clock.set_system_time(FIXTURE_DAY_TIME + timedelta(minutes=20))
+        self.assertEqual(self.index_reads(), 1)
+        self.show_tab()
+        self.assertEqual(self.index_reads(), 2)
+        expect(self.page.locator(f'#history-select option[value="{added}"]')).to_have_count(1)
+        # Listed both as a quick pick and as an archived close.
+        expect(self.page.locator(f'#compare-select option[value="{added}"]')).to_have_count(2)
 
     def test_history_load_is_keyboard_operable(self):
         self.open_dashboard("?market=USDTRY&maturity=2028-01")
