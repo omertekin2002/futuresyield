@@ -13,7 +13,7 @@ it, and its docstring says what was derived from the recording.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from functools import partial
 import json
 import math
@@ -36,6 +36,9 @@ except ImportError:  # `python -m unittest tests.test_update_data_replay`
 
 # The recording was captured at 22:28:40 Istanbul time on 20 Nov 2026.
 NOW = datetime(2026, 11, 20, 22, 30, tzinfo=ISTANBUL)
+# The same quotes captured after midnight, as the GitHub fallback cron does when
+# the laptop trigger is offline: early on Saturday 21 Nov, before any session.
+AFTER_MIDNIGHT = datetime(2026, 11, 21, 0, 30, tzinfo=ISTANBUL)
 MARKET_KEYS = ["USDTRY", "EURTRY", "XAUTRY"]
 
 
@@ -60,12 +63,12 @@ class ReplayTestCase(unittest.TestCase):
     def assert_all_calls_recorded(self):
         self.assertEqual(self.replay.unrecorded, [])
 
-    def build(self) -> dict:
+    def build(self, now: datetime = NOW) -> dict:
         with (
             patch("scripts.update_data.bp", self.replay.module()),
             patch("builtins.print", side_effect=self.record_print),
         ):
-            snapshot = update_data.build_snapshot(now=NOW)
+            snapshot = update_data.build_snapshot(now=now)
         validate_snapshot(snapshot)
         json.dumps(snapshot, ensure_ascii=False, allow_nan=False)
         return snapshot
@@ -73,14 +76,14 @@ class ReplayTestCase(unittest.TestCase):
     def record_print(self, *args, **_kwargs):
         self.printed.append(" ".join(str(arg) for arg in args))
 
-    def run_main(self, output: Path, attempts: int = 2) -> None:
+    def run_main(self, output: Path, attempts: int = 2, now: datetime = NOW) -> None:
         argv = ["update_data.py", "--output", str(output), "--attempts", str(attempts)]
         with (
             patch("sys.argv", argv),
             patch("scripts.update_data.bp", self.replay.module()),
             patch(
                 "scripts.update_data.build_snapshot",
-                partial(update_data.build_snapshot, now=NOW),
+                partial(update_data.build_snapshot, now=now),
             ),
             patch("scripts.update_data.time.sleep"),
             patch("builtins.print", side_effect=self.record_print),
@@ -269,6 +272,39 @@ class HappyPathTests(ReplayTestCase):
         self.assertEqual(written, expected)
         self.assertFalse(output.with_suffix(".json.tmp").exists())
         self.assert_all_calls_recorded()
+
+
+class AfterMidnightTests(ReplayTestCase):
+    """The recording unchanged, run at AFTER_MIDNIGHT instead of NOW."""
+
+    def test_snapshot_is_dated_to_the_session_its_quotes_close(self):
+        output = self.output_path()
+        self.run_main(output, now=AFTER_MIDNIGHT)
+        self.assert_all_calls_recorded()
+
+        written = json.loads(output.read_text(encoding="utf-8"))
+        validate_snapshot(written)
+        self.assertEqual(written["generated_at"], "2026-11-21T00:30:00+03:00")
+        self.assertEqual(written["market_date"], "2026-11-20")
+
+        # Counted from Friday's session, not from Saturday as the calendar day
+        # would give: one day more than the old rule, the same as at NOW.
+        evening = self.build()
+        saturday = date(2026, 11, 21)
+        for key in MARKET_KEYS:
+            contracts = written["markets"][key]["contracts"]
+            self.assertEqual(
+                [c["symbol"] for c in contracts],
+                [c["symbol"] for c in evening["markets"][key]["contracts"]],
+            )
+            for contract, same in zip(contracts, evening["markets"][key]["contracts"]):
+                with self.subTest(contract=contract["symbol"]):
+                    old_rule = (date.fromisoformat(contract["maturity_date"]) - saturday).days
+                    self.assertEqual(contract["days_to_maturity"], old_rule + 1)
+                    self.assertEqual(contract["days_to_maturity"], same["days_to_maturity"])
+                    for field in ("daily_yield_factor", "annualized_yield_percent",
+                                  "expected_spot_at_maturity", "expected_short_profit_try"):
+                        self.assertEqual(contract[field], same[field], field)
 
 
 class QuirkTests(ReplayTestCase):

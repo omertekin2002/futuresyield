@@ -2820,10 +2820,13 @@ function renderSnapshot(snapshot) {
 }
 
 // Days left that no longer match the snapshot's own date are never silent.
+// market_date is the session the prices come from, which can be a day before
+// the snapshot was taken (after midnight, at weekends), so the note names the
+// session rather than calling that date the snapshot's.
 function daysNoteText(snapshot) {
   return state.adjustedDay
     ? `Days left and yields adjusted to ${formatDay(state.adjustedDay)}; ` +
-      `prices are from the ${formatDay(snapshot.market_date)} snapshot.`
+      `prices are from the ${formatDay(snapshot.market_date)} session.`
     : "";
 }
 

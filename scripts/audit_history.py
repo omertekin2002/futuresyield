@@ -2,7 +2,8 @@
 """Audit an archived history/ directory (as on the data-history branch).
 
 Checks every archived close against the code that reads it, using the rules in
-`archive_snapshot` and `snapshot_schema` rather than restating them:
+`archive_snapshot`, `market_calendar` and `snapshot_schema` rather than
+restating them:
 
 - every `YYYY-MM-DD.json` passes the current snapshot schema;
 - its `generated_at` is an end-of-day snapshot for the day in its file name;
@@ -29,8 +30,8 @@ if __package__:
         build_manifest,
         manifest_entry,
         parse_generated_at,
-        trading_date,
     )
+    from .market_calendar import trading_date
     from .snapshot_schema import SnapshotSchemaError, validate_snapshot
 else:  # run as `python scripts/audit_history.py`
     from archive_snapshot import (
@@ -40,8 +41,8 @@ else:  # run as `python scripts/audit_history.py`
         build_manifest,
         manifest_entry,
         parse_generated_at,
-        trading_date,
     )
+    from market_calendar import trading_date
     from snapshot_schema import SnapshotSchemaError, validate_snapshot
 
 
