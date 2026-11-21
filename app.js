@@ -4003,8 +4003,8 @@ function cancelPendingLink() {
 // Once the history index has been read, open what a link waited for in
 // place, as the link would have: its close, without a history entry and with
 // the market, maturity and period on screen, then its comparison. A date the
-// index doesn't list falls back as a link's does. A move the user makes
-// before it is on screen stops it.
+// index doesn't list, or a close that can't be loaded, falls back as a link's
+// does. A move the user makes before it is on screen stops it.
 async function openPendingLink() {
   const pending = state.pendingLink;
   if (!pending) return;
@@ -4016,9 +4016,13 @@ async function openPendingLink() {
   if (date) {
     const load = loadView(date, { keepSelection: true });
     state.linkLoad = state.requestId;
-    const reached = await load;
+    await load;
     if (state.linkLoad === state.requestId) state.linkLoad = null;
-    if (reached === undefined || request !== state.linkRequestId) return;
+    // A move the user makes, or another entry, stops the link. A close that
+    // can't be loaded before any view has rendered falls back to live data in
+    // a load of its own, which is not a move: the comparison still follows,
+    // as a fresh link's does.
+    if (request !== state.linkRequestId) return;
   } else if (pending.date) {
     addNotice(`No archived close for ${pending.date}. Showing live data.`);
     renderViewState();

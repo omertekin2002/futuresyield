@@ -4047,6 +4047,40 @@ class DashboardSmokeTests(unittest.TestCase):
                     self.expect_load_errors(1)
                 self.take_index_errors(1)
 
+    def test_a_waiting_comparison_follows_the_live_fallback_of_a_close_that_fails(self):
+        # The index becomes readable before any view has rendered, and the
+        # waiting close then can't be loaded: the page falls back to live
+        # data, and the comparison still follows, as a fresh link's does.
+        day, compare = self.PENDING_DAY, self.PENDING_COMPARE
+        bad = copy.deepcopy(self.snapshot)
+        bad["schema_version"] = 5
+        control = self.route_history_index()
+        control["mode"] = "500"
+        live_control, _ = self.route_first_live_snapshot("bad", bad)
+        self.route_history_close(day)
+        self.page.clock.install(time=FIXTURE_DAY_TIME)
+        self.page.goto(f"{self.base_url}?date={day}&compare={compare}&market=USDTRY")
+        self.index_read_settled()
+        self.assert_status("is-error", "Data unavailable")
+
+        live_control["mode"] = "pass"
+        control["mode"] = "pass"
+        self.show_tab()
+        expect(self.page.locator("#history-notice")).to_have_text(
+            f"The close of {HISTORY_LABELS[day]} could not be loaded."
+        )
+        self.assert_live()
+        self.assert_market("USDTRY")
+        self.assert_comparing(compare)
+        self.assertEqual(self.url_params(), {"compare": compare, "market": "USDTRY"})
+        # The rejected live snapshot and the close that failed.
+        self.expect_load_errors(2)
+        self.take_index_errors(1)
+        # The browser's own report of the close's 404 is the only other error.
+        self.assertEqual(len(self.errors), 1, self.errors)
+        self.assertIn("404", self.errors[0])
+        self.errors = []
+
     def test_a_move_made_while_the_waiting_close_loads_cancels_it(self):
         day, waiting_compare, compare = self.PENDING_DAY, "2026-09-30", "2026-10-05"
         # Refresh is disabled while any view loads, so these are the moves left.
