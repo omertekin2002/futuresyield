@@ -157,6 +157,13 @@ end-of-day snapshot per VİOP trading day on a separate `data-history` branch.
   rejects a live or archived file with an unknown `schema_version`, or with
   contracts missing their maturity date or days to maturity, and shows its
   usual load error.
+- **Audited in CI.** Every CI run checks the real `data-history` archive
+  read-only: `python -m scripts.audit_history <history-dir>` fails if a close
+  breaks the current schema or end-of-day rule, if `index.json` no longer
+  matches its files, or if anything else is in the directory. The smoke test
+  then opens every archived close in a headless browser when
+  `VADE_ARCHIVE_DIR` points at that directory. A change that would strand
+  archived closes fails CI instead of the live site.
 - **Size.** About 27 KB per trading day, roughly 7 MB a year.
 
 ### Browsing past closes
