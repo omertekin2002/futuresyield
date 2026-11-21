@@ -107,9 +107,18 @@ The yield curve starts with the gross daily factor
 1-, 30-, or 365-day compounded factor to net percentage yield by subtracting
 one and multiplying by 100.
 
-Days left are counted from the snapshot's market date, and refreshes can land
-hours apart, so the live snapshot can still be from the previous day after
-midnight. When the live snapshot's `market_date` is earlier than today in
+Days left are counted from the snapshot's `market_date`: the VİOP session
+whose quotes it holds, by the same calendar the archive uses
+(`scripts/market_calendar.py`). On a trading day, from the 09:20 open until
+midnight, that is the day itself, half days included. Before the open, and at
+weekends and on public holidays, it is the previous trading day, the session
+that last closed. So a snapshot taken at 00:30 on Thursday, or on Saturday, is
+dated to Wednesday or Friday, and a contract maturing on that session day stays
+in with 0 days. The spot and its trend keep their own observation times.
+
+Refreshes can land hours apart, and an overnight or weekend snapshot is dated
+to the previous session, so the live snapshot's date is often earlier than
+today. When the live snapshot's `market_date` is earlier than today in
 Europe/Istanbul (whatever the browser's own time zone), the dashboard
 recomputes, on a copy, everything that depends on time to maturity: days left,
 the daily factor and the 1D/30D/365D yields, the curve horizon, and the USD/TRY
@@ -117,7 +126,7 @@ expected spot and profit. It uses the updater's rules, so a contract maturing
 today shows 0 days and no yield, and a contract that has matured is dropped.
 Prices, premiums and the spot trend stay as published. A note under the data
 status says so, for example "Days left and yields adjusted to 08 Oct 2026;
-prices are from the 07 Oct 2026 snapshot". Archived closes and comparison
+prices are from the 07 Oct 2026 session". Archived closes and comparison
 overlays always keep their stored values, since each describes its own day.
 
 ### USD/TRY short carry
@@ -156,6 +165,14 @@ end-of-day snapshot per VİOP trading day on a separate `data-history` branch.
   any snapshot taken before the next session opens at 09:20, including over
   weekends and public holidays. Snapshots taken in between, including the gap
   between the normal and evening sessions, are not end-of-day and are skipped.
+- **Dated to its session.** A day file's `market_date` is the session it
+  closes, so its days left and yields count from that day even when it was
+  captured after midnight or at a weekend. `archive()` skips, with a `Skipped:`
+  line, a snapshot whose `market_date` is not the session its `generated_at`
+  closes; the live site still deploys. Three closes archived before this rule
+  (26 Oct, 10 Nov and 11 Nov 2026, each captured after midnight) count their
+  days from the next calendar day. Archived days are write-once, so they stay
+  as they are.
 - **Half days.** A half-day holiday is still a trading day, but its only session
   ends at 12:40 and it has no evening session, so snapshots from 12:55 onward
   count as that day. On the year's last trading day the evening session is not

@@ -1398,7 +1398,7 @@ class DashboardSmokeTests(unittest.TestCase):
             expect(note).to_be_visible()
             expect(note).to_have_text(
                 f"Days left and yields adjusted to {adjusted_to}; "
-                f"prices are from the {LIVE_LABEL} snapshot."
+                f"prices are from the {LIVE_LABEL} session."
             )
         else:
             expect(note).to_be_hidden()
@@ -1474,6 +1474,20 @@ class DashboardSmokeTests(unittest.TestCase):
                             )
                         # A day closer to maturity, the projection grows less.
                         self.assertLess(value, contract["expected_spot_at_maturity"])
+
+    def test_after_midnight_snapshot_of_the_previous_session_counts_from_today(self):
+        # The updater dates a snapshot taken at 00:45 on Thursday 8 Oct to the
+        # Wednesday session its quotes come from, so its market_date stays 7 Oct.
+        self.open_live_at("2026-10-08T00:50:00+03:00", "2026-10-08T00:45:00+03:00")
+        self.assert_note("08 Oct 2026")
+        # The board names the session the prices are from and when they were taken.
+        expect(self.page.locator("#market-date")).to_have_text(LIVE_LABEL)
+        expect(self.page.locator("#updated-at")).to_have_text("08 Oct, 00:45 TRT")
+        key = self.snapshot["default_market"]
+        market = self.snapshot["markets"][key]
+        days = self.expected_days(market, date(2026, 10, 8))
+        self.assertEqual(days, [c["days_to_maturity"] - 1 for c in market["contracts"]])
+        self.assert_days(key, days)
 
     def test_contract_maturing_today_shows_zero_days_and_no_yield(self):
         self.reopen_at(datetime.fromisoformat("2026-10-30T12:00:00+03:00"))
@@ -2258,7 +2272,7 @@ class DashboardSmokeTests(unittest.TestCase):
         note = self.page.locator("#inspector-note")
         expect(note).to_be_visible()
         expect(note).to_have_text(
-            f"Days left and yields adjusted to 08 Oct 2026; prices are from the {LIVE_LABEL} snapshot."
+            f"Days left and yields adjusted to 08 Oct 2026; prices are from the {LIVE_LABEL} session."
         )
 
     def test_inspector_of_an_archived_close_shows_its_stored_values(self):

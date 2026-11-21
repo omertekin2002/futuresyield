@@ -17,7 +17,8 @@ import sys
 import tempfile
 import unittest
 
-from scripts.archive_snapshot import parse_generated_at, trading_date
+from scripts.archive_snapshot import parse_generated_at
+from scripts.market_calendar import session_date, trading_date
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -49,9 +50,13 @@ def git_version():
     return (int(match.group(1)), int(match.group(2))) if match else None
 
 
-def snapshot_bytes(generated_at):
+def snapshot_bytes(generated_at, market_date=None):
+    """The fixture as the updater would write it at generated_at."""
     snapshot = json.loads(FIXTURE.read_text(encoding="utf-8"))
     snapshot["generated_at"] = generated_at
+    snapshot["market_date"] = market_date or session_date(
+        parse_generated_at(generated_at)
+    ).isoformat()
     return (json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
 
 
