@@ -76,5 +76,56 @@ jobs:
       - name: Install headless Chromium
         run: python -m playwright install --with-deps chromium
 
+      # Read-only checkout of the data-history branch, as pages.yml makes. Only a
+      # missing branch is skipped (ls-remote exits 2); any other error fails.
+      - name: Fetch archived end-of-day snapshots
+        id: archive
+        run: |
+          if git ls-remote --exit-code --heads origin data-history > /dev/null; then
+            git fetch --no-tags --depth=1 origin data-history
+            git worktree add --detach "$RUNNER_TEMP/data-history" FETCH_HEAD
+            echo "dir=$RUNNER_TEMP/data-history/history" >> "$GITHUB_OUTPUT"
+          else
+            status=$?
+            if [[ $status -ne 2 ]]; then exit "$status"; fi
+            echo "No data-history branch; skipping the real-archive check"
+          fi
+
       - name: Run dashboard smoke test
+        env:
+          VADE_ARCHIVE_DIR: ${{ steps.archive.outputs.dir }}
         run: python -m unittest tests/e2e/test_dashboard_smoke.py -v
+
+  archive:
+    name: Archive audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install holiday calendar
+        run: python -m pip install "$(grep '^holidays==' requirements.txt)"
+
+      # Read-only checkout of the data-history branch, as pages.yml makes. Only a
+      # missing branch is skipped (ls-remote exits 2); any other error fails.
+      - name: Fetch archived end-of-day snapshots
+        id: archive
+        run: |
+          if git ls-remote --exit-code --heads origin data-history > /dev/null; then
+            git fetch --no-tags --depth=1 origin data-history
+            git worktree add --detach "$RUNNER_TEMP/data-history" FETCH_HEAD
+            echo "dir=$RUNNER_TEMP/data-history/history" >> "$GITHUB_OUTPUT"
+          else
+            status=$?
+            if [[ $status -ne 2 ]]; then exit "$status"; fi
+            echo "No data-history branch; skipping the real-archive check"
+          fi
+
+      - name: Audit the archive against the current schema and end-of-day rule
+        if: steps.archive.outputs.dir != ''
+        run: python -m scripts.audit_history "${{ steps.archive.outputs.dir }}"

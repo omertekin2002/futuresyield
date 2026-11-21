@@ -5988,5 +5988,96 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assert_no_sideways_scroll()
         self.assert_accessible("copy link fallback at 320px")
 
+# A real history/ directory, laid out like the data-history branch. CI points
+# this at a read-only checkout of that branch; without it the class is skipped.
+ARCHIVE_DIR = os.environ.get("VADE_ARCHIVE_DIR")
+
+
+@unittest.skipIf(sync_playwright is None, "Playwright is not installed")
+@unittest.skipUnless(ARCHIVE_DIR, "VADE_ARCHIVE_DIR is not set to a real history/ directory")
+class RealArchiveSmokeTests(unittest.TestCase):
+    """Opens every close of the real archive, as the live site would serve it."""
+
+    @classmethod
+    def setUpClass(cls):
+        archive = Path(ARCHIVE_DIR)
+        index = json.loads((archive / "index.json").read_text(encoding="utf-8"))
+        cls.days = {
+            entry["date"]: json.loads(
+                (archive / f"{entry['date']}.json").read_text(encoding="utf-8")
+            )
+            for entry in index["days"]
+        }
+        cls.tmp = tempfile.TemporaryDirectory()
+        site = Path(cls.tmp.name) / "site"
+        build_site(site, archive)
+        # Live data is the newest close, so the archive is never newer than it,
+        # and the browser clock reads the time that close was taken.
+        newest = max(cls.days) if cls.days else None
+        if newest:
+            shutil.copyfile(archive / f"{newest}.json", site / "data" / "market.json")
+        source = cls.days[newest] if newest else json.loads(FIXTURE.read_text(encoding="utf-8"))
+        cls.now = datetime.fromisoformat(source["generated_at"])
+
+        handler = partial(QuietHandler, directory=str(site))
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        cls.base_url = f"http://127.0.0.1:{cls.server.server_address[1]}/"
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+        cls.playwright = sync_playwright().start()
+        cls.browser = cls.playwright.chromium.launch()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.playwright.stop()
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.tmp.cleanup()
+
+    def setUp(self):
+        self.errors = []
+        self.external_requests = []
+        self.context = self.browser.new_context(viewport={"width": 1280, "height": 900})
+        self.page = self.context.new_page()
+        self.page.clock.set_fixed_time(self.now)
+        self.page.on(
+            "console",
+            lambda message: message.type == "error"
+            and self.errors.append(f"console: {message.text}"),
+        )
+        self.page.on("pageerror", lambda error: self.errors.append(f"pageerror: {error}"))
+        self.page.route(re.compile(r"^(?!http://127\.0\.0\.1:)"), self.block_external)
+
+    def tearDown(self):
+        self.context.close()
+        self.assertEqual(self.external_requests, [], "page requested a non-local URL")
+
+    def block_external(self, route):
+        self.external_requests.append(route.request.url)
+        route.abort()
+
+    def test_every_archived_close_renders(self):
+        self.assertTrue(self.days, f"{ARCHIVE_DIR} has no archived closes")
+        page = self.page
+        for day, snapshot in self.days.items():
+            for key in snapshot["market_order"]:
+                with self.subTest(day=day, market=key):
+                    self.errors.clear()
+                    page.goto(f"{self.base_url}?date={day}&market={key}")
+                    state = page.locator("#data-state")
+                    expect(state).to_have_class(re.compile(r"\bis-historical\b"))
+                    expect(state).to_contain_text("Historical · close of")
+                    expect(page.locator("#history-select")).to_have_value(day)
+                    expect(page.locator("body")).to_have_attribute("data-market", key)
+                    expect(page.locator("#history-notice")).to_be_hidden()
+                    # At least one maturity shows a last price.
+                    priced = page.locator(
+                        '#contract-rows td[data-label="Last"] .last-price'
+                    ).filter(has_text=FORMATTED_NUMBER)
+                    expect(priced.first).to_be_visible()
+                    self.assertEqual(self.errors, [], "page logged errors")
+
+
 if __name__ == "__main__":
     unittest.main()
