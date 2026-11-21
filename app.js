@@ -560,19 +560,19 @@ function projectedSpot(spot, dailyFactor, days) {
     : null;
 }
 
-// The live snapshot's days left, and everything built on them, are fixed for
-// its market date. Once Istanbul has moved on to a later day, return a copy
-// with those terms recomputed for today and expired contracts dropped, as the
-// updater would. Prices, premiums and the spot trend stay as published.
-function rollSnapshotForward(snapshot, today) {
-  if (!(snapshot.market_date < today)) return snapshot;
-  const rolled = structuredClone(snapshot);
-  Object.values(rolled.markets).forEach((market) => {
+// A snapshot's days left, and everything built on them, are fixed for its
+// market date. Return a copy with those terms recounted from day, earlier or
+// later, as the updater would count them, and expired contracts dropped.
+// Prices, bid/ask, spot, premiums, the spot trend and every timestamp stay as
+// published, and so does market_date.
+function recountSnapshot(snapshot, day) {
+  const recounted = structuredClone(snapshot);
+  Object.values(recounted.markets).forEach((market) => {
     const spot = market.spot?.last;
     const trendFactor = market.spot_trend?.daily_factor;
     market.contracts = market.contracts
       .map((contract) => {
-        const days = daysUntil(today, contract.maturity_date);
+        const days = daysUntil(day, contract.maturity_date);
         const factor = dailyYieldFactor(contract.last, spot, days);
         const expectedSpot = hasNumber(market.contract_size)
           ? projectedSpot(spot, trendFactor, days)
@@ -597,7 +597,33 @@ function rollSnapshotForward(snapshot, today) {
       })
       .filter((contract) => contract.days_to_maturity >= 0);
   });
-  return rolled;
+  return recounted;
+}
+
+// Once Istanbul has moved on past the live snapshot's market date, a copy
+// counted from today instead; otherwise the snapshot itself.
+function rollSnapshotForward(snapshot, today) {
+  return snapshot.market_date < today ? recountSnapshot(snapshot, today) : snapshot;
+}
+
+// An archived close counts from the session it closes, its file's day. Three
+// closes archived before that rule (26 Oct, 10 Nov and 11 Nov 2026) were
+// captured after midnight and published counted from the next calendar day;
+// archived days are write-once, so they are recounted here instead. A close
+// already dated to its day is returned as published. A recounted copy has
+// market_date set to the day and keeps the file's as published_market_date.
+// Recounting to an earlier day drops no contract.
+function archivedClose(snapshot, day) {
+  if (snapshot.market_date === day) return snapshot;
+  const recounted = recountSnapshot(snapshot, day);
+  recounted.published_market_date = snapshot.market_date;
+  recounted.market_date = day;
+  return recounted;
+}
+
+// Fetch one archived close, counted from its own day.
+async function fetchArchivedClose(day) {
+  return archivedClose(await fetchSnapshot(`${HISTORY_URL}/${day}.json`), day);
 }
 
 const STATUS_CLASSES = ["is-fresh", "is-delayed", "is-closed", "is-error", "is-historical"];
@@ -1061,8 +1087,9 @@ function renderInspector(contract) {
   elements.inspectorName.textContent = contract.label;
   elements.inspectorDay.textContent =
     `${state.renderedDate ? "Close" : "Live"} · ${formatDay(referenceDate())}`;
-  elements.inspectorNote.hidden = !state.adjustedDay;
-  elements.inspectorNote.textContent = daysNoteText(state.snapshot);
+  const daysNote = daysNoteText(state.snapshot);
+  elements.inspectorNote.hidden = !daysNote;
+  elements.inspectorNote.textContent = daysNote;
 
   fillInspectorList(elements.inspectorContract, [
     { key: "label", term: "Label", value: contract.label },
@@ -1073,7 +1100,8 @@ function renderInspector(contract) {
       key: "days",
       term: "Days left",
       value: String(days),
-      detail: `Calendar days from ${formatDay(countedFrom)}${state.adjustedDay ? ", adjusted" : ""}`,
+      detail: `Calendar days from ${formatDay(countedFrom)}` +
+        (state.adjustedDay ? ", adjusted" : state.snapshot.published_market_date ? ", recounted" : ""),
     },
   ]);
 
@@ -1275,7 +1303,17 @@ function columnHeader(text) {
 // The selected maturity on the comparison close next to the day on screen,
 // with the change between them. The compared contract is matched by
 // maturity month, as the chart overlay matches it, and keeps the values its
-// own snapshot stored: it is never rolled forward.
+// own snapshot stored: it is never rolled forward. A close published counted
+// from the next day is recounted from its session (see archivedClose), and
+// its Date row says so.
+// The comparison's line for a close recounted from its session, or "".
+function recountDetail(snapshot) {
+  return snapshot?.published_market_date
+    ? `Days left from ${formatDay(snapshot.market_date)}, recounted; ` +
+      `published from ${formatDay(snapshot.published_market_date)}`
+    : "";
+}
+
 function renderInspectorComparison(contract) {
   const group = elements.inspectorCompareGroup;
   group.hidden = !contract || !state.compareSnapshot || !state.compareDate;
@@ -1303,7 +1341,10 @@ function renderInspectorComparison(contract) {
   }
   elements.inspectorCompareNote.textContent =
     `Change is the day on screen minus the close of ${comparedDay}, ` +
-    "whose values are shown as that close stored them.";
+    (state.compareSnapshot.published_market_date
+      ? "whose values are shown as that close stored them, with days left and yields " +
+        "recounted from its session."
+      : "whose values are shown as that close stored them.");
 
   const currentDay = referenceDate();
   const current = comparisonSide(contract, data, state.snapshot.generated_at);
@@ -1330,9 +1371,11 @@ function renderInspectorComparison(contract) {
       term: "Date",
       current: {
         value: formatDay(currentDay),
-        detail: state.adjustedDay ? `Days left from ${formatDay(state.adjustedDay)}, adjusted` : "",
+        detail: state.adjustedDay
+          ? `Days left from ${formatDay(state.adjustedDay)}, adjusted`
+          : recountDetail(state.snapshot),
       },
-      compared: { value: comparedDay },
+      compared: { value: comparedDay, detail: recountDetail(state.compareSnapshot) },
       change: { value: `${apart} calendar ${apart === 1 ? "day" : "days"} apart` },
     },
     {
@@ -1452,7 +1495,7 @@ async function fetchHistoryDays(days, { retry = false } = {}) {
     while (queue.length) {
       const day = queue.shift();
       try {
-        state.historyCache.set(day, { snapshot: await fetchSnapshot(`${HISTORY_URL}/${day}.json`) });
+        state.historyCache.set(day, { snapshot: await fetchArchivedClose(day) });
       } catch (error) {
         console.warn(`The close of ${day} could not be loaded for the history.`, error);
         state.historyCache.set(day, { error: error?.message || "unknown error" });
@@ -1602,9 +1645,17 @@ function renderInspectorHistory(contract) {
   if (group.hidden) return;
 
   const live = !state.renderedDate;
+  const recounted = listed.filter((day) => state.historyCache.get(day)?.snapshot?.published_market_date);
   elements.inspectorHistoryNote.textContent =
     `${contract.symbol} on each archived close up to ${formatDay(referenceDate())}, ` +
-    "newest first, matched by its exact VİOP symbol. Missing values are never filled in.";
+    "newest first, matched by its exact VİOP symbol. Missing values are never filled in." +
+    (recounted.length === 1
+      ? ` Days left and yields on the close of ${formatDay(recounted[0])} are recounted ` +
+        "from its session; it was published counted from the next day."
+      : recounted.length
+        ? ` Days left and yields on the closes of ${[...recounted].sort().map(formatDay).join(", ")} ` +
+          "are recounted from their sessions; each was published counted from the next day."
+        : "");
   elements.historyLoad.hidden = state.historyOpen;
   elements.historyLoad.textContent =
     `Load history · ${countText(listed.length, "archived close", "archived closes")}`;
@@ -2090,6 +2141,11 @@ function boardCsvColumns(data, { carry, compareDate, compareMarket }) {
     {
       name: "days_rolled_forward_from",
       value: () => state.adjustedDay ? state.snapshot.market_date : null,
+      context: true,
+    },
+    {
+      name: "published_market_date",
+      value: () => state.snapshot.published_market_date ?? null,
       context: true,
     },
     side("spot"),
@@ -2823,16 +2879,31 @@ function renderSnapshot(snapshot) {
 // market_date is the session the prices come from, which can be a day before
 // the snapshot was taken (after midnight, at weekends), so the note names the
 // session rather than calling that date the snapshot's.
+// An archived close recounted from its session (see archivedClose) says so too.
 function daysNoteText(snapshot) {
-  return state.adjustedDay
-    ? `Days left and yields adjusted to ${formatDay(state.adjustedDay)}; ` +
-      `prices are from the ${formatDay(snapshot.market_date)} session.`
-    : "";
+  if (state.adjustedDay) {
+    return `Days left and yields adjusted to ${formatDay(state.adjustedDay)}; ` +
+      `prices are from the ${formatDay(snapshot.market_date)} session.`;
+  }
+  return recountNoteText(snapshot);
+}
+
+// How a recounted close was captured and published, or "" for any other.
+function recountNoteText(snapshot) {
+  if (!snapshot?.published_market_date) return "";
+  const captured = new Date(snapshot.generated_at);
+  const capture = Number.isNaN(captured.getTime())
+    ? "This close was captured"
+    : `This close was captured at ${tradeTimeFormat.format(captured)} on ` +
+      formatDay(istanbulToday(captured));
+  return `Days left and yields recounted from the ${formatDay(snapshot.market_date)} session. ` +
+    `${capture} and published counted from ${formatDay(snapshot.published_market_date)}.`;
 }
 
 function renderDaysNote(snapshot) {
-  elements.daysNote.hidden = !state.adjustedDay;
-  elements.daysNote.textContent = daysNoteText(snapshot);
+  const note = daysNoteText(snapshot);
+  elements.daysNote.hidden = !note;
+  elements.daysNote.textContent = note;
 }
 
 async function fetchSnapshot(url, options) {
@@ -3140,8 +3211,7 @@ async function setCompare(date) {
   const request = state.compareRequestId;
   try {
     // Archived closes are written once, so one already fetched is reused.
-    const data = state.historyCache.get(date)?.snapshot ??
-      await fetchSnapshot(`${HISTORY_URL}/${date}.json`);
+    const data = state.historyCache.get(date)?.snapshot ?? await fetchArchivedClose(date);
     if (request !== state.compareRequestId) return;
     state.compareSnapshot = data;
     state.historyCache.set(date, { snapshot: data });
@@ -3347,7 +3417,7 @@ async function loadView(date, { navigate = false, keepSelection = false } = {}) 
   try {
     // Archived closes are written once, so one already fetched is reused.
     const data = date
-      ? state.historyCache.get(date)?.snapshot ?? await fetchSnapshot(`${HISTORY_URL}/${date}.json`)
+      ? state.historyCache.get(date)?.snapshot ?? await fetchArchivedClose(date)
       : await fetchSnapshot(`${DATA_URL}?v=${Date.now()}`, { cache: "no-store" });
     if (request !== state.requestId) return;
     if (date) state.historyCache.set(date, { snapshot: data });

@@ -7,6 +7,8 @@ restating them:
 
 - every `YYYY-MM-DD.json` passes the current snapshot schema;
 - its `generated_at` is an end-of-day snapshot for the day in its file name;
+- its `market_date` is the day in its file name, except the three closes in
+  `LEGACY_NEXT_DAY_CLOSES`;
 - `index.json` exists, parses, and equals `build_manifest()` of the directory;
 - the directory holds nothing else, such as a `*.tmp` left by `write_atomic`.
 
@@ -48,6 +50,18 @@ else:  # run as `python scripts/audit_history.py`
 
 Problem = tuple[str, str]
 
+# Closes archived before archive() checked that a snapshot's market_date is
+# the session it closes (#82). Each was captured after midnight, so its
+# market_date, and the days left and yields counted from it, is the next
+# calendar day. Archived days are write-once, so these stay as written and the
+# dashboard recounts them from their session (archivedClose in app.js). Day
+# file -> its published market_date. Any other misdated close is a problem.
+LEGACY_NEXT_DAY_CLOSES = {
+    "2026-10-26": "2026-10-27",
+    "2026-11-10": "2026-11-11",
+    "2026-11-11": "2026-11-12",
+}
+
 
 def read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
@@ -62,6 +76,17 @@ def audit_day(path: Path, day: str, snapshot: Any) -> list[Problem]:
         problems += [(f"{path}: {where}", reason) for where, reason in exc.problems]
     if not isinstance(snapshot, dict):
         return problems
+    market_date = snapshot.get("market_date")
+    expected_date = LEGACY_NEXT_DAY_CLOSES.get(day, day)
+    if isinstance(market_date, str) and market_date != expected_date:
+        problems.append((
+            str(path),
+            f"market_date {market_date} is not {expected_date}, the market_date "
+            "pinned for this legacy close in LEGACY_NEXT_DAY_CLOSES"
+            if day in LEGACY_NEXT_DAY_CLOSES else
+            f"market_date {market_date} is not {day}, the session it closes, so its "
+            "days left and yields are counted from another day",
+        ))
     try:
         generated_at = parse_generated_at(snapshot.get("generated_at"))
     except ValueError as exc:

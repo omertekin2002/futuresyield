@@ -9,7 +9,7 @@ import unittest
 from unittest import mock
 
 from scripts.archive_snapshot import update_manifest
-from scripts.audit_history import audit, main
+from scripts.audit_history import LEGACY_NEXT_DAY_CLOSES, audit, main
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -34,8 +34,9 @@ class AuditHistoryTests(unittest.TestCase):
         update_manifest(self.history)
 
     def write_day(self, day, **changes):
+        """Write the fixture as day's close, dated to that session unless changed."""
         snapshot = json.loads(FIXTURE.read_text(encoding="utf-8"))
-        snapshot.update(changes)
+        snapshot.update({"market_date": day, **changes})
         path = self.history / f"{day}.json"
         path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n",
                         encoding="utf-8")
@@ -121,6 +122,39 @@ class AuditHistoryTests(unittest.TestCase):
         update_manifest(self.history)
         self.assert_problem(
             self.history / "2026-10-06.json", "is the close of 2026-10-07, not 2026-10-06",
+        )
+
+    def test_close_dated_to_another_session_is_reported(self):
+        # Captured after midnight and dated to the next day, as the three legacy
+        # closes were before archive() checked market_date.
+        self.write_day("2026-10-06", generated_at=CLOSES["2026-10-06"], market_date="2026-10-07")
+        update_manifest(self.history)
+        self.assertEqual(self.problems(), [(
+            str(self.history / "2026-10-06.json"),
+            "market_date 2026-10-07 is not 2026-10-06, the session it closes, so its "
+            "days left and yields are counted from another day",
+        )])
+
+    def test_pinned_legacy_closes_dated_to_the_next_day_pass(self):
+        captured = {
+            "2026-10-26": "2026-10-27T00:45:06+03:00",
+            "2026-11-10": "2026-11-11T02:33:23+03:00",
+            "2026-11-11": "2026-11-12T01:50:08+03:00",
+        }
+        self.assertEqual(sorted(captured), sorted(LEGACY_NEXT_DAY_CLOSES))
+        for day, generated_at in captured.items():
+            self.write_day(day, generated_at=generated_at,
+                           market_date=LEGACY_NEXT_DAY_CLOSES[day])
+        update_manifest(self.history)
+        self.assertEqual(audit(self.history), (sorted([*CLOSES, *captured]), []))
+
+    def test_legacy_close_with_another_market_date_is_reported(self):
+        self.write_day("2026-11-11", generated_at="2026-11-12T01:50:08+03:00",
+                       market_date="2026-11-13")
+        update_manifest(self.history)
+        self.assert_problem(
+            self.history / "2026-11-11.json",
+            "market_date 2026-11-13 is not 2026-11-12", "LEGACY_NEXT_DAY_CLOSES",
         )
 
     def test_renamed_day_file_is_reported(self):

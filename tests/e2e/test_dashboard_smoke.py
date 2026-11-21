@@ -82,6 +82,21 @@ ROLLED_DAY = "2026-07-07"
 # on ROLLED_DAY, and on NO_PRICE_DAY it is listed without a last price.
 HISTORY_SYMBOL = "USDTRYF2028"
 NO_PRICE_DAY = "2026-09-07"
+# A legacy close: this fixture day served as the three closes archived before
+# #82 were written, captured after midnight and counted from the next day.
+MISDATED_DAY = "2026-10-06"
+MISDATED_PUBLISHED = "2026-10-07"
+MISDATED_CAPTURED = "2026-10-07T01:50:00+03:00"
+MISDATED_NOTE = (
+    "Days left and yields recounted from the 06 Oct 2026 session. This close was "
+    "captured at 01:50 on 07 Oct 2026 and published counted from 07 Oct 2026."
+)
+# The contract fields counted from market_date; every other field is as published.
+RECOUNTED_FIELDS = {
+    "days_to_maturity", "annualized_premium_percent", "daily_yield_factor",
+    "daily_yield_percent", "monthly_yield_percent", "annualized_yield_percent",
+    "expected_spot_at_maturity", "expected_short_profit_try",
+}
 SPOT_PRICES = ("last", "open", "high", "low", "change")
 CONTRACT_PRICES = ("last", "bid", "ask", "change", "expected_spot_at_maturity")
 
@@ -119,7 +134,7 @@ STALE_CHARTS = (
 # loaded comparison. "missing" always comes last.
 CSV_COLUMNS = [
     "market", "view", "market_date", "snapshot_generated_at", "days_rolled_forward_from",
-    "spot", "spot_unit", "spot_time", "spot_source",
+    "published_market_date", "spot", "spot_unit", "spot_time", "spot_source",
     "maturity_month", "label", "symbol", "code", "maturity_date", "days_left",
     "last", "change_percent", "bid", "ask", "volume", "last_trade_at", "stale",
     "premium_percent", "yield_1d_percent", "yield_30d_percent", "yield_365d_percent",
@@ -140,7 +155,7 @@ CSV_YIELDS = (
     ("365d", "annualized_yield_percent", 365, "annualized"),
 )
 # Columns that are never a missing value: context, and the reasons themselves.
-CSV_CONTEXT_COLUMNS = ("days_rolled_forward_from", "missing")
+CSV_CONTEXT_COLUMNS = ("days_rolled_forward_from", "published_market_date", "missing")
 # Printing. The content width of an A4 portrait page with the stylesheet's
 # 15 mm margins (210 mm - 30 mm, at 96 px per inch), and of US Letter's.
 A4_CONTENT_WIDTH = 680
@@ -1604,6 +1619,220 @@ class DashboardSmokeTests(unittest.TestCase):
             ((front["last"] / live["spot"]["last"]) ** (1 / 22) - 1) * 100,
             places=9,
         )
+
+    # A legacy close published counted from the next day
+
+    def misdated_close(self, day=MISDATED_DAY):
+        """day's fixture close as a legacy file holds it: captured after midnight,
+        dated to the next day, and every time-dependent value counted from it."""
+        published = copy.deepcopy(self.history[day])
+        published["generated_at"] = MISDATED_CAPTURED
+        published["market_date"] = MISDATED_PUBLISHED
+        for market in published["markets"].values():
+            spot = market["spot"]["last"]
+            trend = (market.get("spot_trend") or {}).get("daily_factor")
+            for contract in market["contracts"]:
+                contract["days_to_maturity"] -= 1
+                days = contract["days_to_maturity"]
+                set_yields(contract, spot)
+                premium = contract.get("premium_percent")
+                contract["annualized_premium_percent"] = (
+                    premium * 365 / days if premium is not None and days > 0 else None
+                )
+                if isinstance(market.get("contract_size"), (int, float)) and trend:
+                    contract["expected_spot_at_maturity"] = spot * trend ** days
+        return published
+
+    def serve_misdated(self, published=None):
+        published = published or self.misdated_close()
+        self.serve_snapshot(re.compile(rf"/data/history/{MISDATED_DAY}\.json"), published)
+        return published
+
+    def assert_recount_note(self, shown, inspector=False):
+        """The days note, and with inspector the inspector's, say a close was recounted."""
+        for note in ("#days-note", "#inspector-note") if inspector else ("#days-note",):
+            locator = self.page.locator(note)
+            if shown:
+                expect(locator).to_be_visible()
+                expect(locator).to_have_text(MISDATED_NOTE)
+            else:
+                expect(locator).to_be_hidden()
+
+    def test_close_published_from_the_next_day_is_recounted_from_its_session(self):
+        published = self.serve_misdated()
+        session = self.history[MISDATED_DAY]["markets"]["USDTRY"]
+        self.open_day(MISDATED_DAY, "&market=USDTRY")
+        expect(self.page.locator("#market-date")).to_have_text(HISTORY_LABELS[MISDATED_DAY])
+        expect(self.page.locator("#updated-at")).to_have_text("07 Oct, 01:50 TRT")
+        self.assert_recount_note(True)
+
+        # Days and yields count from 6 Oct again; the published file's were a day short.
+        days = [c["days_to_maturity"] for c in session["contracts"]]
+        self.assertEqual(
+            days,
+            [c["days_to_maturity"] + 1 for c in published["markets"]["USDTRY"]["contracts"]],
+        )
+        self.assertEqual(self.column("#contract-rows", "Days left"), [str(d) for d in days])
+        self.assertEqual(self.column("#carry-rows", "Days left"), [str(d) for d in days])
+        for label, field, _, digits in YIELD_COLUMNS:
+            with self.subTest(column=label):
+                for text, contract in zip(self.column("#contract-rows", label), session["contracts"]):
+                    self.assertAlmostEqual(self.number(text), contract[field], delta=10 ** -digits)
+        spot, trend = session["spot"]["last"], session["spot_trend"]["daily_factor"]
+        for text, d in zip(self.column("#carry-rows", "Exp. spot at maturity"), days):
+            self.assertAlmostEqual(self.number(text), spot * trend ** d, delta=1e-4)
+
+        # The inspector counts from the session and repeats the note.
+        self.select_button("Oct 2026").click()
+        self.assert_recount_note(True, inspector=True)
+        items = self.inspector()
+        self.assertEqual(items["days"]["value"], str(session["contracts"][0]["days_to_maturity"]))
+        self.assertEqual(items["days"]["detail"], "Calendar days from 06 Oct 2026, recounted")
+
+        # Only days left and the values built on them differ from the file.
+        shown = self.page.evaluate("() => state.snapshot")
+        self.assertEqual(shown.pop("market_date"), MISDATED_DAY)
+        self.assertEqual(shown.pop("published_market_date"), MISDATED_PUBLISHED)
+        expected = copy.deepcopy(published)
+        expected.pop("market_date")
+        for key, market in shown["markets"].items():
+            file_market = expected["markets"][key]
+            self.assertEqual(
+                [c["symbol"] for c in market["contracts"]],
+                [c["symbol"] for c in file_market["contracts"]],
+            )
+            for contract in market["contracts"] + file_market["contracts"]:
+                for field in RECOUNTED_FIELDS:
+                    contract.pop(field, None)
+        self.assertEqual(shown, expected)
+
+    def test_recounted_close_keeps_a_zero_day_contract_without_a_yield(self):
+        published = self.misdated_close()
+        # A contract maturing on the session day: published at -1 days.
+        contract = published["markets"]["USDTRY"]["contracts"][0]
+        contract["maturity_date"] = MISDATED_DAY
+        contract["days_to_maturity"] = -1
+        set_yields(contract, published["markets"]["USDTRY"]["spot"]["last"])
+        self.serve_misdated(published)
+        self.open_day(MISDATED_DAY, "&market=USDTRY")
+        self.assert_recount_note(True)
+        expect(self.page.locator("#contract-rows > tr")).to_have_count(
+            len(published["markets"]["USDTRY"]["contracts"])
+        )
+        self.assertEqual(self.column("#contract-rows", "Days left")[0], "0")
+        for label, *_ in YIELD_COLUMNS:
+            self.assertEqual(self.column("#contract-rows", label)[0], "—")
+
+    def test_close_dated_to_its_session_shows_no_recount_note(self):
+        self.serve_misdated()
+        day = "2026-10-05"
+        self.open_day(day, "&market=USDTRY")
+        expect(self.page.locator("#market-date")).to_have_text(HISTORY_LABELS[day])
+        self.select_button("Oct 2026").click()
+        self.assert_recount_note(False, inspector=True)
+        self.assertEqual(self.inspector()["days"]["detail"], f"Calendar days from {HISTORY_LABELS[day]}")
+        self.assertNotIn("published_market_date", self.page.evaluate("() => state.snapshot"))
+        self.assertEqual(
+            self.column("#contract-rows", "Days left"),
+            [str(c["days_to_maturity"]) for c in self.history[day]["markets"]["USDTRY"]["contracts"]],
+        )
+        rows = self.csv_rows(self.download_csv()[2])
+        self.assertEqual({row["published_market_date"] for row in rows}, {""})
+
+    def test_comparison_with_a_recounted_close_counts_from_its_session(self):
+        self.serve_misdated()
+        self.open_dashboard(f"?compare={MISDATED_DAY}&market=USDTRY")
+        self.assert_comparing(MISDATED_DAY)
+        self.assert_note(None)
+        self.select_button("Oct 2026").click()
+        rows = self.comparison()
+        # 7 Oct live against 6 Oct: one day less to maturity, not none.
+        self.assertEqual(rows["days"]["change"], "-1 day")
+        self.assertEqual(rows["date"]["change"], "1 calendar day apart")
+        self.assertEqual(rows["date"]["current"]["detail"], "")
+        self.assertEqual(
+            rows["date"]["compared"]["detail"],
+            "Days left from 06 Oct 2026, recounted; published from 07 Oct 2026",
+        )
+        expect(self.page.locator("#inspector-compare-note")).to_have_text(
+            f"Change is the day on screen minus the close of {HISTORY_LABELS[MISDATED_DAY]}, "
+            "whose values are shown as that close stored them, with days left and yields "
+            "recounted from its session."
+        )
+        session = self.history[MISDATED_DAY]["markets"]["USDTRY"]
+        past = {c["label"]: c["daily_yield_percent"] for c in session["contracts"]}
+        for point in self.chart_points("yieldChartPoints"):
+            if point["compare"] is not None:
+                self.assertAlmostEqual(point["compare"], past[point["label"]], places=9)
+
+        # Every contract listed on both days is one day nearer maturity.
+        table = self.csv_rows(self.download_csv()[2])
+        self.assertTrue(table)
+        for row in table:
+            if row["compare_days_left"]:
+                self.assertEqual(row["delta_days_left"], "-1")
+
+    def test_recounted_close_on_screen_says_so_in_the_comparison(self):
+        self.serve_misdated()
+        compared = "2026-10-05"
+        self.open_day(MISDATED_DAY, f"&compare={compared}&market=USDTRY")
+        self.assert_comparing(compared, HISTORY_LABELS[MISDATED_DAY])
+        self.select_button("Oct 2026").click()
+        rows = self.comparison()
+        self.assertEqual(rows["days"]["change"], "-1 day")
+        self.assertEqual(
+            rows["date"]["current"]["detail"],
+            "Days left from 06 Oct 2026, recounted; published from 07 Oct 2026",
+        )
+        self.assertEqual(rows["date"]["compared"]["detail"], "")
+        expect(self.page.locator("#inspector-compare-note")).to_have_text(
+            f"Change is the day on screen minus the close of {HISTORY_LABELS[compared]}, "
+            "whose values are shown as that close stored them."
+        )
+
+    def test_history_shows_a_recounted_close_from_its_session(self):
+        self.serve_misdated()
+        self.open_dashboard("?market=USDTRY")
+        self.select_button("Jan 2028").click()
+        self.load_history(len(HISTORY_FIXTURE))
+        market, contract = self.history_symbol_on(MISDATED_DAY)
+        row = next(r for r in self.history_rows() if r["day"] == MISDATED_DAY)
+        self.assertEqual(row["cells"][:4], self.expected_history_row(market, contract))
+        expect(self.page.locator("#inspector-history-note")).to_contain_text(
+            "Days left and yields on the close of 06 Oct 2026 are recounted from its "
+            "session; it was published counted from the next day."
+        )
+        point = next(
+            p for p in self.page.evaluate("() => state.historyChart.rows")
+            if p.get("day") == MISDATED_DAY
+        )
+        self.assertEqual(point["contract"]["days_to_maturity"], contract["days_to_maturity"])
+
+    def test_csv_of_a_recounted_close_counts_from_its_session(self):
+        self.serve_misdated()
+        self.open_day(MISDATED_DAY, "&market=USDTRY")
+        name, raw, table = self.download_csv()
+        self.assertEqual(name, f"vade-USDTRY-{MISDATED_DAY}.csv")
+        self.assert_csv_format(raw, table)
+        self.assertEqual(table[0][:len(CSV_COLUMNS)], CSV_COLUMNS)
+        rows = self.csv_rows(table)
+        self.assert_missing_is_explained(rows)
+        session = self.history[MISDATED_DAY]["markets"]["USDTRY"]["contracts"]
+        self.assertEqual(len(rows), len(session))
+        for row, contract in zip(rows, session):
+            with self.subTest(maturity=row["maturity_month"]):
+                self.assertEqual(row["view"], "close")
+                self.assertEqual(row["market_date"], MISDATED_DAY)
+                self.assertEqual(row["published_market_date"], MISDATED_PUBLISHED)
+                self.assertEqual(row["days_rolled_forward_from"], "")
+                self.assertEqual(row["snapshot_generated_at"], MISDATED_CAPTURED)
+                self.assertEqual(row["days_left"], str(contract["days_to_maturity"]))
+                for column, field, _, _ in CSV_YIELDS:
+                    value = row[f"yield_{column}_percent"]
+                    if contract[field] is None:
+                        self.assertEqual(value, "")
+                    else:
+                        self.assertAlmostEqual(float(value), contract[field], places=9)
 
     # Keyboard access to the chart points
 
@@ -6233,6 +6462,37 @@ class RealArchiveSmokeTests(unittest.TestCase):
                     ).filter(has_text=FORMATTED_NUMBER)
                     expect(priced.first).to_be_visible()
                     self.assertEqual(self.errors, [], "page logged errors")
+
+    def test_every_archived_close_counts_from_its_own_session(self):
+        # A legacy close published counted from the next day is recounted and
+        # says so; every other close is shown as published, with no note.
+        page = self.page
+        for day, snapshot in self.days.items():
+            key = snapshot["default_market"]
+            contracts = snapshot["markets"][key]["contracts"]
+            with self.subTest(day=day):
+                page.goto(f"{self.base_url}?date={day}&market={key}")
+                expect(page.locator("#history-select")).to_have_value(day)
+                label = date.fromisoformat(day).strftime("%d %b %Y").replace(" Sep ", " Sept ")
+                expect(page.locator("#market-date")).to_have_text(label)
+                cells = page.locator('#contract-rows td[data-label="Days left"]')
+                expect(cells).to_have_count(len(contracts))
+                self.assertEqual(
+                    [text.strip() for text in cells.all_inner_texts()],
+                    [
+                        str((date.fromisoformat(c["maturity_date"]) - date.fromisoformat(day)).days)
+                        for c in contracts
+                    ],
+                )
+                note = page.locator("#days-note")
+                if snapshot["market_date"] == day:
+                    expect(note).to_be_hidden()
+                else:
+                    expect(note).to_be_visible()
+                    expect(note).to_contain_text(
+                        f"Days left and yields recounted from the {label} session."
+                    )
+        self.assertEqual(self.errors, [], "page logged errors")
 
 
 if __name__ == "__main__":

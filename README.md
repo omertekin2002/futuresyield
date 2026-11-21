@@ -127,7 +127,9 @@ today shows 0 days and no yield, and a contract that has matured is dropped.
 Prices, premiums and the spot trend stay as published. A note under the data
 status says so, for example "Days left and yields adjusted to 08 Oct 2026;
 prices are from the 07 Oct 2026 session". Archived closes and comparison
-overlays always keep their stored values, since each describes its own day.
+overlays always keep their stored values, since each describes its own day;
+the only exception is the three legacy closes counted from the next day, which
+are recounted from their own session (see **Dated to its session** below).
 
 ### USD/TRY short carry
 
@@ -170,9 +172,20 @@ end-of-day snapshot per VİOP trading day on a separate `data-history` branch.
   captured after midnight or at a weekend. `archive()` skips, with a `Skipped:`
   line, a snapshot whose `market_date` is not the session its `generated_at`
   closes; the live site still deploys. Three closes archived before this rule
-  (26 Oct, 10 Nov and 11 Nov 2026, each captured after midnight) count their
-  days from the next calendar day. Archived days are write-once, so they stay
-  as they are.
+  (26 Oct, 10 Nov and 11 Nov 2026, each captured after midnight) were published
+  with the next calendar day as `market_date`, so their files count days left
+  and yields from that day. Archived days are write-once, so the files stay as
+  they are. The dashboard instead recounts each such close from its own
+  session when it loads it, with the same rules as the live roll forward: days
+  left from the session, the annualized premium, the daily factor and
+  1D/30D/365D yields, and the USD/TRY expected spot and profit. Prices,
+  bid/ask, spot, premium, spot trend, timestamps and the contract list stay as
+  published. The view, the Comparison table, the History table and chart, the
+  overlays and the CSV all use the recounted values, and the view says so, for
+  example "Days left and yields recounted from the 11 Nov 2026 session. This
+  close was captured at 01:50 on 12 Nov 2026 and published counted from
+  12 Nov 2026." The audit pins the three in `LEGACY_NEXT_DAY_CLOSES` and fails
+  on any other close whose `market_date` isn't its file's day.
 - **Half days.** A half-day holiday is still a trading day, but its only session
   ends at 12:40 and it has no evening session, so snapshots from 12:55 onward
   count as that day. On the year's last trading day the evening session is not
@@ -186,7 +199,8 @@ end-of-day snapshot per VİOP trading day on a separate `data-history` branch.
   usual load error.
 - **Audited in CI.** Every CI run checks the real `data-history` archive
   read-only: `python -m scripts.audit_history <history-dir>` fails if a close
-  breaks the current schema or end-of-day rule, if `index.json` no longer
+  breaks the current schema or end-of-day rule, if its `market_date` isn't its
+  file's day (outside the three pinned legacy closes), if `index.json` no longer
   matches its files, or if anything else is in the directory. The smoke test
   then opens every archived close in a headless browser when
   `VADE_ARCHIVE_DIR` points at that directory. A change that would strand
@@ -372,8 +386,9 @@ example `vade-USDTRY-2026-10-07-vs-2026-09-30.csv`.
   `on 2026-09-30: no bid` (a value missing on the compared close) or
   `not listed on 2026-09-30`. Reasons are separated by `; ` and each is listed
   once. `missing` is empty when the row has every value.
-  `days_rolled_forward_from` is context, not a value, so it is empty without a
-  reason when nothing was rolled forward.
+  `days_rolled_forward_from` and `published_market_date` are context, not
+  values, so they are empty without a reason when nothing was rolled forward
+  or recounted.
 
 Prices and spot are in the market's `spot_unit` (TRY per USD, per EUR or per
 gram). Times are ISO 8601 with an offset, as the snapshot stores them.
@@ -385,6 +400,7 @@ gram). Times are ISO 8601 with an offset, as the snapshot stores them.
 | `market_date` | The day the values describe, `YYYY-MM-DD`, after any roll forward |
 | `snapshot_generated_at` | When the snapshot on screen was generated |
 | `days_rolled_forward_from` | The live snapshot's own `market_date` when its days left and yields were rolled forward to `market_date`; empty otherwise |
+| `published_market_date` | An archived close's published `market_date` when it was published counted from the next day and its days left and yields were recounted from its session, `market_date`; empty otherwise |
 | `spot`, `spot_unit` | Spot reference and its unit |
 | `spot_time`, `spot_source` | When the spot reference was taken, and its source |
 | `maturity_month` | Maturity month, `YYYY-MM`, as in `?maturity=` |
@@ -416,7 +432,8 @@ carry table, and left out for EUR/TRY and XAU/TRY. The `compare_*` and
 `delta_*` columns are present only while a comparison is loaded, and left out
 otherwise. Every change is the day on screen minus the compared close, exactly
 as the inspector's **Comparison** table computes it, and the compared close
-keeps its stored values; it is never rolled forward.
+keeps its stored values; it is never rolled forward. A legacy close published
+counted from the next day is recounted from its session on either side.
 
 The expected spot and profit are a projection from the recent spot trend, not a
 forecast, and nothing in the file is investment advice.
@@ -584,7 +601,9 @@ unusual point can be checked without reading across the board:
   next to the repricing. Each change is the day on screen minus the compared
   close, as in the chart tooltips, and Δ yield equals the tooltip's. The
   compared contract is matched by maturity month, as on the charts, and keeps
-  the values its own snapshot stored: it is never rolled forward. A maturity
+  the values its own snapshot stored: it is never rolled forward. A legacy
+  close published counted from the next day is recounted from its session,
+  and the Date row says so on its side. A maturity
   that wasn't listed yet on the compared close says "Not listed on" that date
   and shows no changes. A side without a price or a yield shows "—" with the
   same reason as above, and that row's change is "—". Only observed values
@@ -653,7 +672,8 @@ Every value is the one the board, the carry table and the chart tooltips show.
 Nothing missing is filled in: without a bid there is no profit, a contract
 maturing today has no daily factor or yield, and each says why. When the live
 snapshot has been rolled forward to a later Istanbul day, the inspector shows
-the adjusted days left and yields and repeats the note saying so. It updates in
+the adjusted days left and yields and repeats the note saying so; a legacy
+close recounted from its session does the same. It updates in
 place on the one-minute refresh, on yield-period switches and when the
 comparison changes, and hides with the selection.
 
