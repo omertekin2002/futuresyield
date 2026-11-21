@@ -514,7 +514,8 @@ const FIRST_REFRESH_MINUTE = 9 * 60 + 20;
 const LAST_REFRESH_MINUTE = 23 * 60 + 20;
 const FRESH_MINUTES = 90;
 const MINUTE_MS = 60_000;
-const DAY_MS = 24 * 60 * MINUTE_MS;
+const HOUR_MS = 60 * MINUTE_MS;
+const DAY_MS = 24 * HOUR_MS;
 
 function isWeekday(wallClock) {
   const day = new Date(wallClock).getUTCDay();
@@ -599,10 +600,32 @@ function rollSnapshotForward(snapshot, today) {
   return rolled;
 }
 
+const STATUS_CLASSES = ["is-fresh", "is-delayed", "is-closed", "is-error", "is-historical"];
+
+// The status pill is a polite live region, so it is only written when its
+// state or wording changes: an unchanged poll announces nothing.
 function setStatus(className, text) {
-  elements.dataState.classList.remove("is-fresh", "is-delayed", "is-closed", "is-error", "is-historical");
-  elements.dataState.classList.add(className);
-  elements.dataState.lastChild.textContent = ` ${text}`;
+  const pill = elements.dataState;
+  const label = ` ${text}`;
+  const current = STATUS_CLASSES.filter((name) => pill.classList.contains(name));
+  if (current.length === 1 && current[0] === className && pill.lastChild.textContent === label) {
+    return;
+  }
+  pill.classList.remove(...STATUS_CLASSES.filter((name) => name !== className));
+  pill.classList.add(className);
+  pill.lastChild.textContent = label;
+}
+
+// How old a delayed snapshot is, rounded down: whole hours under two days,
+// then whole days. Delayed always means over 90 minutes, so never minutes.
+function snapshotAge(generated, now = Date.now()) {
+  const age = now - generated.getTime();
+  if (age < 2 * DAY_MS) return `${Math.floor(age / HOUR_MS)} h old`;
+  return `${Math.floor(age / DAY_MS)} days old`;
+}
+
+function snapshotTime(generatedAt) {
+  return `${dateTimeFormat.format(new Date(generatedAt))} TRT`;
 }
 
 function updateStatus(generatedAt) {
@@ -615,10 +638,12 @@ function updateStatus(generatedAt) {
   if (status === "fresh") {
     setStatus("is-fresh", "Latest snapshot");
   } else if (status === "closed") {
-    setStatus("is-closed", `Market closed · snapshot ${dateTimeFormat.format(generated)} TRT`);
+    setStatus("is-closed", `Market closed · snapshot ${snapshotTime(generated)}`);
   } else {
-    const minutesOld = Math.floor((Date.now() - generated.getTime()) / MINUTE_MS);
-    setStatus("is-delayed", `Update delayed · ${minutesOld}m old`);
+    setStatus(
+      "is-delayed",
+      `Update delayed · snapshot ${snapshotTime(generated)} · ${snapshotAge(generated)}`,
+    );
   }
 }
 
@@ -3349,11 +3374,15 @@ async function loadView(date, { navigate = false, keepSelection = false } = {}) 
         "Live data is unavailable. Still showing the close of " +
         `${formatDay(state.renderedDate)}.`,
       );
+    } else if (state.snapshot) {
+      // The live numbers on screen stay; say which snapshot they are.
+      setStatus(
+        "is-error",
+        `Live data unavailable · showing snapshot ${snapshotTime(state.snapshot.generated_at)}`,
+      );
     } else {
       setStatus("is-error", "Data unavailable");
-      if (!state.snapshot) {
-        elements.rows.innerHTML = '<tr class="empty-row"><td colspan="11">The market snapshot could not be loaded. Try refreshing shortly.</td></tr>';
-      }
+      elements.rows.innerHTML = '<tr class="empty-row"><td colspan="11">The market snapshot could not be loaded. Try refreshing shortly.</td></tr>';
     }
   } finally {
     if (request === state.requestId) {

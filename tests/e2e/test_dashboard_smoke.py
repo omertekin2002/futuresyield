@@ -247,6 +247,12 @@ def build_site(destination, history_dir):
     shutil.copyfile(FIXTURE, destination / "data" / "market.json")
 
 
+def delayed_status(generated_at, age):
+    """The delayed pill for a snapshot generated at generated_at (or the fixture's)."""
+    generated = datetime.fromisoformat(generated_at or "2026-10-07T14:06:12+03:00")
+    return f"Update delayed · snapshot {generated.strftime('%d %b, %H:%M')} TRT · {age}"
+
+
 class QuietHandler(SimpleHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
@@ -440,8 +446,11 @@ class DashboardSmokeTests(unittest.TestCase):
         for now, state, text in (
             ("2026-10-07T14:30:00+03:00", "is-fresh", "Latest snapshot"),
             ("2026-10-07T15:36:12+03:00", "is-fresh", "Latest snapshot"),
-            ("2026-10-07T15:40:00+03:00", "is-delayed", "Update delayed · 93m old"),
-            ("2026-10-07T23:20:00+03:00", "is-delayed", "Update delayed · 553m old"),
+            # 93 minutes and 9 h 13 min old.
+            ("2026-10-07T15:40:00+03:00", "is-delayed",
+             "Update delayed · snapshot 07 Oct, 14:06 TRT · 1 h old"),
+            ("2026-10-07T23:20:00+03:00", "is-delayed",
+             "Update delayed · snapshot 07 Oct, 14:06 TRT · 9 h old"),
         ):
             with self.subTest(now=now):
                 self.open_live_at(now)
@@ -463,15 +472,31 @@ class DashboardSmokeTests(unittest.TestCase):
                 self.assert_status("is-closed", f"Market closed · snapshot {label} TRT")
 
     def test_status_after_hours_still_flags_a_missed_last_refresh(self):
-        for now, generated_at, minutes in (
-            ("2026-10-10T12:00:00+03:00", None, 4193),  # Saturday, Wednesday's snapshot
-            ("2026-10-10T12:00:00+03:00", "2026-10-09T21:49:59+03:00", 850),
-            ("2026-10-08T02:00:00+03:00", None, 713),  # weeknight, afternoon snapshot
-            ("2026-10-12T09:20:00+03:00", "2026-10-09T23:20:00+03:00", 3480),  # window opens
+        for now, generated_at, age in (
+            # Saturday, Wednesday's snapshot: 69 h 53 min.
+            ("2026-10-10T12:00:00+03:00", None, "2 days old"),
+            # 14 h 10 min.
+            ("2026-10-10T12:00:00+03:00", "2026-10-09T21:49:59+03:00", "14 h old"),
+            # Weeknight, afternoon snapshot: 11 h 53 min.
+            ("2026-10-08T02:00:00+03:00", None, "11 h old"),
+            # Monday's window opens on Friday night's snapshot: 58 h.
+            ("2026-10-12T09:20:00+03:00", "2026-10-09T23:20:00+03:00", "2 days old"),
         ):
             with self.subTest(now=now, generated_at=generated_at):
                 self.open_live_at(now, generated_at)
-                self.assert_status("is-delayed", f"Update delayed · {minutes}m old")
+                self.assert_status("is-delayed", delayed_status(generated_at, age))
+
+    def test_delayed_age_is_in_hours_under_two_days_then_in_days(self):
+        # Hours and days are both rounded down; 48 h is the switch.
+        for now, generated_at, age in (
+            ("2026-10-10T11:59:00+03:00", "2026-10-08T12:00:00+03:00", "47 h old"),
+            ("2026-10-10T12:00:00+03:00", "2026-10-08T12:00:00+03:00", "2 days old"),
+            # A trigger offline for three days, inside the refresh window.
+            ("2026-11-13T12:00:00+03:00", "2026-11-10T09:00:00+03:00", "3 days old"),
+        ):
+            with self.subTest(now=now):
+                self.open_live_at(now, generated_at)
+                self.assert_status("is-delayed", delayed_status(generated_at, age))
 
     def test_status_window_uses_istanbul_time(self):
         # 06:00 UTC on Saturday is 09:00 in Istanbul but still Friday 23:00 in
@@ -482,11 +507,128 @@ class DashboardSmokeTests(unittest.TestCase):
              "2026-10-09T22:50:00+03:00", "is-closed",
              "Market closed · snapshot 09 Oct, 22:50 TRT"),
             ("2026-10-09T10:30:00+00:00", "Pacific/Kiritimati",
-             "2026-10-08T22:50:00+03:00", "is-delayed", "Update delayed · 880m old"),
+             "2026-10-08T22:50:00+03:00", "is-delayed",
+             "Update delayed · snapshot 08 Oct, 22:50 TRT · 14 h old"),
         ):
             with self.subTest(zone=zone):
                 self.open_live_at(now, generated_at, zone)
                 self.assert_status(state, text)
+
+    # A live poll that fails, and polls that change nothing
+
+    def route_live_snapshot(self):
+        """Serve the live snapshot as control["mode"] says: "pass" or "bad".
+
+        "bad" serves an unsupported schema version, which the page rejects.
+        """
+        control = {"mode": "pass"}
+        bad = copy.deepcopy(self.snapshot)
+        bad["schema_version"] = 5
+
+        def handle(route):
+            if control["mode"] == "pass":
+                route.fallback()
+            else:
+                route.fulfill(status=200, content_type="application/json", body=json.dumps(bad))
+
+        self.page.route(re.compile(r"/data/market\.json"), handle)
+        return control
+
+    def poll(self):
+        """Run the clock to the next live poll and wait for it to render rows."""
+        self.page.evaluate("() => { document.querySelector('#contract-rows tr').__old = true; }")
+        self.page.clock.run_for("01:01")
+        self.page.wait_for_function(
+            "() => !document.querySelector('#contract-rows tr').__old"
+        )
+
+    def failed_poll(self):
+        """Run the clock to the next live poll and wait for it to fail."""
+        self.page.clock.run_for("01:01")
+        expect(self.page.locator("#data-state")).to_have_class(re.compile(r"\bis-error\b"))
+
+    def open_with_live_route(self, **options):
+        """Open live data on fake timers, with its snapshot behind a switch."""
+        if options:
+            self.reopen_at(FIXTURE_DAY_TIME, **options)
+        control = self.route_live_snapshot()
+        self.page.clock.install(time=FIXTURE_DAY_TIME)
+        self.open_dashboard()
+        self.assert_status("is-delayed", delayed_status(None, "8 h old"))
+        return control
+
+    UNAVAILABLE_STATUS = "Live data unavailable · showing snapshot 07 Oct, 14:06 TRT"
+
+    def test_a_failed_live_poll_names_the_snapshot_still_on_screen(self):
+        control = self.open_with_live_route()
+        control["mode"] = "bad"
+        self.failed_poll()
+        self.assert_status("is-error", self.UNAVAILABLE_STATUS)
+        # The live numbers stay on screen.
+        self.assert_market(self.snapshot["default_market"])
+        expect(self.page.locator("#contract-rows")).not_to_contain_text("could not be loaded")
+        self.expect_load_errors(1)
+
+        # A poll that fails again changes nothing.
+        self.failed_poll()
+        self.page.wait_for_function(
+            "() => !document.querySelector('#refresh-button').disabled"
+        )
+        self.assert_status("is-error", self.UNAVAILABLE_STATUS)
+        self.expect_load_errors(1)
+
+        # The next good poll shows the normal status again.
+        control["mode"] = "pass"
+        self.poll()
+        self.assert_status("is-delayed", delayed_status(None, "8 h old"))
+
+    def test_a_failed_first_load_still_says_data_unavailable(self):
+        control = self.route_live_snapshot()
+        control["mode"] = "bad"
+        self.page.goto(self.base_url)
+        self.assert_status("is-error", "Data unavailable")
+        expect(self.page.locator("#contract-rows")).to_contain_text("could not be loaded")
+        self.expect_load_errors(1)
+
+    def test_a_poll_that_changes_nothing_leaves_the_status_alone(self):
+        # The status is a polite live region: rewriting it, even with the same
+        # words, can make a screen reader announce it again.
+        control = self.open_with_live_route()
+        self.page.evaluate(
+            """() => {
+              window.__statusMutations = 0;
+              new MutationObserver((records) => {
+                window.__statusMutations += records.length;
+              }).observe(document.querySelector('#data-state'), {
+                attributes: true, characterData: true, childList: true, subtree: true,
+              });
+            }"""
+        )
+        # 8 h 53 min, then 8 h 54 min and 8 h 55 min old: still "8 h old".
+        for _ in range(2):
+            self.poll()
+            self.assertEqual(self.page.evaluate("() => window.__statusMutations"), 0)
+        self.assert_status("is-delayed", delayed_status(None, "8 h old"))
+
+        # The observer does see a real change.
+        control["mode"] = "bad"
+        self.failed_poll()
+        self.assertGreater(self.page.evaluate("() => window.__statusMutations"), 0)
+        self.expect_load_errors(1)
+
+    @unittest.skipIf(Axe is None, "axe-playwright-python is not installed")
+    def test_accessibility_and_layout_of_the_delayed_and_unavailable_status(self):
+        for viewport in NARROW_VIEWPORTS + (MOBILE_VIEWPORT,):
+            with self.subTest(viewport=viewport):
+                control = self.open_with_live_route(viewport=viewport)
+                self.assert_no_sideways_scroll()
+                self.assert_accessible(f"delayed status at {viewport['width']}px")
+                control["mode"] = "bad"
+                self.failed_poll()
+                self.assert_status("is-error", self.UNAVAILABLE_STATUS)
+                self.assert_no_sideways_scroll()
+                self.assert_accessible(f"unavailable status at {viewport['width']}px")
+                self.expect_load_errors(1)
 
     def test_each_market_via_query(self):
         for key in self.snapshot["market_order"]:
