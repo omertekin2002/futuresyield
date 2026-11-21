@@ -3401,8 +3401,9 @@ function setHistoryDays(days) {
 // the user asked to move to it, so it gets its own history entry once it is
 // on screen (see beginNavigation). With keepSelection, the maturity selected
 // when it renders is kept as a link's would be, with a notice if that close
-// doesn't list it. Resolves true once the view is on screen, false if it
-// failed, or undefined if a later load took over.
+// doesn't list it; one still waiting to apply, as a link's does until a view
+// first renders, is kept instead. Resolves true once the view is on screen,
+// false if it failed, or undefined if a later load took over.
 async function loadView(date, { navigate = false, keepSelection = false } = {}) {
   if (navigate) {
     beginNavigation();
@@ -3427,7 +3428,11 @@ async function loadView(date, { navigate = false, keepSelection = false } = {}) 
     state.renderedDate = date;
     state.adjustedDay = shown === data ? null : today;
     // Read now, not when the load began, so a choice made meanwhile counts.
-    if (keepSelection) state.requestedMaturity = state.selectedKey;
+    // A maturity still waiting to apply, such as a link's when no view has
+    // rendered yet, is kept: there has been nothing on screen to choose from.
+    if (keepSelection && state.requestedMaturity === null) {
+      state.requestedMaturity = state.selectedKey;
+    }
     renderSnapshot(shown);
     reached = true;
   } catch (error) {

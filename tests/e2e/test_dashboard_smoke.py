@@ -3978,6 +3978,75 @@ class DashboardSmokeTests(unittest.TestCase):
                 expect(self.page.locator("#history-notice")).to_be_hidden()
                 self.take_index_errors(1)
 
+    def route_first_live_snapshot(self, mode, bad):
+        """Answer the live snapshot as control["mode"] says: "bad", "hold" or "pass"."""
+        control, held = {"mode": mode}, []
+
+        def handle(route):
+            if control["mode"] == "hold":
+                held.append(route)
+            elif control["mode"] == "bad":
+                route.fulfill(status=200, content_type="application/json", body=json.dumps(bad))
+            else:
+                route.fallback()
+
+        self.page.route(re.compile(r"/data/market\.json"), handle)
+        return control, held
+
+    def test_a_waiting_close_selects_the_links_maturity_before_any_view_has_rendered(self):
+        # The index becomes readable, here as the tab comes back, while the
+        # first live snapshot has failed or is still loading: nothing has been
+        # on screen to choose from, so the link's own maturity still applies.
+        day = self.PENDING_DAY
+        bad = copy.deepcopy(self.snapshot)
+        bad["schema_version"] = 5
+        for live in ("bad", "hold"):
+            with self.subTest(live=live):
+                self.reopen_at(FIXTURE_DAY_TIME)
+                control = self.route_history_index()
+                control["mode"] = "500"
+                live_control, held = self.route_first_live_snapshot(live, bad)
+                self.page.clock.install(time=FIXTURE_DAY_TIME)
+                self.page.goto(f"{self.base_url}?date={day}&market=USDTRY&maturity=2028-01")
+                self.index_read_settled()
+                if live == "bad":
+                    self.assert_status("is-error", "Data unavailable")
+                else:
+                    for _ in range(200):
+                        if held:
+                            break
+                        self.page.evaluate("() => 0")
+                    self.assertEqual(len(held), 1)
+                self.assertIsNone(self.page.evaluate("() => state.snapshot"))
+                expect(self.page.locator("#history-notice")).to_contain_text(
+                    "The archive could not be read"
+                )
+
+                control["mode"] = "pass"
+                self.show_tab()
+                self.assert_historical(day)
+                self.assert_market("USDTRY", self.history[day])
+                self.assert_selected("Jan 2028")
+                self.assertEqual(
+                    self.url_params(), {"date": day, "market": "USDTRY", "maturity": "2028-01"}
+                )
+                self.assertIsNone(self.page.evaluate("() => state.requestedMaturity"))
+                expect(self.page.locator("#history-notice")).to_be_hidden()
+
+                if live == "hold":
+                    # The live snapshot that finally arrives is not drawn over the close.
+                    live_control["mode"] = "pass"
+                    with self.page.expect_response(re.compile(r"/data/market\.json")):
+                        held[0].fallback()
+                    self.page.evaluate(
+                        "() => fetch('data/market.json').then((response) => response.json())"
+                    )
+                    self.assert_historical(day)
+                    self.assert_selected("Jan 2028")
+                else:
+                    self.expect_load_errors(1)
+                self.take_index_errors(1)
+
     def test_a_move_made_while_the_waiting_close_loads_cancels_it(self):
         day, waiting_compare, compare = self.PENDING_DAY, "2026-09-30", "2026-10-05"
         # Refresh is disabled while any view loads, so these are the moves left.
