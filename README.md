@@ -72,6 +72,16 @@ or later) shows a neutral **Market closed** with its time; an older one still
 shows **Update delayed**, so a dead trigger stays visible. Weekday public
 holidays need no special case, because the timer still fires on them.
 
+**Update delayed** names the snapshot's time and its age, rounded down to whole
+hours under two days and to whole days after that, for example
+`Update delayed · snapshot 07 Oct, 14:06 TRT · 2 days old`. If a live poll fails
+while live data is on screen, the numbers stay and the status says which
+snapshot they are, as `Live data unavailable · showing snapshot 07 Oct, 14:06 TRT`,
+until the next poll succeeds; a first load that fails shows **Data unavailable**.
+The status is a polite live region, so it is only rewritten when its wording
+changes: a delayed age moves on once an hour, and a poll that changes nothing
+announces nothing.
+
 The workflow only replaces the live site after a complete, valid snapshot
 is produced. If upstream market data is temporarily unavailable, the job fails
 and the previous successful Pages deployment stays online.
@@ -425,7 +435,8 @@ OnCalendar=Mon..Fri *-*-* 09..23:20:00 Europe/Istanbul
 ```
 
 Refreshes stop whenever that machine is offline; the dashboard then shows
-**Update delayed** once its snapshot is older than the schedule allows.
+**Update delayed**, with the snapshot's time and how many hours or days old it
+is, once its snapshot is older than the schedule allows.
 
 ## Run locally
 
