@@ -82,6 +82,21 @@ ROLLED_DAY = "2026-07-07"
 # on ROLLED_DAY, and on NO_PRICE_DAY it is listed without a last price.
 HISTORY_SYMBOL = "USDTRYF2028"
 NO_PRICE_DAY = "2026-09-07"
+# A legacy close: this fixture day served as the three closes archived before
+# #82 were written, captured after midnight and counted from the next day.
+MISDATED_DAY = "2026-10-06"
+MISDATED_PUBLISHED = "2026-10-07"
+MISDATED_CAPTURED = "2026-10-07T01:50:00+03:00"
+MISDATED_NOTE = (
+    "Days left and yields recounted from the 06 Oct 2026 session. This close was "
+    "captured at 01:50 on 07 Oct 2026 and published counted from 07 Oct 2026."
+)
+# The contract fields counted from market_date; every other field is as published.
+RECOUNTED_FIELDS = {
+    "days_to_maturity", "annualized_premium_percent", "daily_yield_factor",
+    "daily_yield_percent", "monthly_yield_percent", "annualized_yield_percent",
+    "expected_spot_at_maturity", "expected_short_profit_try",
+}
 SPOT_PRICES = ("last", "open", "high", "low", "change")
 CONTRACT_PRICES = ("last", "bid", "ask", "change", "expected_spot_at_maturity")
 
@@ -119,7 +134,7 @@ STALE_CHARTS = (
 # loaded comparison. "missing" always comes last.
 CSV_COLUMNS = [
     "market", "view", "market_date", "snapshot_generated_at", "days_rolled_forward_from",
-    "spot", "spot_unit", "spot_time", "spot_source",
+    "published_market_date", "spot", "spot_unit", "spot_time", "spot_source",
     "maturity_month", "label", "symbol", "code", "maturity_date", "days_left",
     "last", "change_percent", "bid", "ask", "volume", "last_trade_at", "stale",
     "premium_percent", "yield_1d_percent", "yield_30d_percent", "yield_365d_percent",
@@ -140,7 +155,7 @@ CSV_YIELDS = (
     ("365d", "annualized_yield_percent", 365, "annualized"),
 )
 # Columns that are never a missing value: context, and the reasons themselves.
-CSV_CONTEXT_COLUMNS = ("days_rolled_forward_from", "missing")
+CSV_CONTEXT_COLUMNS = ("days_rolled_forward_from", "published_market_date", "missing")
 # Printing. The content width of an A4 portrait page with the stylesheet's
 # 15 mm margins (210 mm - 30 mm, at 96 px per inch), and of US Letter's.
 A4_CONTENT_WIDTH = 680
@@ -245,6 +260,12 @@ def build_site(destination, history_dir):
     subprocess.run(["bash", "scripts/build_site.sh"], cwd=ROOT, env=env, check=True)
     shutil.copytree(SITE, destination)
     shutil.copyfile(FIXTURE, destination / "data" / "market.json")
+
+
+def delayed_status(generated_at, age):
+    """The delayed pill for a snapshot generated at generated_at (or the fixture's)."""
+    generated = datetime.fromisoformat(generated_at or "2026-10-07T14:06:12+03:00")
+    return f"Update delayed · snapshot {generated.strftime('%d %b, %H:%M')} TRT · {age}"
 
 
 class QuietHandler(SimpleHTTPRequestHandler):
@@ -440,8 +461,11 @@ class DashboardSmokeTests(unittest.TestCase):
         for now, state, text in (
             ("2026-10-07T14:30:00+03:00", "is-fresh", "Latest snapshot"),
             ("2026-10-07T15:36:12+03:00", "is-fresh", "Latest snapshot"),
-            ("2026-10-07T15:40:00+03:00", "is-delayed", "Update delayed · 93m old"),
-            ("2026-10-07T23:20:00+03:00", "is-delayed", "Update delayed · 553m old"),
+            # 93 minutes and 9 h 13 min old.
+            ("2026-10-07T15:40:00+03:00", "is-delayed",
+             "Update delayed · snapshot 07 Oct, 14:06 TRT · 1 h old"),
+            ("2026-10-07T23:20:00+03:00", "is-delayed",
+             "Update delayed · snapshot 07 Oct, 14:06 TRT · 9 h old"),
         ):
             with self.subTest(now=now):
                 self.open_live_at(now)
@@ -463,15 +487,31 @@ class DashboardSmokeTests(unittest.TestCase):
                 self.assert_status("is-closed", f"Market closed · snapshot {label} TRT")
 
     def test_status_after_hours_still_flags_a_missed_last_refresh(self):
-        for now, generated_at, minutes in (
-            ("2026-10-10T12:00:00+03:00", None, 4193),  # Saturday, Wednesday's snapshot
-            ("2026-10-10T12:00:00+03:00", "2026-10-09T21:49:59+03:00", 850),
-            ("2026-10-08T02:00:00+03:00", None, 713),  # weeknight, afternoon snapshot
-            ("2026-10-12T09:20:00+03:00", "2026-10-09T23:20:00+03:00", 3480),  # window opens
+        for now, generated_at, age in (
+            # Saturday, Wednesday's snapshot: 69 h 53 min.
+            ("2026-10-10T12:00:00+03:00", None, "2 days old"),
+            # 14 h 10 min.
+            ("2026-10-10T12:00:00+03:00", "2026-10-09T21:49:59+03:00", "14 h old"),
+            # Weeknight, afternoon snapshot: 11 h 53 min.
+            ("2026-10-08T02:00:00+03:00", None, "11 h old"),
+            # Monday's window opens on Friday night's snapshot: 58 h.
+            ("2026-10-12T09:20:00+03:00", "2026-10-09T23:20:00+03:00", "2 days old"),
         ):
             with self.subTest(now=now, generated_at=generated_at):
                 self.open_live_at(now, generated_at)
-                self.assert_status("is-delayed", f"Update delayed · {minutes}m old")
+                self.assert_status("is-delayed", delayed_status(generated_at, age))
+
+    def test_delayed_age_is_in_hours_under_two_days_then_in_days(self):
+        # Hours and days are both rounded down; 48 h is the switch.
+        for now, generated_at, age in (
+            ("2026-10-10T11:59:00+03:00", "2026-10-08T12:00:00+03:00", "47 h old"),
+            ("2026-10-10T12:00:00+03:00", "2026-10-08T12:00:00+03:00", "2 days old"),
+            # A trigger offline for three days, inside the refresh window.
+            ("2026-11-13T12:00:00+03:00", "2026-11-10T09:00:00+03:00", "3 days old"),
+        ):
+            with self.subTest(now=now):
+                self.open_live_at(now, generated_at)
+                self.assert_status("is-delayed", delayed_status(generated_at, age))
 
     def test_status_window_uses_istanbul_time(self):
         # 06:00 UTC on Saturday is 09:00 in Istanbul but still Friday 23:00 in
@@ -482,11 +522,128 @@ class DashboardSmokeTests(unittest.TestCase):
              "2026-10-09T22:50:00+03:00", "is-closed",
              "Market closed · snapshot 09 Oct, 22:50 TRT"),
             ("2026-10-09T10:30:00+00:00", "Pacific/Kiritimati",
-             "2026-10-08T22:50:00+03:00", "is-delayed", "Update delayed · 880m old"),
+             "2026-10-08T22:50:00+03:00", "is-delayed",
+             "Update delayed · snapshot 08 Oct, 22:50 TRT · 14 h old"),
         ):
             with self.subTest(zone=zone):
                 self.open_live_at(now, generated_at, zone)
                 self.assert_status(state, text)
+
+    # A live poll that fails, and polls that change nothing
+
+    def route_live_snapshot(self):
+        """Serve the live snapshot as control["mode"] says: "pass" or "bad".
+
+        "bad" serves an unsupported schema version, which the page rejects.
+        """
+        control = {"mode": "pass"}
+        bad = copy.deepcopy(self.snapshot)
+        bad["schema_version"] = 5
+
+        def handle(route):
+            if control["mode"] == "pass":
+                route.fallback()
+            else:
+                route.fulfill(status=200, content_type="application/json", body=json.dumps(bad))
+
+        self.page.route(re.compile(r"/data/market\.json"), handle)
+        return control
+
+    def poll(self):
+        """Run the clock to the next live poll and wait for it to render rows."""
+        self.page.evaluate("() => { document.querySelector('#contract-rows tr').__old = true; }")
+        self.page.clock.run_for("01:01")
+        self.page.wait_for_function(
+            "() => !document.querySelector('#contract-rows tr').__old"
+        )
+
+    def failed_poll(self):
+        """Run the clock to the next live poll and wait for it to fail."""
+        self.page.clock.run_for("01:01")
+        expect(self.page.locator("#data-state")).to_have_class(re.compile(r"\bis-error\b"))
+
+    def open_with_live_route(self, **options):
+        """Open live data on fake timers, with its snapshot behind a switch."""
+        if options:
+            self.reopen_at(FIXTURE_DAY_TIME, **options)
+        control = self.route_live_snapshot()
+        self.page.clock.install(time=FIXTURE_DAY_TIME)
+        self.open_dashboard()
+        self.assert_status("is-delayed", delayed_status(None, "8 h old"))
+        return control
+
+    UNAVAILABLE_STATUS = "Live data unavailable · showing snapshot 07 Oct, 14:06 TRT"
+
+    def test_a_failed_live_poll_names_the_snapshot_still_on_screen(self):
+        control = self.open_with_live_route()
+        control["mode"] = "bad"
+        self.failed_poll()
+        self.assert_status("is-error", self.UNAVAILABLE_STATUS)
+        # The live numbers stay on screen.
+        self.assert_market(self.snapshot["default_market"])
+        expect(self.page.locator("#contract-rows")).not_to_contain_text("could not be loaded")
+        self.expect_load_errors(1)
+
+        # A poll that fails again changes nothing.
+        self.failed_poll()
+        self.page.wait_for_function(
+            "() => !document.querySelector('#refresh-button').disabled"
+        )
+        self.assert_status("is-error", self.UNAVAILABLE_STATUS)
+        self.expect_load_errors(1)
+
+        # The next good poll shows the normal status again.
+        control["mode"] = "pass"
+        self.poll()
+        self.assert_status("is-delayed", delayed_status(None, "8 h old"))
+
+    def test_a_failed_first_load_still_says_data_unavailable(self):
+        control = self.route_live_snapshot()
+        control["mode"] = "bad"
+        self.page.goto(self.base_url)
+        self.assert_status("is-error", "Data unavailable")
+        expect(self.page.locator("#contract-rows")).to_contain_text("could not be loaded")
+        self.expect_load_errors(1)
+
+    def test_a_poll_that_changes_nothing_leaves_the_status_alone(self):
+        # The status is a polite live region: rewriting it, even with the same
+        # words, can make a screen reader announce it again.
+        control = self.open_with_live_route()
+        self.page.evaluate(
+            """() => {
+              window.__statusMutations = 0;
+              new MutationObserver((records) => {
+                window.__statusMutations += records.length;
+              }).observe(document.querySelector('#data-state'), {
+                attributes: true, characterData: true, childList: true, subtree: true,
+              });
+            }"""
+        )
+        # 8 h 53 min, then 8 h 54 min and 8 h 55 min old: still "8 h old".
+        for _ in range(2):
+            self.poll()
+            self.assertEqual(self.page.evaluate("() => window.__statusMutations"), 0)
+        self.assert_status("is-delayed", delayed_status(None, "8 h old"))
+
+        # The observer does see a real change.
+        control["mode"] = "bad"
+        self.failed_poll()
+        self.assertGreater(self.page.evaluate("() => window.__statusMutations"), 0)
+        self.expect_load_errors(1)
+
+    @unittest.skipIf(Axe is None, "axe-playwright-python is not installed")
+    def test_accessibility_and_layout_of_the_delayed_and_unavailable_status(self):
+        for viewport in NARROW_VIEWPORTS + (MOBILE_VIEWPORT,):
+            with self.subTest(viewport=viewport):
+                control = self.open_with_live_route(viewport=viewport)
+                self.assert_no_sideways_scroll()
+                self.assert_accessible(f"delayed status at {viewport['width']}px")
+                control["mode"] = "bad"
+                self.failed_poll()
+                self.assert_status("is-error", self.UNAVAILABLE_STATUS)
+                self.assert_no_sideways_scroll()
+                self.assert_accessible(f"unavailable status at {viewport['width']}px")
+                self.expect_load_errors(1)
 
     def test_each_market_via_query(self):
         for key in self.snapshot["market_order"]:
@@ -608,10 +765,15 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assert_market(self.snapshot["default_market"])
 
     def test_no_history_ignores_date_link(self):
-        self.open_dashboard(f"?date={max(HISTORY_FIXTURE)}", base_url=self.no_history_url)
+        # The site without history ships an empty index, which reads fine, so
+        # the date is known not to be archived: it is rejected, not kept waiting.
+        day = max(HISTORY_FIXTURE)
+        self.open_dashboard(f"?date={day}", base_url=self.no_history_url)
         self.assert_live()
         expect(self.page.locator("#history-control")).to_be_hidden()
-        expect(self.page.locator("#history-notice")).to_be_visible()
+        expect(self.page.locator("#history-notice")).to_have_text(
+            f"No archived close for {day}. Showing live data."
+        )
 
     def serve_snapshot(self, pattern, snapshot):
         self.page.route(
@@ -1251,7 +1413,7 @@ class DashboardSmokeTests(unittest.TestCase):
             expect(note).to_be_visible()
             expect(note).to_have_text(
                 f"Days left and yields adjusted to {adjusted_to}; "
-                f"prices are from the {LIVE_LABEL} snapshot."
+                f"prices are from the {LIVE_LABEL} session."
             )
         else:
             expect(note).to_be_hidden()
@@ -1327,6 +1489,20 @@ class DashboardSmokeTests(unittest.TestCase):
                             )
                         # A day closer to maturity, the projection grows less.
                         self.assertLess(value, contract["expected_spot_at_maturity"])
+
+    def test_after_midnight_snapshot_of_the_previous_session_counts_from_today(self):
+        # The updater dates a snapshot taken at 00:45 on Thursday 8 Oct to the
+        # Wednesday session its quotes come from, so its market_date stays 7 Oct.
+        self.open_live_at("2026-10-08T00:50:00+03:00", "2026-10-08T00:45:00+03:00")
+        self.assert_note("08 Oct 2026")
+        # The board names the session the prices are from and when they were taken.
+        expect(self.page.locator("#market-date")).to_have_text(LIVE_LABEL)
+        expect(self.page.locator("#updated-at")).to_have_text("08 Oct, 00:45 TRT")
+        key = self.snapshot["default_market"]
+        market = self.snapshot["markets"][key]
+        days = self.expected_days(market, date(2026, 10, 8))
+        self.assertEqual(days, [c["days_to_maturity"] - 1 for c in market["contracts"]])
+        self.assert_days(key, days)
 
     def test_contract_maturing_today_shows_zero_days_and_no_yield(self):
         self.reopen_at(datetime.fromisoformat("2026-10-30T12:00:00+03:00"))
@@ -1443,6 +1619,220 @@ class DashboardSmokeTests(unittest.TestCase):
             ((front["last"] / live["spot"]["last"]) ** (1 / 22) - 1) * 100,
             places=9,
         )
+
+    # A legacy close published counted from the next day
+
+    def misdated_close(self, day=MISDATED_DAY):
+        """day's fixture close as a legacy file holds it: captured after midnight,
+        dated to the next day, and every time-dependent value counted from it."""
+        published = copy.deepcopy(self.history[day])
+        published["generated_at"] = MISDATED_CAPTURED
+        published["market_date"] = MISDATED_PUBLISHED
+        for market in published["markets"].values():
+            spot = market["spot"]["last"]
+            trend = (market.get("spot_trend") or {}).get("daily_factor")
+            for contract in market["contracts"]:
+                contract["days_to_maturity"] -= 1
+                days = contract["days_to_maturity"]
+                set_yields(contract, spot)
+                premium = contract.get("premium_percent")
+                contract["annualized_premium_percent"] = (
+                    premium * 365 / days if premium is not None and days > 0 else None
+                )
+                if isinstance(market.get("contract_size"), (int, float)) and trend:
+                    contract["expected_spot_at_maturity"] = spot * trend ** days
+        return published
+
+    def serve_misdated(self, published=None):
+        published = published or self.misdated_close()
+        self.serve_snapshot(re.compile(rf"/data/history/{MISDATED_DAY}\.json"), published)
+        return published
+
+    def assert_recount_note(self, shown, inspector=False):
+        """The days note, and with inspector the inspector's, say a close was recounted."""
+        for note in ("#days-note", "#inspector-note") if inspector else ("#days-note",):
+            locator = self.page.locator(note)
+            if shown:
+                expect(locator).to_be_visible()
+                expect(locator).to_have_text(MISDATED_NOTE)
+            else:
+                expect(locator).to_be_hidden()
+
+    def test_close_published_from_the_next_day_is_recounted_from_its_session(self):
+        published = self.serve_misdated()
+        session = self.history[MISDATED_DAY]["markets"]["USDTRY"]
+        self.open_day(MISDATED_DAY, "&market=USDTRY")
+        expect(self.page.locator("#market-date")).to_have_text(HISTORY_LABELS[MISDATED_DAY])
+        expect(self.page.locator("#updated-at")).to_have_text("07 Oct, 01:50 TRT")
+        self.assert_recount_note(True)
+
+        # Days and yields count from 6 Oct again; the published file's were a day short.
+        days = [c["days_to_maturity"] for c in session["contracts"]]
+        self.assertEqual(
+            days,
+            [c["days_to_maturity"] + 1 for c in published["markets"]["USDTRY"]["contracts"]],
+        )
+        self.assertEqual(self.column("#contract-rows", "Days left"), [str(d) for d in days])
+        self.assertEqual(self.column("#carry-rows", "Days left"), [str(d) for d in days])
+        for label, field, _, digits in YIELD_COLUMNS:
+            with self.subTest(column=label):
+                for text, contract in zip(self.column("#contract-rows", label), session["contracts"]):
+                    self.assertAlmostEqual(self.number(text), contract[field], delta=10 ** -digits)
+        spot, trend = session["spot"]["last"], session["spot_trend"]["daily_factor"]
+        for text, d in zip(self.column("#carry-rows", "Exp. spot at maturity"), days):
+            self.assertAlmostEqual(self.number(text), spot * trend ** d, delta=1e-4)
+
+        # The inspector counts from the session and repeats the note.
+        self.select_button("Oct 2026").click()
+        self.assert_recount_note(True, inspector=True)
+        items = self.inspector()
+        self.assertEqual(items["days"]["value"], str(session["contracts"][0]["days_to_maturity"]))
+        self.assertEqual(items["days"]["detail"], "Calendar days from 06 Oct 2026, recounted")
+
+        # Only days left and the values built on them differ from the file.
+        shown = self.page.evaluate("() => state.snapshot")
+        self.assertEqual(shown.pop("market_date"), MISDATED_DAY)
+        self.assertEqual(shown.pop("published_market_date"), MISDATED_PUBLISHED)
+        expected = copy.deepcopy(published)
+        expected.pop("market_date")
+        for key, market in shown["markets"].items():
+            file_market = expected["markets"][key]
+            self.assertEqual(
+                [c["symbol"] for c in market["contracts"]],
+                [c["symbol"] for c in file_market["contracts"]],
+            )
+            for contract in market["contracts"] + file_market["contracts"]:
+                for field in RECOUNTED_FIELDS:
+                    contract.pop(field, None)
+        self.assertEqual(shown, expected)
+
+    def test_recounted_close_keeps_a_zero_day_contract_without_a_yield(self):
+        published = self.misdated_close()
+        # A contract maturing on the session day: published at -1 days.
+        contract = published["markets"]["USDTRY"]["contracts"][0]
+        contract["maturity_date"] = MISDATED_DAY
+        contract["days_to_maturity"] = -1
+        set_yields(contract, published["markets"]["USDTRY"]["spot"]["last"])
+        self.serve_misdated(published)
+        self.open_day(MISDATED_DAY, "&market=USDTRY")
+        self.assert_recount_note(True)
+        expect(self.page.locator("#contract-rows > tr")).to_have_count(
+            len(published["markets"]["USDTRY"]["contracts"])
+        )
+        self.assertEqual(self.column("#contract-rows", "Days left")[0], "0")
+        for label, *_ in YIELD_COLUMNS:
+            self.assertEqual(self.column("#contract-rows", label)[0], "—")
+
+    def test_close_dated_to_its_session_shows_no_recount_note(self):
+        self.serve_misdated()
+        day = "2026-10-05"
+        self.open_day(day, "&market=USDTRY")
+        expect(self.page.locator("#market-date")).to_have_text(HISTORY_LABELS[day])
+        self.select_button("Oct 2026").click()
+        self.assert_recount_note(False, inspector=True)
+        self.assertEqual(self.inspector()["days"]["detail"], f"Calendar days from {HISTORY_LABELS[day]}")
+        self.assertNotIn("published_market_date", self.page.evaluate("() => state.snapshot"))
+        self.assertEqual(
+            self.column("#contract-rows", "Days left"),
+            [str(c["days_to_maturity"]) for c in self.history[day]["markets"]["USDTRY"]["contracts"]],
+        )
+        rows = self.csv_rows(self.download_csv()[2])
+        self.assertEqual({row["published_market_date"] for row in rows}, {""})
+
+    def test_comparison_with_a_recounted_close_counts_from_its_session(self):
+        self.serve_misdated()
+        self.open_dashboard(f"?compare={MISDATED_DAY}&market=USDTRY")
+        self.assert_comparing(MISDATED_DAY)
+        self.assert_note(None)
+        self.select_button("Oct 2026").click()
+        rows = self.comparison()
+        # 7 Oct live against 6 Oct: one day less to maturity, not none.
+        self.assertEqual(rows["days"]["change"], "-1 day")
+        self.assertEqual(rows["date"]["change"], "1 calendar day apart")
+        self.assertEqual(rows["date"]["current"]["detail"], "")
+        self.assertEqual(
+            rows["date"]["compared"]["detail"],
+            "Days left from 06 Oct 2026, recounted; published from 07 Oct 2026",
+        )
+        expect(self.page.locator("#inspector-compare-note")).to_have_text(
+            f"Change is the day on screen minus the close of {HISTORY_LABELS[MISDATED_DAY]}, "
+            "whose values are shown as that close stored them, with days left and yields "
+            "recounted from its session."
+        )
+        session = self.history[MISDATED_DAY]["markets"]["USDTRY"]
+        past = {c["label"]: c["daily_yield_percent"] for c in session["contracts"]}
+        for point in self.chart_points("yieldChartPoints"):
+            if point["compare"] is not None:
+                self.assertAlmostEqual(point["compare"], past[point["label"]], places=9)
+
+        # Every contract listed on both days is one day nearer maturity.
+        table = self.csv_rows(self.download_csv()[2])
+        self.assertTrue(table)
+        for row in table:
+            if row["compare_days_left"]:
+                self.assertEqual(row["delta_days_left"], "-1")
+
+    def test_recounted_close_on_screen_says_so_in_the_comparison(self):
+        self.serve_misdated()
+        compared = "2026-10-05"
+        self.open_day(MISDATED_DAY, f"&compare={compared}&market=USDTRY")
+        self.assert_comparing(compared, HISTORY_LABELS[MISDATED_DAY])
+        self.select_button("Oct 2026").click()
+        rows = self.comparison()
+        self.assertEqual(rows["days"]["change"], "-1 day")
+        self.assertEqual(
+            rows["date"]["current"]["detail"],
+            "Days left from 06 Oct 2026, recounted; published from 07 Oct 2026",
+        )
+        self.assertEqual(rows["date"]["compared"]["detail"], "")
+        expect(self.page.locator("#inspector-compare-note")).to_have_text(
+            f"Change is the day on screen minus the close of {HISTORY_LABELS[compared]}, "
+            "whose values are shown as that close stored them."
+        )
+
+    def test_history_shows_a_recounted_close_from_its_session(self):
+        self.serve_misdated()
+        self.open_dashboard("?market=USDTRY")
+        self.select_button("Jan 2028").click()
+        self.load_history(len(HISTORY_FIXTURE))
+        market, contract = self.history_symbol_on(MISDATED_DAY)
+        row = next(r for r in self.history_rows() if r["day"] == MISDATED_DAY)
+        self.assertEqual(row["cells"][:4], self.expected_history_row(market, contract))
+        expect(self.page.locator("#inspector-history-note")).to_contain_text(
+            "Days left and yields on the close of 06 Oct 2026 are recounted from its "
+            "session; it was published counted from the next day."
+        )
+        point = next(
+            p for p in self.page.evaluate("() => state.historyChart.rows")
+            if p.get("day") == MISDATED_DAY
+        )
+        self.assertEqual(point["contract"]["days_to_maturity"], contract["days_to_maturity"])
+
+    def test_csv_of_a_recounted_close_counts_from_its_session(self):
+        self.serve_misdated()
+        self.open_day(MISDATED_DAY, "&market=USDTRY")
+        name, raw, table = self.download_csv()
+        self.assertEqual(name, f"vade-USDTRY-{MISDATED_DAY}.csv")
+        self.assert_csv_format(raw, table)
+        self.assertEqual(table[0][:len(CSV_COLUMNS)], CSV_COLUMNS)
+        rows = self.csv_rows(table)
+        self.assert_missing_is_explained(rows)
+        session = self.history[MISDATED_DAY]["markets"]["USDTRY"]["contracts"]
+        self.assertEqual(len(rows), len(session))
+        for row, contract in zip(rows, session):
+            with self.subTest(maturity=row["maturity_month"]):
+                self.assertEqual(row["view"], "close")
+                self.assertEqual(row["market_date"], MISDATED_DAY)
+                self.assertEqual(row["published_market_date"], MISDATED_PUBLISHED)
+                self.assertEqual(row["days_rolled_forward_from"], "")
+                self.assertEqual(row["snapshot_generated_at"], MISDATED_CAPTURED)
+                self.assertEqual(row["days_left"], str(contract["days_to_maturity"]))
+                for column, field, _, _ in CSV_YIELDS:
+                    value = row[f"yield_{column}_percent"]
+                    if contract[field] is None:
+                        self.assertEqual(value, "")
+                    else:
+                        self.assertAlmostEqual(float(value), contract[field], places=9)
 
     # Keyboard access to the chart points
 
@@ -2111,7 +2501,7 @@ class DashboardSmokeTests(unittest.TestCase):
         note = self.page.locator("#inspector-note")
         expect(note).to_be_visible()
         expect(note).to_have_text(
-            f"Days left and yields adjusted to 08 Oct 2026; prices are from the {LIVE_LABEL} snapshot."
+            f"Days left and yields adjusted to 08 Oct 2026; prices are from the {LIVE_LABEL} session."
         )
 
     def test_inspector_of_an_archived_close_shows_its_stored_values(self):
@@ -3137,6 +3527,777 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assertEqual(self.index_reads(), 2)
         self.load_history(len(HISTORY_FIXTURE))
         self.take_index_errors(1)
+
+    # The archive's coverage beside the View menu.
+
+    def serve_history_index(self, days):
+        """Answer the history index with one listing exactly days, which need no files."""
+        manifest = {
+            "schema_version": 1,
+            "days": [
+                {
+                    "date": day,
+                    "generated_at": f"{day}T23:20:00+03:00",
+                    "markets": self.snapshot["market_order"],
+                }
+                for day in sorted(days)
+            ],
+        }
+        self.page.route(
+            self.INDEX_URL,
+            lambda route: route.fulfill(
+                status=200, content_type="application/json", body=json.dumps(manifest)
+            ),
+        )
+
+    @staticmethod
+    def expected_uncaptured(days):
+        """Weekdays strictly between the earliest and latest of days with no close."""
+        first, last = date.fromisoformat(min(days)), date.fromisoformat(max(days))
+        listed = set(days)
+        missing, day = [], first + timedelta(days=1)
+        while day < last:
+            if day.weekday() < 5 and day.isoformat() not in listed:
+                missing.append(day.isoformat())
+            day += timedelta(days=1)
+        return missing
+
+    def coverage(self):
+        return self.page.locator("#history-coverage")
+
+    def disclosure_names(self):
+        """The accessible name of each disclosure summary, as Chromium exposes it."""
+        cdp = self.context.new_cdp_session(self.page)
+        nodes = cdp.send("Accessibility.getFullAXTree")["nodes"]
+        cdp.detach()
+        return [
+            node.get("name", {}).get("value")
+            for node in nodes
+            if node.get("role", {}).get("value") == "DisclosureTriangle"
+        ]
+
+    def coverage_open(self):
+        return self.page.evaluate(
+            "() => Boolean(document.querySelector('#history-coverage details')?.open)"
+        )
+
+    def coverage_gaps(self):
+        """The weekdays the open disclosure lists."""
+        return self.page.locator("#history-coverage-gaps li").all_inner_texts()
+
+    def test_coverage_counts_closes_and_lists_an_uncaptured_weekday(self):
+        self.serve_history_index(
+            ["2026-10-26", "2026-10-27", "2026-10-28", "2026-10-30", "2026-11-02"]
+        )
+        self.open_dashboard()
+        coverage = self.coverage()
+        expect(coverage).to_be_visible()
+        summary = coverage.locator("summary")
+        expect(summary).to_have_text("1 weekday not captured")
+        self.assertEqual(
+            coverage.evaluate("(node) => node.textContent"),
+            "5 closes since 26 Oct 2026 · 1 weekday not captured"
+            "No archived close on these weekdays. "
+            "Each may have been a public holiday or a missed capture."
+            "Thu 29 Oct 2026: no capture",
+        )
+        list_ = coverage.locator("ul")
+        expect(list_).to_be_hidden()
+        # The arrow is decoration, left out of the summary's name.
+        self.assertEqual(self.disclosure_names(), ["1 weekday not captured"])
+
+        # Opened from the keyboard, it lists exactly the one weekday, and
+        # reading it fetches nothing.
+        requests = []
+        self.page.on("request", lambda request: requests.append(request.url))
+        self.tab_to("#history-coverage summary")
+        self.page.keyboard.press("Enter")
+        expect(list_).to_be_visible()
+        expect(coverage.locator(".history-coverage-list p")).to_have_text(
+            "No archived close on these weekdays. "
+            "Each may have been a public holiday or a missed capture."
+        )
+        self.assertEqual(self.coverage_gaps(), ["Thu 29 Oct 2026: no capture"])
+        # A one-day list doesn't scroll, so it is no extra tab stop.
+        panel = coverage.locator(".history-coverage-list")
+        expect(panel).not_to_have_attribute("tabindex", "0")
+        expect(panel).not_to_have_attribute("role", "region")
+        self.page.keyboard.press("Space")
+        expect(list_).to_be_hidden()
+        self.assertEqual(requests, [])
+
+    def test_coverage_list_closes_on_escape_a_click_elsewhere_or_leaving_it(self):
+        self.open_dashboard()
+        coverage = self.coverage()
+        summary = coverage.locator("summary")
+        list_ = coverage.locator("ul")
+
+        # The fixture's long list scrolls, so it takes focus to be scrolled.
+        self.tab_to("#history-coverage summary")
+        self.page.keyboard.press("Enter")
+        expect(list_).to_be_visible()
+        panel = coverage.locator(".history-coverage-list")
+        expect(panel).to_have_attribute("tabindex", "0")
+        expect(panel).to_have_attribute("role", "region")
+        expect(panel).to_have_accessible_name("Weekdays not captured")
+        self.page.keyboard.press("Tab")
+        expect(panel).to_be_focused()
+        self.page.keyboard.press("Escape")
+        expect(list_).to_be_hidden()
+        expect(summary).to_be_focused()
+
+        # Tabbing on out of the list closes it.
+        self.page.keyboard.press("Enter")
+        expect(list_).to_be_visible()
+        self.page.keyboard.press("Tab")
+        self.page.keyboard.press("Tab")
+        self.assertFalse(self.coverage_open())
+        self.assertFalse(
+            self.page.evaluate(
+                "() => document.querySelector('#history-coverage').contains(document.activeElement)"
+            )
+        )
+
+        # A click inside keeps it open; one elsewhere closes it.
+        summary.click()
+        expect(list_).to_be_visible()
+        coverage.locator(".history-coverage-list p").click()
+        expect(list_).to_be_visible()
+        self.page.locator(".wordmark-sub").click()
+        expect(list_).to_be_hidden()
+        self.assert_live()
+
+    def test_coverage_lists_every_weekday_in_a_longer_gap_oldest_first(self):
+        # Mon 5 Oct, Fri 9 Oct and Wed 14 Oct: Tue–Thu, then Mon–Tue after a weekend.
+        self.serve_history_index(["2026-10-05", "2026-10-09", "2026-10-14"])
+        self.open_dashboard()
+        coverage = self.coverage()
+        expect(coverage).to_contain_text("3 closes since 05 Oct 2026 · 5 weekdays not captured")
+        coverage.locator("summary").click()
+        self.assertEqual(
+            self.coverage_gaps(),
+            [
+                "Tue 06 Oct 2026: no capture",
+                "Wed 07 Oct 2026: no capture",
+                "Thu 08 Oct 2026: no capture",
+                "Mon 12 Oct 2026: no capture",
+                "Tue 13 Oct 2026: no capture",
+            ],
+        )
+
+    def test_coverage_without_a_missing_weekday_has_no_disclosure(self):
+        for days, text in (
+            # Thu, Fri and the next Mon: the weekend between is not missing.
+            (["2026-10-01", "2026-10-02", "2026-10-05"],
+             "3 closes since 01 Oct 2026 · no weekday missing"),
+            (["2026-10-06"], "1 close since 06 Oct 2026 · no weekday missing"),
+        ):
+            with self.subTest(days=days):
+                self.reopen_at(FIXTURE_DAY_TIME)
+                self.serve_history_index(days)
+                self.open_dashboard()
+                expect(self.coverage()).to_be_visible()
+                expect(self.coverage()).to_have_text(text)
+                expect(self.coverage().locator("details")).to_have_count(0)
+
+    def test_coverage_is_hidden_with_the_view_menu(self):
+        self.open_dashboard(base_url=self.no_history_url)
+        expect(self.page.locator("#history-control")).to_be_hidden()
+        expect(self.coverage()).to_be_hidden()
+
+        # An index that has never been read hides both too.
+        self.reopen_at(FIXTURE_DAY_TIME)
+        control = self.route_history_index()
+        control["mode"] = "500"
+        self.open_dashboard()
+        self.index_read_settled()
+        expect(self.page.locator("#history-control")).to_be_hidden()
+        expect(self.coverage()).to_be_hidden()
+        self.take_index_errors(1)
+
+    def test_coverage_of_the_fixture_archive(self):
+        missing = self.expected_uncaptured(list(HISTORY_FIXTURE))
+        self.open_dashboard()
+        expect(self.coverage()).to_contain_text(
+            f"5 closes since 07 Jul 2026 · {len(missing)} weekdays not captured"
+        )
+        self.coverage().locator("summary").click()
+        gaps = self.coverage_gaps()
+        self.assertEqual(len(gaps), len(missing))
+        self.assertEqual(gaps[0], "Wed 08 Jul 2026: no capture")
+        self.assertEqual(gaps[-1], "Fri 02 Oct 2026: no capture")
+        self.assertNotIn("Sat", " ".join(gaps))
+        self.assertNotIn("Sun", " ".join(gaps))
+
+    def test_reread_index_updates_the_coverage_in_place(self):
+        added = "2026-10-05"
+        before = [day for day in HISTORY_FIXTURE if day != added]
+        control = self.route_history_index()
+        control["mode"] = before
+        self.page.clock.install(time=FIXTURE_DAY_TIME)
+        self.open_day(
+            "2026-10-06", "&compare=2026-09-30&market=USDTRY&maturity=2028-01&period=monthly"
+        )
+        self.assert_comparing("2026-09-30", current=HISTORY_LABELS["2026-10-06"])
+        self.assert_selected("Jan 2028")
+        missing = self.expected_uncaptured(before)
+        coverage = self.coverage()
+        expect(coverage).to_contain_text(
+            f"4 closes since 07 Jul 2026 · {len(missing)} weekdays not captured"
+        )
+        coverage.locator("summary").click()
+        self.assertIn("Mon 05 Oct 2026: no capture", self.coverage_gaps())
+        expect(coverage.locator("summary")).to_be_focused()
+        url, entries = self.page.url, self.entries()
+
+        control["mode"] = "pass"
+        self.page.clock.run_for("10:30")
+        expect(coverage).to_contain_text(
+            f"5 closes since 07 Jul 2026 · {len(missing) - 1} weekdays not captured"
+        )
+        # The open disclosure stays open and focused, without the newly
+        # archived day.
+        expect(coverage.locator("ul")).to_be_visible()
+        expect(coverage.locator("summary")).to_be_focused()
+        self.assertNotIn("Mon 05 Oct 2026: no capture", self.coverage_gaps())
+        self.assertEqual(len(self.coverage_gaps()), len(missing) - 1)
+        self.assert_historical("2026-10-06")
+        self.assert_comparing("2026-09-30", current=HISTORY_LABELS["2026-10-06"])
+        self.assert_selected("Jan 2028")
+        self.assert_period("monthly")
+        self.assertEqual(self.page.url, url)
+        self.assertEqual(self.entries(), entries)
+
+    def test_coverage_fits_a_phone_and_passes_the_audit(self):
+        viewports = (None, {"width": 680, "height": 900}, {"width": 375, "height": 812},
+                     MOBILE_VIEWPORT)
+        for viewport in viewports:
+            for day in (None, "2026-10-06"):
+                with self.subTest(viewport=viewport, day=day):
+                    self.reopen_at(FIXTURE_DAY_TIME, **({"viewport": viewport} if viewport else {}))
+                    if day:
+                        self.open_day(day)
+                    else:
+                        self.open_dashboard()
+                    coverage = self.coverage()
+                    coverage.locator("summary").click()
+                    expect(coverage.locator("ul")).to_be_visible()
+                    self.assert_no_sideways_scroll()
+                    band = self.page.locator(".service-band").bounding_box()
+                    box = coverage.bounding_box()
+                    self.assertLessEqual(box["x"] + box["width"], band["x"] + band["width"] + 0.5)
+                    # The open list stays on screen, wherever the line sits.
+                    panel = coverage.locator(".history-coverage-list").bounding_box()
+                    self.assertGreaterEqual(panel["x"], 0)
+                    self.assertLessEqual(
+                        panel["x"] + panel["width"],
+                        self.page.evaluate("() => window.innerWidth") + 0.5,
+                    )
+                    if Axe is not None:
+                        self.assert_accessible(
+                            f"coverage at {viewport or 'desktop'}, {day or 'live'}"
+                        )
+
+    def test_print_leaves_the_coverage_out(self):
+        self.open_dashboard()
+        expect(self.coverage()).to_be_visible()
+        self.page.emulate_media(media="print")
+        expect(self.coverage()).to_be_hidden()
+        expect(self.page.locator(".print-header")).to_be_visible()
+
+    # A link's dates while the history index has never been read.
+    PENDING_DAY, PENDING_COMPARE = "2026-10-06", "2026-09-30"
+
+    def open_with_unreadable_index(self, query, reopen=False, **options):
+        """Open query with the history index failing, on fake timers."""
+        if reopen:
+            self.reopen_at(FIXTURE_DAY_TIME, **options)
+        control = self.route_history_index()
+        control["mode"] = "500"
+        self.page.clock.install(time=FIXTURE_DAY_TIME)
+        self.open_dashboard(query)
+        self.index_read_settled()
+        return control
+
+    def assert_waiting_live(self, date=None, compare=None):
+        """Live data on screen, with the waiting dates kept in the address."""
+        state = self.page.locator("#data-state")
+        expect(state).to_have_class(re.compile(r"\bis-delayed\b"))
+        expect(self.page.locator("#history-banner")).to_be_hidden()
+        expect(self.compare_select()).to_have_value("")
+        expect(self.page.locator("#curve-legend")).to_be_hidden()
+        params = self.url_params()
+        self.assertEqual(params.get("date"), date)
+        self.assertEqual(params.get("compare"), compare)
+        notice = self.page.locator("#history-notice")
+        expect(notice).to_be_visible()
+        expect(notice).to_contain_text("The archive could not be read")
+        expect(notice).not_to_contain_text("No archived close")
+
+    def test_a_date_link_waits_for_an_unreadable_index_and_opens_once_read(self):
+        day = self.PENDING_DAY
+        control = self.open_with_unreadable_index(
+            f"?date={day}&market=USDTRY&maturity=2028-01&period=monthly"
+        )
+        self.assert_waiting_live(date=day)
+        expect(self.page.locator("#history-notice")).to_have_text(
+            f"The archive could not be read, so the close of {HISTORY_LABELS[day]} is not "
+            "open yet. Showing live data; it will open once the archive can be read."
+        )
+        self.assert_selected("Jan 2028")
+        self.assert_period("monthly")
+        entries = self.entries()
+
+        # A poll that still can't read it keeps waiting.
+        self.page.clock.run_for("01:01")
+        self.index_read_settled()
+        self.assert_waiting_live(date=day)
+
+        control["mode"] = "pass"
+        self.page.clock.run_for("01:01")
+        self.assert_historical(day)
+        self.assert_market("USDTRY", self.history[day])
+        self.assert_selected("Jan 2028")
+        self.assert_period("monthly")
+        expect(self.page.locator("#history-notice")).to_be_hidden()
+        self.assertEqual(
+            self.url_params(),
+            {"date": day, "market": "USDTRY", "maturity": "2028-01", "period": "monthly"},
+        )
+        self.assertEqual(self.entries(), entries)
+        self.take_index_errors(2)
+
+    def test_a_reload_while_a_date_link_waits_retries_it(self):
+        day = self.PENDING_DAY
+        control = self.open_with_unreadable_index(f"?date={day}&market=EURTRY")
+        self.assert_waiting_live(date=day)
+        control["mode"] = "pass"
+        self.page.reload()
+        self.assert_historical(day)
+        self.assert_market("EURTRY", self.history[day])
+        expect(self.page.locator("#history-notice")).to_be_hidden()
+        self.take_index_errors(1)
+
+    def test_a_compare_link_waits_for_an_unreadable_index(self):
+        compare = self.PENDING_COMPARE
+        control = self.open_with_unreadable_index(f"?compare={compare}&market=USDTRY")
+        self.assert_waiting_live(compare=compare)
+        expect(self.page.locator("#history-notice")).to_have_text(
+            "The archive could not be read, so the comparison with the close of "
+            f"{HISTORY_LABELS[compare]} is not shown yet. It will appear once the "
+            "archive can be read."
+        )
+        entries = self.entries()
+        control["mode"] = "pass"
+        self.page.clock.run_for("01:01")
+        self.assert_comparing(compare)
+        self.assert_live()
+        self.assert_market("USDTRY")
+        expect(self.page.locator("#history-notice")).to_be_hidden()
+        self.assertEqual(self.url_params(), {"compare": compare, "market": "USDTRY"})
+        self.assertEqual(self.entries(), entries)
+        self.take_index_errors(1)
+
+    def test_a_date_and_compare_link_compares_only_once_the_close_is_on_screen(self):
+        day, compare = self.PENDING_DAY, self.PENDING_COMPARE
+        control = self.open_with_unreadable_index(
+            f"?date={day}&compare={compare}&market=USDTRY&maturity=2026-12"
+        )
+        self.assert_waiting_live(date=day, compare=compare)
+        expect(self.page.locator("#history-notice")).to_contain_text(
+            f"the close of {HISTORY_LABELS[day]} and its comparison with the close of "
+            f"{HISTORY_LABELS[compare]} are not open yet"
+        )
+        entries = self.entries()
+
+        # Hold the close: nothing is compared with the live view meanwhile.
+        modes, held = self.route_history_close(day)
+        modes[0] = "hold"
+        control["mode"] = "pass"
+        self.page.clock.run_for("01:01")
+        self.page.wait_for_function("() => state.viewDate !== null")
+        for _ in range(200):
+            if held:
+                break
+            self.page.evaluate("() => 0")
+        self.assertEqual(len(held), 1)
+        self.assertEqual(
+            self.page.evaluate("() => [state.renderedDate, state.compareDate]"), [None, None]
+        )
+        expect(self.page.locator("#curve-legend")).to_be_hidden()
+
+        held[0].fallback()
+        self.assert_historical(day)
+        self.assert_comparing(compare, current=HISTORY_LABELS[day])
+        self.assert_selected("Dec 2026")
+        expect(self.page.locator("#history-notice")).to_be_hidden()
+        self.assertEqual(
+            self.url_params(),
+            {"date": day, "compare": compare, "market": "USDTRY", "maturity": "2026-12"},
+        )
+        self.assertEqual(self.entries(), entries)
+        self.take_index_errors(1)
+
+    def test_a_maturity_chosen_while_the_waiting_close_loads_is_kept(self):
+        day = self.PENDING_DAY
+        for choice in ("2026-12", None, "EURTRY"):
+            with self.subTest(choice=choice):
+                control = self.open_with_unreadable_index(
+                    f"?date={day}&market=USDTRY&maturity=2028-01", reopen=True,
+                )
+                self.assert_selected("Jan 2028")
+                modes, held = self.route_history_close(day)
+                modes[0] = "hold"
+                control["mode"] = "pass"
+                self.page.clock.run_for("01:01")
+                self.page.wait_for_function("() => state.viewDate !== null")
+                for _ in range(200):
+                    if held:
+                        break
+                    self.page.evaluate("() => 0")
+                self.assertEqual(len(held), 1)
+
+                # The live board stays usable while the close loads: another
+                # maturity, none, or another market, which selects none.
+                if choice == "EURTRY":
+                    self.page.locator('.market-options [data-market="EURTRY"]').click()
+                    self.assert_market("EURTRY")
+                else:
+                    self.page.evaluate(f"() => setSelection({json.dumps(choice)})")
+                held[0].fallback()
+                self.assert_historical(day)
+                if choice == "2026-12":
+                    self.assert_selected("Dec 2026")
+                    self.assertEqual(self.url_params().get("maturity"), choice)
+                else:
+                    self.assert_no_selection()
+                    self.assertNotIn("maturity", self.url_params())
+                if choice == "EURTRY":
+                    self.assert_market("EURTRY", self.history[day])
+                self.assertIsNone(self.page.evaluate("() => state.requestedMaturity"))
+                expect(self.page.locator("#history-notice")).to_be_hidden()
+                self.take_index_errors(1)
+
+    def route_first_live_snapshot(self, mode, bad):
+        """Answer the live snapshot as control["mode"] says: "bad", "hold" or "pass"."""
+        control, held = {"mode": mode}, []
+
+        def handle(route):
+            if control["mode"] == "hold":
+                held.append(route)
+            elif control["mode"] == "bad":
+                route.fulfill(status=200, content_type="application/json", body=json.dumps(bad))
+            else:
+                route.fallback()
+
+        self.page.route(re.compile(r"/data/market\.json"), handle)
+        return control, held
+
+    def test_a_waiting_close_selects_the_links_maturity_before_any_view_has_rendered(self):
+        # The index becomes readable, here as the tab comes back, while the
+        # first live snapshot has failed or is still loading: nothing has been
+        # on screen to choose from, so the link's own maturity still applies.
+        day = self.PENDING_DAY
+        bad = copy.deepcopy(self.snapshot)
+        bad["schema_version"] = 5
+        for live in ("bad", "hold"):
+            with self.subTest(live=live):
+                self.reopen_at(FIXTURE_DAY_TIME)
+                control = self.route_history_index()
+                control["mode"] = "500"
+                live_control, held = self.route_first_live_snapshot(live, bad)
+                self.page.clock.install(time=FIXTURE_DAY_TIME)
+                self.page.goto(f"{self.base_url}?date={day}&market=USDTRY&maturity=2028-01")
+                self.index_read_settled()
+                if live == "bad":
+                    self.assert_status("is-error", "Data unavailable")
+                else:
+                    for _ in range(200):
+                        if held:
+                            break
+                        self.page.evaluate("() => 0")
+                    self.assertEqual(len(held), 1)
+                self.assertIsNone(self.page.evaluate("() => state.snapshot"))
+                expect(self.page.locator("#history-notice")).to_contain_text(
+                    "The archive could not be read"
+                )
+
+                control["mode"] = "pass"
+                self.show_tab()
+                self.assert_historical(day)
+                self.assert_market("USDTRY", self.history[day])
+                self.assert_selected("Jan 2028")
+                self.assertEqual(
+                    self.url_params(), {"date": day, "market": "USDTRY", "maturity": "2028-01"}
+                )
+                self.assertIsNone(self.page.evaluate("() => state.requestedMaturity"))
+                expect(self.page.locator("#history-notice")).to_be_hidden()
+
+                if live == "hold":
+                    # The live snapshot that finally arrives is not drawn over the close.
+                    live_control["mode"] = "pass"
+                    with self.page.expect_response(re.compile(r"/data/market\.json")):
+                        held[0].fallback()
+                    self.page.evaluate(
+                        "() => fetch('data/market.json').then((response) => response.json())"
+                    )
+                    self.assert_historical(day)
+                    self.assert_selected("Jan 2028")
+                else:
+                    self.expect_load_errors(1)
+                self.take_index_errors(1)
+
+    def test_a_waiting_comparison_follows_the_live_fallback_of_a_close_that_fails(self):
+        # The index becomes readable before any view has rendered, and the
+        # waiting close then can't be loaded: the page falls back to live
+        # data, and the comparison still follows, as a fresh link's does.
+        day, compare = self.PENDING_DAY, self.PENDING_COMPARE
+        bad = copy.deepcopy(self.snapshot)
+        bad["schema_version"] = 5
+        control = self.route_history_index()
+        control["mode"] = "500"
+        live_control, _ = self.route_first_live_snapshot("bad", bad)
+        self.route_history_close(day)
+        self.page.clock.install(time=FIXTURE_DAY_TIME)
+        self.page.goto(f"{self.base_url}?date={day}&compare={compare}&market=USDTRY")
+        self.index_read_settled()
+        self.assert_status("is-error", "Data unavailable")
+
+        live_control["mode"] = "pass"
+        control["mode"] = "pass"
+        self.show_tab()
+        expect(self.page.locator("#history-notice")).to_have_text(
+            f"The close of {HISTORY_LABELS[day]} could not be loaded."
+        )
+        self.assert_live()
+        self.assert_market("USDTRY")
+        self.assert_comparing(compare)
+        self.assertEqual(self.url_params(), {"compare": compare, "market": "USDTRY"})
+        # The rejected live snapshot and the close that failed.
+        self.expect_load_errors(2)
+        self.take_index_errors(1)
+        # The browser's own report of the close's 404 is the only other error.
+        self.assertEqual(len(self.errors), 1, self.errors)
+        self.assertIn("404", self.errors[0])
+        self.errors = []
+
+    def test_a_move_made_while_the_waiting_close_loads_cancels_it(self):
+        day, waiting_compare, compare = self.PENDING_DAY, "2026-09-30", "2026-10-05"
+        # Refresh is disabled while any view loads, so these are the moves left.
+        for move in ("compare", "live"):
+            with self.subTest(move=move):
+                control = self.open_with_unreadable_index(
+                    f"?date={day}&compare={waiting_compare}&market=USDTRY", reopen=True,
+                )
+                modes, held = self.route_history_close(day)
+                modes[0] = "hold"
+                control["mode"] = "pass"
+                self.page.clock.run_for("01:01")
+                self.page.wait_for_function("() => state.viewDate !== null")
+                for _ in range(200):
+                    if held:
+                        break
+                    self.page.evaluate("() => 0")
+                self.assertEqual(len(held), 1)
+
+                # The read listed the closes, so the menus offer them now.
+                if move == "compare":
+                    self.choose_compare(compare)
+                    expected = {"market": "USDTRY", "compare": compare}
+                else:
+                    self.page.locator("#history-select").select_option("")
+                    expected = {"market": "USDTRY"}
+                self.page.wait_for_function("() => state.viewDate === null")
+                expect(self.page.locator("#refresh-button")).to_be_enabled()
+                self.assertEqual(self.url_params(), expected)
+
+                with self.page.expect_response(re.compile(rf"/history/{day}\.json")):
+                    held[0].fallback()
+                # Let the page take the close's body: another fetch completes after it.
+                self.page.evaluate(
+                    "() => fetch('data/market.json').then((response) => response.json())"
+                )
+                self.assertIsNone(self.page.evaluate("() => state.renderedDate"))
+                self.assert_live()
+                expect(self.page.locator("#history-select")).to_have_value("")
+                if move == "compare":
+                    self.assert_comparing(compare)
+                else:
+                    self.assert_not_comparing()
+                self.assertEqual(self.url_params(), expected)
+                # A reload shows the same view.
+                self.page.reload()
+                self.assert_live()
+                self.assertEqual(self.url_params(), expected)
+                self.take_index_errors(1)
+
+    def test_waiting_dates_the_index_does_not_list_fall_back_once_read(self):
+        day, compare = self.PENDING_DAY, self.PENDING_COMPARE
+        control = self.open_with_unreadable_index(
+            f"?date={day}&compare={compare}&market=USDTRY"
+        )
+        self.assert_waiting_live(date=day, compare=compare)
+        control["mode"] = ["2026-10-05"]
+        self.page.clock.run_for("01:01")
+        notice = self.page.locator("#history-notice")
+        expect(notice).to_contain_text(f"No archived close for {day}. Showing live data.")
+        expect(notice).to_contain_text(f"No archived close for {compare} to compare with.")
+        expect(notice).not_to_contain_text("could not be read")
+        self.assert_live()
+        self.assert_not_comparing()
+        self.assertEqual(self.url_params(), {"market": "USDTRY"})
+        self.take_index_errors(1)
+
+    def test_a_waiting_comparison_not_earlier_than_the_close_is_dropped(self):
+        day, compare = "2026-09-30", "2026-10-05"
+        control = self.open_with_unreadable_index(f"?date={day}&compare={compare}")
+        self.assert_waiting_live(date=day, compare=compare)
+        control["mode"] = "pass"
+        self.page.clock.run_for("01:01")
+        self.assert_historical(day)
+        self.assert_not_comparing()
+        expect(self.page.locator("#history-notice")).to_have_text(
+            f"The close of {HISTORY_LABELS[compare]} is not earlier than "
+            f"{HISTORY_LABELS[day]}, so the comparison is off."
+        )
+        self.take_index_errors(1)
+
+    def test_the_users_own_move_drops_a_waiting_link(self):
+        day, compare = self.PENDING_DAY, self.PENDING_COMPARE
+        # The View and Compare menus list no closes before a read, so their
+        # choices are made as the page's change handlers receive them.
+        moves = {
+            "refresh": lambda: self.page.locator("#refresh-button").click(),
+            "view": lambda: self.page.evaluate(
+                f"""() => {{
+                    elements.historySelect.append(new Option("Close", "{day}"));
+                    elements.historySelect.value = "{day}";
+                    elements.historySelect.dispatchEvent(new Event("change"));
+                }}"""
+            ),
+            "live": lambda: self.page.evaluate(
+                """() => {
+                    elements.historySelect.value = "";
+                    elements.historySelect.dispatchEvent(new Event("change"));
+                }"""
+            ),
+            "compare": lambda: self.page.evaluate(
+                """() => {
+                    elements.compareSelect.value = "";
+                    elements.compareSelect.dispatchEvent(new Event("change"));
+                }"""
+            ),
+        }
+        for name, move in moves.items():
+            with self.subTest(move=name):
+                control = self.open_with_unreadable_index(
+                    f"?date={day}&compare={compare}&market=EURTRY&period=annualized",
+                    reopen=True,
+                )
+                self.assert_waiting_live(date=day, compare=compare)
+                move()
+                self.page.wait_for_function("() => state.pendingLink === null")
+                expect(self.page.locator("#refresh-button")).to_be_enabled()
+                self.assertEqual(self.url_params(), {"market": "EURTRY", "period": "annualized"})
+                expect(self.page.locator("#history-notice")).to_be_hidden()
+
+                # The read that then succeeds leaves the view where the user put it.
+                control["mode"] = "pass"
+                self.page.clock.run_for("01:01")
+                expect(self.page.locator("#history-control")).to_be_visible()
+                self.index_read_settled()
+                self.assert_live()
+                self.assert_market("EURTRY")
+                self.assert_not_comparing()
+                self.assert_period("annualized")
+                expect(self.page.locator("#history-select")).to_have_value("")
+                expect(self.page.locator("#history-notice")).to_be_hidden()
+                self.take_index_errors(1)
+
+    def test_market_maturity_and_period_changes_keep_a_waiting_link(self):
+        day = self.PENDING_DAY
+        control = self.open_with_unreadable_index(f"?date={day}&market=USDTRY")
+        self.page.locator('.market-options [data-market="EURTRY"]').click()
+        self.assert_market("EURTRY")
+        self.page.locator('[data-yield-period="annualized"]').click()
+        self.assert_period("annualized")
+        self.assert_waiting_live(date=day)
+        control["mode"] = "pass"
+        self.page.clock.run_for("01:01")
+        self.assert_historical(day)
+        self.assert_market("EURTRY", self.history[day])
+        self.assert_period("annualized")
+        self.take_index_errors(1)
+
+    def test_back_and_forward_follow_the_waiting_rules(self):
+        day = self.PENDING_DAY
+        control = self.open_with_unreadable_index(f"?date={day}&market=USDTRY")
+        self.assert_waiting_live(date=day)
+        entries = self.entries()
+
+        # Refresh drops the waiting date as a move to a new entry.
+        self.page.locator("#refresh-button").click()
+        self.page.wait_for_function(f"() => history.length === {entries + 1}")
+        self.assertEqual(self.url_params(), {"market": "USDTRY"})
+
+        # Back to the waiting entry waits again, as its link would.
+        self.go_back()
+        self.page.wait_for_function("() => state.pendingLink !== null")
+        self.assert_waiting_live(date=day)
+        # Forward to the other entry drops it again.
+        self.go_forward()
+        self.page.wait_for_function("() => state.pendingLink === null")
+        expect(self.page.locator("#history-notice")).to_be_hidden()
+        self.assertEqual(self.url_params(), {"market": "USDTRY"})
+
+        # Back once more, then the index becomes readable: the close opens in place.
+        self.go_back()
+        self.page.wait_for_function("() => state.pendingLink !== null")
+        control["mode"] = "pass"
+        self.page.clock.run_for("01:01")
+        self.assert_historical(day)
+        self.assertEqual(self.entries(), entries + 1)
+        self.go_forward()
+        self.assert_live()
+        self.take_index_errors(1)
+
+    def test_a_malformed_link_date_is_rejected_at_once_while_the_index_is_unreadable(self):
+        self.open_with_unreadable_index("?date=not-a-date&compare=2026-9-3&market=EURTRY")
+        notice = self.page.locator("#history-notice")
+        expect(notice).to_contain_text("That comparison date is not in the archive.")
+        expect(notice).to_contain_text("That date is not in the archive. Showing live data.")
+        expect(notice).not_to_contain_text("could not be read")
+        self.assert_live()
+        self.assert_not_comparing()
+        self.assertEqual(self.url_params(), {"market": "EURTRY"})
+        self.take_index_errors(1)
+
+    def test_copy_link_while_a_link_waits_copies_the_live_view(self):
+        day, compare = self.PENDING_DAY, self.PENDING_COMPARE
+        self.open_with_unreadable_index(
+            f"?date={day}&compare={compare}&market=USDTRY&maturity=2028-01",
+            reopen=True, permissions=CLIPBOARD_PERMISSIONS,
+        )
+        self.assert_waiting_live(date=day, compare=compare)
+        self.assert_share_live(pointer=False)
+        copied = self.copy_link(SHARE_LIVE_COPIED)
+        self.assertEqual(self.query(copied), {"market": "USDTRY", "maturity": "2028-01"})
+        # Copying leaves the waiting dates in the address.
+        self.assert_waiting_live(date=day, compare=compare)
+        self.take_index_errors(1)
+
+    @unittest.skipIf(Axe is None, "axe-playwright-python is not installed")
+    def test_accessibility_of_the_waiting_link_notice(self):
+        for viewport in (None, MOBILE_VIEWPORT):
+            with self.subTest(viewport=viewport):
+                self.open_with_unreadable_index(
+                    f"?date={self.PENDING_DAY}&compare={self.PENDING_COMPARE}&market=USDTRY",
+                    reopen=True, **({"viewport": viewport} if viewport else {}),
+                )
+                self.assert_waiting_live(date=self.PENDING_DAY, compare=self.PENDING_COMPARE)
+                self.assert_no_sideways_scroll()
+                self.assert_accessible(f"waiting link notice at {viewport or 'desktop'}")
+                self.take_index_errors(1)
 
     def test_a_close_added_to_the_index_joins_the_menus_and_keeps_the_view(self):
         added = "2026-09-30"
@@ -5314,6 +6475,128 @@ class DashboardSmokeTests(unittest.TestCase):
         expect(self.page.locator("#share-fallback")).to_be_visible()
         self.assert_no_sideways_scroll()
         self.assert_accessible("copy link fallback at 320px")
+
+# A real history/ directory, laid out like the data-history branch. CI points
+# this at a read-only checkout of that branch; without it the class is skipped.
+ARCHIVE_DIR = os.environ.get("VADE_ARCHIVE_DIR")
+
+
+@unittest.skipIf(sync_playwright is None, "Playwright is not installed")
+@unittest.skipUnless(ARCHIVE_DIR, "VADE_ARCHIVE_DIR is not set to a real history/ directory")
+class RealArchiveSmokeTests(unittest.TestCase):
+    """Opens every close of the real archive, as the live site would serve it."""
+
+    @classmethod
+    def setUpClass(cls):
+        archive = Path(ARCHIVE_DIR)
+        index = json.loads((archive / "index.json").read_text(encoding="utf-8"))
+        cls.days = {
+            entry["date"]: json.loads(
+                (archive / f"{entry['date']}.json").read_text(encoding="utf-8")
+            )
+            for entry in index["days"]
+        }
+        cls.tmp = tempfile.TemporaryDirectory()
+        site = Path(cls.tmp.name) / "site"
+        build_site(site, archive)
+        # Live data is the newest close, so the archive is never newer than it,
+        # and the browser clock reads the time that close was taken.
+        newest = max(cls.days) if cls.days else None
+        if newest:
+            shutil.copyfile(archive / f"{newest}.json", site / "data" / "market.json")
+        source = cls.days[newest] if newest else json.loads(FIXTURE.read_text(encoding="utf-8"))
+        cls.now = datetime.fromisoformat(source["generated_at"])
+
+        handler = partial(QuietHandler, directory=str(site))
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        cls.base_url = f"http://127.0.0.1:{cls.server.server_address[1]}/"
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+        cls.playwright = sync_playwright().start()
+        cls.browser = cls.playwright.chromium.launch()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.playwright.stop()
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.tmp.cleanup()
+
+    def setUp(self):
+        self.errors = []
+        self.external_requests = []
+        self.context = self.browser.new_context(viewport={"width": 1280, "height": 900})
+        self.page = self.context.new_page()
+        self.page.clock.set_fixed_time(self.now)
+        self.page.on(
+            "console",
+            lambda message: message.type == "error"
+            and self.errors.append(f"console: {message.text}"),
+        )
+        self.page.on("pageerror", lambda error: self.errors.append(f"pageerror: {error}"))
+        self.page.route(re.compile(r"^(?!http://127\.0\.0\.1:)"), self.block_external)
+
+    def tearDown(self):
+        self.context.close()
+        self.assertEqual(self.external_requests, [], "page requested a non-local URL")
+
+    def block_external(self, route):
+        self.external_requests.append(route.request.url)
+        route.abort()
+
+    def test_every_archived_close_renders(self):
+        self.assertTrue(self.days, f"{ARCHIVE_DIR} has no archived closes")
+        page = self.page
+        for day, snapshot in self.days.items():
+            for key in snapshot["market_order"]:
+                with self.subTest(day=day, market=key):
+                    self.errors.clear()
+                    page.goto(f"{self.base_url}?date={day}&market={key}")
+                    state = page.locator("#data-state")
+                    expect(state).to_have_class(re.compile(r"\bis-historical\b"))
+                    expect(state).to_contain_text("Historical · close of")
+                    expect(page.locator("#history-select")).to_have_value(day)
+                    expect(page.locator("body")).to_have_attribute("data-market", key)
+                    expect(page.locator("#history-notice")).to_be_hidden()
+                    # At least one maturity shows a last price.
+                    priced = page.locator(
+                        '#contract-rows td[data-label="Last"] .last-price'
+                    ).filter(has_text=FORMATTED_NUMBER)
+                    expect(priced.first).to_be_visible()
+                    self.assertEqual(self.errors, [], "page logged errors")
+
+    def test_every_archived_close_counts_from_its_own_session(self):
+        # A legacy close published counted from the next day is recounted and
+        # says so; every other close is shown as published, with no note.
+        page = self.page
+        for day, snapshot in self.days.items():
+            key = snapshot["default_market"]
+            contracts = snapshot["markets"][key]["contracts"]
+            with self.subTest(day=day):
+                page.goto(f"{self.base_url}?date={day}&market={key}")
+                expect(page.locator("#history-select")).to_have_value(day)
+                label = date.fromisoformat(day).strftime("%d %b %Y").replace(" Sep ", " Sept ")
+                expect(page.locator("#market-date")).to_have_text(label)
+                cells = page.locator('#contract-rows td[data-label="Days left"]')
+                expect(cells).to_have_count(len(contracts))
+                self.assertEqual(
+                    [text.strip() for text in cells.all_inner_texts()],
+                    [
+                        str((date.fromisoformat(c["maturity_date"]) - date.fromisoformat(day)).days)
+                        for c in contracts
+                    ],
+                )
+                note = page.locator("#days-note")
+                if snapshot["market_date"] == day:
+                    expect(note).to_be_hidden()
+                else:
+                    expect(note).to_be_visible()
+                    expect(note).to_contain_text(
+                        f"Days left and yields recounted from the {label} session."
+                    )
+        self.assertEqual(self.errors, [], "page logged errors")
+
 
 if __name__ == "__main__":
     unittest.main()

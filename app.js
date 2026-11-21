@@ -18,6 +18,7 @@ const elements = {
   refreshButton: document.querySelector("#refresh-button"),
   historyControl: document.querySelector("#history-control"),
   historySelect: document.querySelector("#history-select"),
+  historyCoverage: document.querySelector("#history-coverage"),
   shareLink: document.querySelector("#share-link"),
   shareButton: document.querySelector("#share-button"),
   shareNote: document.querySelector("#share-note"),
@@ -146,6 +147,14 @@ const state = {
   historyIndexReadAt: null,
   historyIndexFailed: false,
   historyIndexRequest: null,
+  // The close and comparison a link asked for while the history index had
+  // never been read, as { date, compare } with either null, kept until a
+  // read can settle them; null when nothing waits. linkRequestId counts the
+  // user's moves, so one made while a waiting link opens stops it there.
+  pendingLink: null,
+  linkRequestId: 0,
+  // The requestId of the load opening a waiting close, while it runs, or null.
+  linkLoad: null,
   // The requested view and the one on screen: an archived date, or null for live.
   viewDate: null,
   renderedDate: null,
@@ -505,7 +514,8 @@ const FIRST_REFRESH_MINUTE = 9 * 60 + 20;
 const LAST_REFRESH_MINUTE = 23 * 60 + 20;
 const FRESH_MINUTES = 90;
 const MINUTE_MS = 60_000;
-const DAY_MS = 24 * 60 * MINUTE_MS;
+const HOUR_MS = 60 * MINUTE_MS;
+const DAY_MS = 24 * HOUR_MS;
 
 function isWeekday(wallClock) {
   const day = new Date(wallClock).getUTCDay();
@@ -550,19 +560,19 @@ function projectedSpot(spot, dailyFactor, days) {
     : null;
 }
 
-// The live snapshot's days left, and everything built on them, are fixed for
-// its market date. Once Istanbul has moved on to a later day, return a copy
-// with those terms recomputed for today and expired contracts dropped, as the
-// updater would. Prices, premiums and the spot trend stay as published.
-function rollSnapshotForward(snapshot, today) {
-  if (!(snapshot.market_date < today)) return snapshot;
-  const rolled = structuredClone(snapshot);
-  Object.values(rolled.markets).forEach((market) => {
+// A snapshot's days left, and everything built on them, are fixed for its
+// market date. Return a copy with those terms recounted from day, earlier or
+// later, as the updater would count them, and expired contracts dropped.
+// Prices, bid/ask, spot, premiums, the spot trend and every timestamp stay as
+// published, and so does market_date.
+function recountSnapshot(snapshot, day) {
+  const recounted = structuredClone(snapshot);
+  Object.values(recounted.markets).forEach((market) => {
     const spot = market.spot?.last;
     const trendFactor = market.spot_trend?.daily_factor;
     market.contracts = market.contracts
       .map((contract) => {
-        const days = daysUntil(today, contract.maturity_date);
+        const days = daysUntil(day, contract.maturity_date);
         const factor = dailyYieldFactor(contract.last, spot, days);
         const expectedSpot = hasNumber(market.contract_size)
           ? projectedSpot(spot, trendFactor, days)
@@ -587,13 +597,61 @@ function rollSnapshotForward(snapshot, today) {
       })
       .filter((contract) => contract.days_to_maturity >= 0);
   });
-  return rolled;
+  return recounted;
 }
 
+// Once Istanbul has moved on past the live snapshot's market date, a copy
+// counted from today instead; otherwise the snapshot itself.
+function rollSnapshotForward(snapshot, today) {
+  return snapshot.market_date < today ? recountSnapshot(snapshot, today) : snapshot;
+}
+
+// An archived close counts from the session it closes, its file's day. Three
+// closes archived before that rule (26 Oct, 10 Nov and 11 Nov 2026) were
+// captured after midnight and published counted from the next calendar day;
+// archived days are write-once, so they are recounted here instead. A close
+// already dated to its day is returned as published. A recounted copy has
+// market_date set to the day and keeps the file's as published_market_date.
+// Recounting to an earlier day drops no contract.
+function archivedClose(snapshot, day) {
+  if (snapshot.market_date === day) return snapshot;
+  const recounted = recountSnapshot(snapshot, day);
+  recounted.published_market_date = snapshot.market_date;
+  recounted.market_date = day;
+  return recounted;
+}
+
+// Fetch one archived close, counted from its own day.
+async function fetchArchivedClose(day) {
+  return archivedClose(await fetchSnapshot(`${HISTORY_URL}/${day}.json`), day);
+}
+
+const STATUS_CLASSES = ["is-fresh", "is-delayed", "is-closed", "is-error", "is-historical"];
+
+// The status pill is a polite live region, so it is only written when its
+// state or wording changes: an unchanged poll announces nothing.
 function setStatus(className, text) {
-  elements.dataState.classList.remove("is-fresh", "is-delayed", "is-closed", "is-error", "is-historical");
-  elements.dataState.classList.add(className);
-  elements.dataState.lastChild.textContent = ` ${text}`;
+  const pill = elements.dataState;
+  const label = ` ${text}`;
+  const current = STATUS_CLASSES.filter((name) => pill.classList.contains(name));
+  if (current.length === 1 && current[0] === className && pill.lastChild.textContent === label) {
+    return;
+  }
+  pill.classList.remove(...STATUS_CLASSES.filter((name) => name !== className));
+  pill.classList.add(className);
+  pill.lastChild.textContent = label;
+}
+
+// How old a delayed snapshot is, rounded down: whole hours under two days,
+// then whole days. Delayed always means over 90 minutes, so never minutes.
+function snapshotAge(generated, now = Date.now()) {
+  const age = now - generated.getTime();
+  if (age < 2 * DAY_MS) return `${Math.floor(age / HOUR_MS)} h old`;
+  return `${Math.floor(age / DAY_MS)} days old`;
+}
+
+function snapshotTime(generatedAt) {
+  return `${dateTimeFormat.format(new Date(generatedAt))} TRT`;
 }
 
 function updateStatus(generatedAt) {
@@ -606,10 +664,12 @@ function updateStatus(generatedAt) {
   if (status === "fresh") {
     setStatus("is-fresh", "Latest snapshot");
   } else if (status === "closed") {
-    setStatus("is-closed", `Market closed · snapshot ${dateTimeFormat.format(generated)} TRT`);
+    setStatus("is-closed", `Market closed · snapshot ${snapshotTime(generated)}`);
   } else {
-    const minutesOld = Math.floor((Date.now() - generated.getTime()) / MINUTE_MS);
-    setStatus("is-delayed", `Update delayed · ${minutesOld}m old`);
+    setStatus(
+      "is-delayed",
+      `Update delayed · snapshot ${snapshotTime(generated)} · ${snapshotAge(generated)}`,
+    );
   }
 }
 
@@ -1027,8 +1087,9 @@ function renderInspector(contract) {
   elements.inspectorName.textContent = contract.label;
   elements.inspectorDay.textContent =
     `${state.renderedDate ? "Close" : "Live"} · ${formatDay(referenceDate())}`;
-  elements.inspectorNote.hidden = !state.adjustedDay;
-  elements.inspectorNote.textContent = daysNoteText(state.snapshot);
+  const daysNote = daysNoteText(state.snapshot);
+  elements.inspectorNote.hidden = !daysNote;
+  elements.inspectorNote.textContent = daysNote;
 
   fillInspectorList(elements.inspectorContract, [
     { key: "label", term: "Label", value: contract.label },
@@ -1039,7 +1100,8 @@ function renderInspector(contract) {
       key: "days",
       term: "Days left",
       value: String(days),
-      detail: `Calendar days from ${formatDay(countedFrom)}${state.adjustedDay ? ", adjusted" : ""}`,
+      detail: `Calendar days from ${formatDay(countedFrom)}` +
+        (state.adjustedDay ? ", adjusted" : state.snapshot.published_market_date ? ", recounted" : ""),
     },
   ]);
 
@@ -1241,7 +1303,17 @@ function columnHeader(text) {
 // The selected maturity on the comparison close next to the day on screen,
 // with the change between them. The compared contract is matched by
 // maturity month, as the chart overlay matches it, and keeps the values its
-// own snapshot stored: it is never rolled forward.
+// own snapshot stored: it is never rolled forward. A close published counted
+// from the next day is recounted from its session (see archivedClose), and
+// its Date row says so.
+// The comparison's line for a close recounted from its session, or "".
+function recountDetail(snapshot) {
+  return snapshot?.published_market_date
+    ? `Days left from ${formatDay(snapshot.market_date)}, recounted; ` +
+      `published from ${formatDay(snapshot.published_market_date)}`
+    : "";
+}
+
 function renderInspectorComparison(contract) {
   const group = elements.inspectorCompareGroup;
   group.hidden = !contract || !state.compareSnapshot || !state.compareDate;
@@ -1269,7 +1341,10 @@ function renderInspectorComparison(contract) {
   }
   elements.inspectorCompareNote.textContent =
     `Change is the day on screen minus the close of ${comparedDay}, ` +
-    "whose values are shown as that close stored them.";
+    (state.compareSnapshot.published_market_date
+      ? "whose values are shown as that close stored them, with days left and yields " +
+        "recounted from its session."
+      : "whose values are shown as that close stored them.");
 
   const currentDay = referenceDate();
   const current = comparisonSide(contract, data, state.snapshot.generated_at);
@@ -1296,9 +1371,11 @@ function renderInspectorComparison(contract) {
       term: "Date",
       current: {
         value: formatDay(currentDay),
-        detail: state.adjustedDay ? `Days left from ${formatDay(state.adjustedDay)}, adjusted` : "",
+        detail: state.adjustedDay
+          ? `Days left from ${formatDay(state.adjustedDay)}, adjusted`
+          : recountDetail(state.snapshot),
       },
-      compared: { value: comparedDay },
+      compared: { value: comparedDay, detail: recountDetail(state.compareSnapshot) },
       change: { value: `${apart} calendar ${apart === 1 ? "day" : "days"} apart` },
     },
     {
@@ -1369,12 +1446,34 @@ function historyDaysOnScreen(reference = referenceDate()) {
 
 // Weekdays strictly between two ISO dates, the earlier one first.
 function weekdaysBetween(earlier, later) {
-  let count = 0;
-  for (let day = dayOffset(later, { days: 1 }); day > earlier; day = dayOffset(day, { days: 1 })) {
+  return weekdayDatesBetween(earlier, later).length;
+}
+
+// The weekdays strictly between two ISO dates, oldest first.
+function weekdayDatesBetween(earlier, later) {
+  const days = [];
+  for (let day = dayOffset(earlier, { days: -1 }); day < later; day = dayOffset(day, { days: -1 })) {
     const weekday = new Date(`${day}T00:00:00Z`).getUTCDay();
-    if (weekday >= 1 && weekday <= 5) count += 1;
+    if (weekday >= 1 && weekday <= 5) days.push(day);
   }
-  return count;
+  return days;
+}
+
+const WEEKDAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+// A day with its weekday, such as "Thu 29 Oct 2026".
+function formatWeekday(value) {
+  return `${WEEKDAY_NAMES[new Date(`${value}T00:00:00Z`).getUTCDay()]} ${formatDay(value)}`;
+}
+
+// Weekdays with no archived close, oldest first: every weekday strictly
+// between the earliest and latest close in days (newest first) that isn't one
+// of them. Weekdays after the latest close are left out, since a day's close
+// is archived only after 23:15.
+function uncapturedWeekdays(days) {
+  if (days.length < 2) return [];
+  const archived = new Set(days);
+  return weekdayDatesBetween(days[days.length - 1], days[0]).filter((day) => !archived.has(day));
 }
 
 function countText(count, one, many) {
@@ -1396,7 +1495,7 @@ async function fetchHistoryDays(days, { retry = false } = {}) {
     while (queue.length) {
       const day = queue.shift();
       try {
-        state.historyCache.set(day, { snapshot: await fetchSnapshot(`${HISTORY_URL}/${day}.json`) });
+        state.historyCache.set(day, { snapshot: await fetchArchivedClose(day) });
       } catch (error) {
         console.warn(`The close of ${day} could not be loaded for the history.`, error);
         state.historyCache.set(day, { error: error?.message || "unknown error" });
@@ -1546,9 +1645,17 @@ function renderInspectorHistory(contract) {
   if (group.hidden) return;
 
   const live = !state.renderedDate;
+  const recounted = listed.filter((day) => state.historyCache.get(day)?.snapshot?.published_market_date);
   elements.inspectorHistoryNote.textContent =
     `${contract.symbol} on each archived close up to ${formatDay(referenceDate())}, ` +
-    "newest first, matched by its exact VİOP symbol. Missing values are never filled in.";
+    "newest first, matched by its exact VİOP symbol. Missing values are never filled in." +
+    (recounted.length === 1
+      ? ` Days left and yields on the close of ${formatDay(recounted[0])} are recounted ` +
+        "from its session; it was published counted from the next day."
+      : recounted.length
+        ? ` Days left and yields on the closes of ${[...recounted].sort().map(formatDay).join(", ")} ` +
+          "are recounted from their sessions; each was published counted from the next day."
+        : "");
   elements.historyLoad.hidden = state.historyOpen;
   elements.historyLoad.textContent =
     `Load history · ${countText(listed.length, "archived close", "archived closes")}`;
@@ -2034,6 +2141,11 @@ function boardCsvColumns(data, { carry, compareDate, compareMarket }) {
     {
       name: "days_rolled_forward_from",
       value: () => state.adjustedDay ? state.snapshot.market_date : null,
+      context: true,
+    },
+    {
+      name: "published_market_date",
+      value: () => state.snapshot.published_market_date ?? null,
       context: true,
     },
     side("spot"),
@@ -2764,16 +2876,34 @@ function renderSnapshot(snapshot) {
 }
 
 // Days left that no longer match the snapshot's own date are never silent.
+// market_date is the session the prices come from, which can be a day before
+// the snapshot was taken (after midnight, at weekends), so the note names the
+// session rather than calling that date the snapshot's.
+// An archived close recounted from its session (see archivedClose) says so too.
 function daysNoteText(snapshot) {
-  return state.adjustedDay
-    ? `Days left and yields adjusted to ${formatDay(state.adjustedDay)}; ` +
-      `prices are from the ${formatDay(snapshot.market_date)} snapshot.`
-    : "";
+  if (state.adjustedDay) {
+    return `Days left and yields adjusted to ${formatDay(state.adjustedDay)}; ` +
+      `prices are from the ${formatDay(snapshot.market_date)} session.`;
+  }
+  return recountNoteText(snapshot);
+}
+
+// How a recounted close was captured and published, or "" for any other.
+function recountNoteText(snapshot) {
+  if (!snapshot?.published_market_date) return "";
+  const captured = new Date(snapshot.generated_at);
+  const capture = Number.isNaN(captured.getTime())
+    ? "This close was captured"
+    : `This close was captured at ${tradeTimeFormat.format(captured)} on ` +
+      formatDay(istanbulToday(captured));
+  return `Days left and yields recounted from the ${formatDay(snapshot.market_date)} session. ` +
+    `${capture} and published counted from ${formatDay(snapshot.published_market_date)}.`;
 }
 
 function renderDaysNote(snapshot) {
-  elements.daysNote.hidden = !state.adjustedDay;
-  elements.daysNote.textContent = daysNoteText(snapshot);
+  const note = daysNoteText(snapshot);
+  elements.daysNote.hidden = !note;
+  elements.daysNote.textContent = note;
 }
 
 async function fetchSnapshot(url, options) {
@@ -2884,7 +3014,10 @@ function shareUrl() {
   const current = currentUrl();
   const url = new URL(current.pathname, current.origin);
   SHARE_PARAMS.forEach((name) => {
-    const value = name === "date" ? state.renderedDate : current.searchParams.get(name);
+    // The date and comparison on screen, never ones a link still waits for.
+    const value = name === "date"
+      ? state.renderedDate
+      : name === "compare" ? state.compareDate : current.searchParams.get(name);
     if (value) url.searchParams.set(name, value);
   });
   return url.href;
@@ -2979,8 +3112,9 @@ function quickPicks(reference, days) {
   return picks;
 }
 
+// The address keeps a comparison a link still waits for, so a reload retries it.
 function updateCompareUrl() {
-  updateUrlParam("compare", state.compareDate);
+  updateUrlParam("compare", state.compareDate ?? state.pendingLink?.compare ?? null);
 }
 
 function clearCompare() {
@@ -3077,8 +3211,7 @@ async function setCompare(date) {
   const request = state.compareRequestId;
   try {
     // Archived closes are written once, so one already fetched is reused.
-    const data = state.historyCache.get(date)?.snapshot ??
-      await fetchSnapshot(`${HISTORY_URL}/${date}.json`);
+    const data = state.historyCache.get(date)?.snapshot ?? await fetchArchivedClose(date);
     if (request !== state.compareRequestId) return;
     state.compareSnapshot = data;
     state.historyCache.set(date, { snapshot: data });
@@ -3098,6 +3231,83 @@ function renderHistoryControl() {
     ...state.historyDays.map((day) => new Option(`Close · ${formatDay(day)}`, day)),
   );
   elements.historySelect.value = state.viewDate ?? "";
+  renderHistoryCoverage();
+}
+
+// How much the archive covers, beside the View menu: the number of closes
+// since the earliest, then the weekdays between the earliest and latest with
+// no close, listed in a disclosure. It reads only the history index and never
+// says why a day is missing.
+function renderHistoryCoverage() {
+  const container = elements.historyCoverage;
+  const days = state.historyDays;
+  container.hidden = !days.length;
+  if (!days.length) {
+    container.replaceChildren();
+    return;
+  }
+  const closes = document.createElement("span");
+  closes.className = "history-coverage-closes";
+  closes.textContent =
+    `${countText(days.length, "close", "closes")} since ${formatDay(days[days.length - 1])}`;
+  const separator = document.createTextNode(" · ");
+  const missing = uncapturedWeekdays(days);
+  if (!missing.length) {
+    const none = document.createElement("span");
+    none.textContent = "no weekday missing";
+    container.replaceChildren(closes, separator, none);
+    return;
+  }
+  // Keep the disclosure open, and keyboard focus on it, across a re-read of
+  // the index.
+  const previous = container.querySelector("details");
+  const open = Boolean(previous?.open);
+  const focused = Boolean(previous?.contains(document.activeElement));
+  const details = document.createElement("details");
+  details.className = "history-coverage-gaps";
+  details.id = "history-coverage-gaps";
+  const summary = document.createElement("summary");
+  summary.textContent = `${countText(missing.length, "weekday", "weekdays")} not captured`;
+  const note = document.createElement("p");
+  note.textContent = "No archived close on these weekdays. Each may have been a public holiday or a missed capture.";
+  const list = document.createElement("ul");
+  list.append(...missing.map((day) => {
+    const item = document.createElement("li");
+    item.textContent = `${formatWeekday(day)}: no capture`;
+    return item;
+  }));
+  const panel = document.createElement("div");
+  panel.className = "history-coverage-list";
+  panel.append(note, list);
+  details.append(summary, panel);
+  details.addEventListener("toggle", () => syncCoverageScroll(details));
+  container.replaceChildren(closes, separator, details);
+  details.open = open;
+  syncCoverageScroll(details);
+  if (focused) summary.focus();
+}
+
+// A list long enough to scroll takes focus, so the keyboard can scroll it;
+// a shorter one is no extra tab stop.
+function syncCoverageScroll(details) {
+  const panel = details.querySelector(".history-coverage-list");
+  if (details.open && panel.scrollHeight > panel.clientHeight) {
+    panel.tabIndex = 0;
+    panel.setAttribute("role", "region");
+    panel.setAttribute("aria-label", "Weekdays not captured");
+  } else {
+    panel.removeAttribute("tabindex");
+    panel.removeAttribute("role");
+    panel.removeAttribute("aria-label");
+  }
+}
+
+// Close the coverage list, returning focus to its summary if asked.
+function closeCoverageList({ focus = false } = {}) {
+  const details = elements.historyCoverage.querySelector("details");
+  if (!details?.open) return;
+  details.open = false;
+  if (focus) details.querySelector("summary").focus();
 }
 
 function renderViewState() {
@@ -3108,7 +3318,8 @@ function renderViewState() {
   elements.spotTag.textContent = historical ? "Past close" : "≈ 15 min delay";
   document.body.dataset.view = historical ? "historical" : "live";
 
-  updateUrlParam("date", historical ? state.renderedDate : null);
+  // The address keeps a close a link still waits for, so a reload retries it.
+  updateUrlParam("date", historical ? state.renderedDate : state.pendingLink?.date ?? null);
 }
 
 // How long a successful read of the history index is used before the live
@@ -3151,6 +3362,7 @@ async function readHistoryIndex() {
   state.historyIndexFailed = false;
   state.historyIndexReadAt = Date.now();
   setHistoryDays([...new Set(days)].sort().reverse());
+  openPendingLink();
 }
 
 // Read the index again if the last read failed or is too old.
@@ -3187,10 +3399,16 @@ function setHistoryDays(days) {
 // Load and render one view: an archived date, or null for the live snapshot.
 // A view that fails to load leaves the current one on screen. With navigate,
 // the user asked to move to it, so it gets its own history entry once it is
-// on screen (see beginNavigation). Resolves true once the view is on screen,
+// on screen (see beginNavigation). With keepSelection, the maturity selected
+// when it renders is kept as a link's would be, with a notice if that close
+// doesn't list it; one still waiting to apply, as a link's does until a view
+// first renders, is kept instead. Resolves true once the view is on screen,
 // false if it failed, or undefined if a later load took over.
-async function loadView(date, { navigate = false } = {}) {
-  if (navigate) beginNavigation();
+async function loadView(date, { navigate = false, keepSelection = false } = {}) {
+  if (navigate) {
+    beginNavigation();
+    cancelPendingLink();
+  }
   state.viewDate = date;
   renderShareLink();
   let reached = false;
@@ -3200,7 +3418,7 @@ async function loadView(date, { navigate = false } = {}) {
   try {
     // Archived closes are written once, so one already fetched is reused.
     const data = date
-      ? state.historyCache.get(date)?.snapshot ?? await fetchSnapshot(`${HISTORY_URL}/${date}.json`)
+      ? state.historyCache.get(date)?.snapshot ?? await fetchArchivedClose(date)
       : await fetchSnapshot(`${DATA_URL}?v=${Date.now()}`, { cache: "no-store" });
     if (request !== state.requestId) return;
     if (date) state.historyCache.set(date, { snapshot: data });
@@ -3209,6 +3427,12 @@ async function loadView(date, { navigate = false } = {}) {
     const shown = date ? data : rollSnapshotForward(data, today);
     state.renderedDate = date;
     state.adjustedDay = shown === data ? null : today;
+    // Read now, not when the load began, so a choice made meanwhile counts.
+    // A maturity still waiting to apply, such as a link's when no view has
+    // rendered yet, is kept: there has been nothing on screen to choose from.
+    if (keepSelection && state.requestedMaturity === null) {
+      state.requestedMaturity = state.selectedKey;
+    }
     renderSnapshot(shown);
     reached = true;
   } catch (error) {
@@ -3228,11 +3452,15 @@ async function loadView(date, { navigate = false } = {}) {
         "Live data is unavailable. Still showing the close of " +
         `${formatDay(state.renderedDate)}.`,
       );
+    } else if (state.snapshot) {
+      // The live numbers on screen stay; say which snapshot they are.
+      setStatus(
+        "is-error",
+        `Live data unavailable · showing snapshot ${snapshotTime(state.snapshot.generated_at)}`,
+      );
     } else {
       setStatus("is-error", "Data unavailable");
-      if (!state.snapshot) {
-        elements.rows.innerHTML = '<tr class="empty-row"><td colspan="11">The market snapshot could not be loaded. Try refreshing shortly.</td></tr>';
-      }
+      elements.rows.innerHTML = '<tr class="empty-row"><td colspan="11">The market snapshot could not be loaded. Try refreshing shortly.</td></tr>';
     }
   } finally {
     if (request === state.requestId) {
@@ -3254,6 +3482,22 @@ function goLive() {
 elements.refreshButton.addEventListener("click", goLive);
 elements.liveButton.addEventListener("click", goLive);
 
+// The open coverage list lies over the page on wider screens, so Escape,
+// a click elsewhere or moving focus out of it closes it.
+elements.historyCoverage.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || !elements.historyCoverage.querySelector("details[open]")) return;
+  event.preventDefault();
+  closeCoverageList({ focus: true });
+});
+elements.historyCoverage.addEventListener("focusout", (event) => {
+  if (event.relatedTarget && !elements.historyCoverage.contains(event.relatedTarget)) {
+    closeCoverageList();
+  }
+});
+document.addEventListener("pointerdown", (event) => {
+  if (!elements.historyCoverage.contains(event.target)) closeCoverageList();
+});
+
 elements.historySelect.addEventListener("change", () => {
   const date = elements.historySelect.value;
   hideNotice();
@@ -3263,6 +3507,7 @@ elements.historySelect.addEventListener("change", () => {
 elements.compareSelect.addEventListener("change", () => {
   const date = elements.compareSelect.value;
   hideNotice();
+  cancelPendingLink();
   setCompare(compareDays().includes(date) ? date : null);
 });
 
@@ -3663,15 +3908,52 @@ function applyLinkPeriod(params) {
   markYieldPeriod();
 }
 
+// A link date as the notices name it: its day, or as given if it isn't one.
+function linkDayText(day) {
+  return Number.isNaN(parseMarketDate(day).getTime()) ? day : formatDay(day);
+}
+
+// Say which of a link's dates wait for the archive, and that they will open.
+function pendingLinkNotice({ date, compare }) {
+  const dateText = date && linkDayText(date);
+  const compareText = compare && linkDayText(compare);
+  if (date && compare) {
+    return `The archive could not be read, so the close of ${dateText} and its ` +
+      `comparison with the close of ${compareText} are not open yet. Showing live ` +
+      "data; they will open once the archive can be read.";
+  }
+  if (date) {
+    return `The archive could not be read, so the close of ${dateText} is not open ` +
+      "yet. Showing live data; it will open once the archive can be read.";
+  }
+  return `The archive could not be read, so the comparison with the close of ` +
+    `${compareText} is not shown yet. It will appear once the archive can be read.`;
+}
+
 // Apply the comparison a link asks for, once the archive's dates are known,
 // and return the view date it asks for: an archived close, or null for live.
-// Dates that aren't archived fall back with a notice.
+// Dates that aren't archived fall back with a notice. While the history index
+// has never been read, well-formed dates can't be checked yet: they wait in
+// state.pendingLink, and the address, for the first read that succeeds.
 function applyLinkDates(params) {
+  // The entry this link names replaces whatever another one waited for.
+  state.pendingLink = null;
+  state.linkRequestId += 1;
   const requestedCompare = params.get("compare");
+  const requested = params.get("date");
+  if (state.historyIndexReadAt === null) {
+    const pending = {
+      date: requested && HISTORY_DATE.test(requested) ? requested : null,
+      compare: requestedCompare && HISTORY_DATE.test(requestedCompare) ? requestedCompare : null,
+    };
+    if (pending.date || pending.compare) state.pendingLink = pending;
+  }
+  const waiting = state.pendingLink;
+
   const compare = requestedCompare && state.historyDays.includes(requestedCompare)
     ? requestedCompare
     : null;
-  if (requestedCompare && !compare) {
+  if (requestedCompare && !compare && !waiting?.compare) {
     addNotice(
       HISTORY_DATE.test(requestedCompare)
         ? `No archived close for ${requestedCompare} to compare with.`
@@ -3682,16 +3964,85 @@ function applyLinkDates(params) {
   if (compare !== state.compareDate) setCompare(compare);
   else updateCompareUrl();
 
-  const requested = params.get("date");
   if (requested && state.historyDays.includes(requested)) return requested;
-  if (requested) {
+  if (requested && !waiting?.date) {
     addNotice(
       HISTORY_DATE.test(requested)
         ? `No archived close for ${requested}. Showing live data.`
         : "That date is not in the archive. Showing live data.",
     );
   }
+  if (waiting) addNotice(pendingLinkNotice(waiting));
   return null;
+}
+
+// Drop a link's waiting dates because the user moved elsewhere, such as to
+// live data or a comparison, and take them out of the address. A market,
+// maturity or period change keeps them.
+function cancelPendingLink() {
+  state.linkRequestId += 1;
+  // A waiting close still loading is dropped before it can render, and the
+  // view on screen stays, with an address that names neither it nor the
+  // comparison that was to follow it.
+  if (state.linkLoad !== null && state.linkLoad === state.requestId) {
+    state.requestId += 1;
+    state.viewDate = state.renderedDate;
+    elements.refreshButton.classList.remove("is-loading");
+    elements.refreshButton.disabled = false;
+    renderViewState();
+    updateCompareUrl();
+    renderShareLink();
+  }
+  state.linkLoad = null;
+  if (!state.pendingLink) return;
+  state.pendingLink = null;
+  updateUrlParam("date", state.renderedDate);
+  updateCompareUrl();
+}
+
+// Once the history index has been read, open what a link waited for in
+// place, as the link would have: its close, without a history entry and with
+// the market, maturity and period on screen, then its comparison. A date the
+// index doesn't list, or a close that can't be loaded, falls back as a link's
+// does. A move the user makes before it is on screen stops it.
+async function openPendingLink() {
+  const pending = state.pendingLink;
+  if (!pending) return;
+  state.pendingLink = null;
+  const request = ++state.linkRequestId;
+  hideNotice();
+
+  const date = pending.date && state.historyDays.includes(pending.date) ? pending.date : null;
+  if (date) {
+    const load = loadView(date, { keepSelection: true });
+    state.linkLoad = state.requestId;
+    await load;
+    if (state.linkLoad === state.requestId) state.linkLoad = null;
+    // A move the user makes, or another entry, stops the link. A close that
+    // can't be loaded before any view has rendered falls back to live data in
+    // a load of its own, which is not a move: the comparison still follows,
+    // as a fresh link's does.
+    if (request !== state.linkRequestId) return;
+  } else if (pending.date) {
+    addNotice(`No archived close for ${pending.date}. Showing live data.`);
+    renderViewState();
+  }
+
+  if (!pending.compare) return;
+  const compare = state.historyDays.includes(pending.compare) ? pending.compare : null;
+  const reference = referenceDate();
+  if (!compare) {
+    addNotice(`No archived close for ${pending.compare} to compare with.`);
+  } else if (reference && !(compare < reference)) {
+    addNotice(
+      `The close of ${formatDay(compare)} is not earlier than ` +
+      `${formatDay(reference)}, so the comparison is off.`,
+    );
+  } else {
+    setCompare(compare);
+    return;
+  }
+  updateCompareUrl();
 }
 
 // Back and Forward restore an entry's address; show what it names in place,

@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import json
 from pathlib import Path
 import subprocess
@@ -7,7 +7,8 @@ import tempfile
 import unittest
 from zoneinfo import ZoneInfo
 
-from scripts.archive_snapshot import archive, build_manifest, trading_date
+from scripts.archive_snapshot import archive, build_manifest, parse_generated_at
+from scripts.market_calendar import session_date, trading_date
 
 
 ISTANBUL = ZoneInfo("Europe/Istanbul")
@@ -63,10 +64,25 @@ class TradingDateTests(unittest.TestCase):
         utc = datetime.fromisoformat("2026-10-07T20:20:00+00:00")
         self.assertEqual(trading_date(utc), date(2026, 10, 7))
 
+    def test_every_close_is_the_session_the_updater_dates_it_to(self):
+        """The archive files a snapshot under the session whose market_date the
+        updater gives it, so the guard in archive() never skips a real close."""
+        moment = at(2026, 5, 20, 0)  # through a half day, holidays and weekends
+        while moment < at(2026, 11, 1, 0):
+            with self.subTest(moment=moment):
+                closes = trading_date(moment)
+                if closes is not None:
+                    self.assertEqual(closes, session_date(moment))
+            moment += timedelta(minutes=5)
 
-def snapshot_bytes(generated_at):
+
+def snapshot_bytes(generated_at, market_date=None):
+    """The fixture as the updater would write it at generated_at."""
     snapshot = json.loads(FIXTURE.read_text(encoding="utf-8"))
     snapshot["generated_at"] = generated_at
+    snapshot["market_date"] = market_date or session_date(
+        parse_generated_at(generated_at)
+    ).isoformat()
     return (json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
 
 
@@ -129,6 +145,32 @@ class ArchiveTests(unittest.TestCase):
         message = archive(snapshot, self.checkout)
 
         self.assertIn("Skipped", message)
+        self.assertEqual(sorted(p.name for p in self.history.iterdir()), ["index.json"])
+        self.assertEqual(self.manifest()["days"], [])
+
+    def test_archives_after_midnight_snapshot_under_the_previous_session(self):
+        snapshot = self.write_snapshot("2026-10-08T00:45:00+03:00")
+        self.assertEqual(json.loads(snapshot.read_bytes())["market_date"], "2026-10-07")
+
+        message = archive(snapshot, self.checkout)
+
+        self.assertIn("Archived end-of-day snapshot 2026-10-07", message)
+        self.assertEqual(
+            (self.history / "2026-10-07.json").read_bytes(), snapshot.read_bytes()
+        )
+        self.assertEqual([e["date"] for e in self.manifest()["days"]], ["2026-10-07"])
+
+    def test_skips_snapshot_whose_market_date_is_not_its_session(self):
+        # As the updater dated it before market_date followed the session: the
+        # 7 Oct close, captured after midnight, counted from 8 Oct.
+        snapshot = self.root / "misdated.json"
+        snapshot.write_bytes(snapshot_bytes("2026-10-08T00:45:00+03:00", "2026-10-08"))
+
+        message = archive(snapshot, self.checkout)
+
+        self.assertTrue(message.startswith("Skipped:"), message)
+        self.assertIn("2026-10-07 session", message)
+        self.assertIn("market_date is 2026-10-08", message)
         self.assertEqual(sorted(p.name for p in self.history.iterdir()), ["index.json"])
         self.assertEqual(self.manifest()["days"], [])
 

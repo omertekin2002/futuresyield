@@ -20,10 +20,10 @@ from typing import Any
 import borsapy as bp
 
 if __package__:
-    from .market_calendar import ISTANBUL, market_closures
+    from .market_calendar import ISTANBUL, market_closures, session_date
     from .snapshot_schema import validate_snapshot
 else:  # run as `python scripts/update_data.py`
-    from market_calendar import ISTANBUL, market_closures
+    from market_calendar import ISTANBUL, market_closures, session_date
     from snapshot_schema import validate_snapshot
 
 
@@ -425,14 +425,28 @@ def fetch_viop_tables() -> dict[str, dict[str, dict[str, Any]]]:
 
             # In borsapy 0.10.2 these normalized names map to the live table as:
             # volume_tl -> absolute price change, volume_qty -> TRY turnover.
+            last = finite_number(raw.get("price"))
+            change = finite_number(raw.get("volume_tl"))
+            turnover = finite_number(raw.get("volume_qty"))
+            # A daily change as large as the price would mean a previous close
+            # at or below zero, so volume_tl is no longer the price change and
+            # the remap above has drifted upstream. Drop both remapped fields
+            # rather than publish a volume as a change or a quantity as TRY.
+            if change is not None and last is not None and abs(change) >= last:
+                print(
+                    f"Warning: VİOP table row {code} no longer matches the "
+                    "borsapy 0.10.2 column remap; dropping its change and turnover"
+                )
+                change = None
+                turnover = None
             rows[market.key][symbol] = {
                 "symbol": symbol,
                 "code": code,
                 "description": str(raw.get("contract") or ""),
-                "last": finite_number(raw.get("price")),
-                "change": finite_number(raw.get("volume_tl")),
+                "last": last,
+                "change": change,
                 "change_percent": finite_number(raw.get("change")),
-                "turnover_try": finite_number(raw.get("volume_qty")),
+                "turnover_try": turnover,
             }
             break
     return rows
@@ -606,7 +620,10 @@ def normalize_contract(
 
 def build_snapshot(now: datetime | None = None) -> dict[str, Any]:
     generated_at = (now or datetime.now(ISTANBUL)).astimezone(ISTANBUL)
-    today = generated_at.date()
+    # Days left and everything built on them count from the session whose
+    # quotes this snapshot holds: after midnight, at weekends or before the
+    # 09:20 open that is the session that last closed, not the calendar day.
+    market_day = session_date(generated_at)
     spots: dict[str, dict[str, Any]] = {}
     currency_markets = tuple(
         market for market in MARKET_CONFIGS if market.key != "XAUTRY"
@@ -646,7 +663,8 @@ def build_snapshot(now: datetime | None = None) -> dict[str, Any]:
         if market.contract_size is not None:
             # The projection is supplementary; never fail the snapshot over it.
             try:
-                spot_trend = fetch_spot_trend(market, spot, today)
+                # The trend ends at the spot's own observation, not the session.
+                spot_trend = fetch_spot_trend(market, spot, generated_at.date())
             except Exception as exc:
                 print(f"Warning: {market.pair} spot trend unavailable: {exc}")
         contracts = [
@@ -655,7 +673,7 @@ def build_snapshot(now: datetime | None = None) -> dict[str, Any]:
                 quotes.get(item["symbol"]),
                 table_rows[market.key].get(item["symbol"]),
                 spot["last"],
-                today,
+                market_day,
                 market,
                 spot_trend["daily_factor"] if spot_trend else None,
             )
@@ -684,7 +702,7 @@ def build_snapshot(now: datetime | None = None) -> dict[str, Any]:
     return {
         "schema_version": 4,
         "generated_at": generated_at.isoformat(timespec="seconds"),
-        "market_date": today.isoformat(),
+        "market_date": market_day.isoformat(),
         "timezone": "Europe/Istanbul",
         "refresh_interval_minutes": 60,
         "default_market": DEFAULT_MARKET.key,

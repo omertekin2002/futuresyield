@@ -316,9 +316,11 @@ class StreamQuoteTests(unittest.TestCase):
         )
 
 
-class SnapshotTests(unittest.TestCase):
-    def build_with_fakes(self, trend):
-        now = datetime(2026, 7, 20, 12, tzinfo=ZoneInfo("Europe/Istanbul"))
+class FakeSourcesMixin:
+    """Build a snapshot from one faked Aug 2026 contract per market."""
+
+    def build_with_fakes(self, trend, now=None):
+        now = now or datetime(2026, 7, 20, 12, tzinfo=ZoneInfo("Europe/Istanbul"))
         spot_values = {"USDTRY": 47.0, "EURTRY": 54.0, "XAUTRY": 6_100.0}
 
         def fake_spot(market, _usd_spot=None):
@@ -357,6 +359,8 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(mock_trend.call_args.args[0], MARKETS["USDTRY"])
         return snapshot
 
+
+class SnapshotTests(FakeSourcesMixin, unittest.TestCase):
     def test_builds_all_three_market_snapshots(self):
         snapshot = self.build_with_fakes(lambda *_args: {"daily_factor": 1.0005})
 
@@ -401,6 +405,85 @@ class SnapshotTests(unittest.TestCase):
         self.assertIsNone(usd["spot_trend"])
         self.assertEqual(usd["contracts"][0]["last"], 48.0)
         self.assertIsNone(usd["contracts"][0]["expected_short_profit_try"])
+
+
+class MarketDateTests(FakeSourcesMixin, unittest.TestCase):
+    """market_date is the session whose quotes the snapshot holds, as the archive
+    files it, and every Aug 2026 contract counts its days left from it."""
+
+    # The fakes' Aug 2026 contracts mature on Monday 31 Aug 2026.
+    MATURITY = date(2026, 8, 31)
+
+    def assert_counted_from(self, now, session):
+        snapshot = self.build_with_fakes(lambda *_args: {"daily_factor": 1.0005}, now)
+        validate_snapshot(snapshot)
+        self.assertEqual(snapshot["generated_at"], now.isoformat(timespec="seconds"))
+        self.assertEqual(snapshot["market_date"], session.isoformat())
+        for key in MARKETS:
+            contract = snapshot["markets"][key]["contracts"][0]
+            self.assertEqual(contract["days_to_maturity"], (self.MATURITY - session).days)
+        usd = snapshot["markets"]["USDTRY"]["contracts"][0]
+        days = (self.MATURITY - session).days
+        self.assertAlmostEqual(
+            usd["daily_yield_factor"], (48.0 / 47.0) ** (1 / days), places=12
+        )
+        self.assertAlmostEqual(
+            usd["expected_spot_at_maturity"], 47.0 * 1.0005**days, places=9
+        )
+
+    @staticmethod
+    def at(*args):
+        return datetime(*args, tzinfo=ZoneInfo("Europe/Istanbul"))
+
+    def test_from_the_open_until_midnight_is_today(self):
+        # Monday 20 Jul 2026 is an ordinary trading day.
+        monday = date(2026, 7, 20)
+        for now in (self.at(2026, 7, 20, 9, 20), self.at(2026, 7, 20, 12),
+                    self.at(2026, 7, 20, 23, 30)):
+            with self.subTest(now=now):
+                self.assert_counted_from(now, monday)
+
+    def test_after_midnight_and_before_the_open_is_the_previous_session(self):
+        monday = date(2026, 7, 20)
+        for now in (self.at(2026, 7, 21, 0, 30), self.at(2026, 7, 21, 8),
+                    self.at(2026, 7, 21, 9, 19)):
+            with self.subTest(now=now):
+                self.assert_counted_from(now, monday)
+
+    def test_weekend_and_monday_before_the_open_is_friday(self):
+        friday = date(2026, 7, 24)
+        for now in (self.at(2026, 7, 25, 12), self.at(2026, 7, 26, 23),
+                    self.at(2026, 7, 27, 9, 0)):
+            with self.subTest(now=now):
+                self.assert_counted_from(now, friday)
+
+    def test_day_after_a_public_holiday_before_the_open(self):
+        # Wednesday 15 Jul 2026 is Democracy and National Unity Day, so
+        # Thursday morning still holds Tuesday's session.
+        self.assert_counted_from(self.at(2026, 7, 16, 8), date(2026, 7, 14))
+        self.assert_counted_from(self.at(2026, 7, 15, 14), date(2026, 7, 14))
+
+    def test_half_day_after_its_close_is_today(self):
+        # Tuesday 26 May 2026 is the half day before Kurban Bayramı: one
+        # session until 12:40, then four public holidays.
+        half_day = date(2026, 5, 26)
+        for now in (self.at(2026, 5, 26, 11), self.at(2026, 5, 26, 14),
+                    self.at(2026, 5, 26, 23, 30), self.at(2026, 5, 29, 10),
+                    self.at(2026, 6, 1, 7)):
+            with self.subTest(now=now):
+                self.assert_counted_from(now, half_day)
+
+    def test_spot_trend_keeps_the_spot_observation_day(self):
+        # Only days left move to the session; the trend's fallback end date is
+        # still the calendar day the snapshot was taken.
+        calls = []
+
+        def trend(*args):
+            calls.append(args)
+            return {"daily_factor": 1.0005}
+
+        self.build_with_fakes(trend, self.at(2026, 7, 21, 0, 30))
+        self.assertEqual(calls[0][2], date(2026, 7, 21))
 
 
 

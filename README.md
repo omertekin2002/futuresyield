@@ -72,6 +72,16 @@ or later) shows a neutral **Market closed** with its time; an older one still
 shows **Update delayed**, so a dead trigger stays visible. Weekday public
 holidays need no special case, because the timer still fires on them.
 
+**Update delayed** names the snapshot's time and its age, rounded down to whole
+hours under two days and to whole days after that, for example
+`Update delayed · snapshot 07 Oct, 14:06 TRT · 2 days old`. If a live poll fails
+while live data is on screen, the numbers stay and the status says which
+snapshot they are, as `Live data unavailable · showing snapshot 07 Oct, 14:06 TRT`,
+until the next poll succeeds; a first load that fails shows **Data unavailable**.
+The status is a polite live region, so it is only rewritten when its wording
+changes: a delayed age moves on once an hour, and a poll that changes nothing
+announces nothing.
+
 The workflow only replaces the live site after a complete, valid snapshot
 is produced. If upstream market data is temporarily unavailable, the job fails
 and the previous successful Pages deployment stays online.
@@ -97,9 +107,18 @@ The yield curve starts with the gross daily factor
 1-, 30-, or 365-day compounded factor to net percentage yield by subtracting
 one and multiplying by 100.
 
-Days left are counted from the snapshot's market date, and refreshes can land
-hours apart, so the live snapshot can still be from the previous day after
-midnight. When the live snapshot's `market_date` is earlier than today in
+Days left are counted from the snapshot's `market_date`: the VİOP session
+whose quotes it holds, by the same calendar the archive uses
+(`scripts/market_calendar.py`). On a trading day, from the 09:20 open until
+midnight, that is the day itself, half days included. Before the open, and at
+weekends and on public holidays, it is the previous trading day, the session
+that last closed. So a snapshot taken at 00:30 on Thursday, or on Saturday, is
+dated to Wednesday or Friday, and a contract maturing on that session day stays
+in with 0 days. The spot and its trend keep their own observation times.
+
+Refreshes can land hours apart, and an overnight or weekend snapshot is dated
+to the previous session, so the live snapshot's date is often earlier than
+today. When the live snapshot's `market_date` is earlier than today in
 Europe/Istanbul (whatever the browser's own time zone), the dashboard
 recomputes, on a copy, everything that depends on time to maturity: days left,
 the daily factor and the 1D/30D/365D yields, the curve horizon, and the USD/TRY
@@ -107,8 +126,10 @@ expected spot and profit. It uses the updater's rules, so a contract maturing
 today shows 0 days and no yield, and a contract that has matured is dropped.
 Prices, premiums and the spot trend stay as published. A note under the data
 status says so, for example "Days left and yields adjusted to 08 Oct 2026;
-prices are from the 07 Oct 2026 snapshot". Archived closes and comparison
-overlays always keep their stored values, since each describes its own day.
+prices are from the 07 Oct 2026 session". Archived closes and comparison
+overlays always keep their stored values, since each describes its own day;
+the only exception is the three legacy closes counted from the next day, which
+are recounted from their own session (see **Dated to its session** below).
 
 ### USD/TRY short carry
 
@@ -146,6 +167,25 @@ end-of-day snapshot per VİOP trading day on a separate `data-history` branch.
   any snapshot taken before the next session opens at 09:20, including over
   weekends and public holidays. Snapshots taken in between, including the gap
   between the normal and evening sessions, are not end-of-day and are skipped.
+- **Dated to its session.** A day file's `market_date` is the session it
+  closes, so its days left and yields count from that day even when it was
+  captured after midnight or at a weekend. `archive()` skips, with a `Skipped:`
+  line, a snapshot whose `market_date` is not the session its `generated_at`
+  closes; the live site still deploys. Three closes archived before this rule
+  (26 Oct, 10 Nov and 11 Nov 2026, each captured after midnight) were published
+  with the next calendar day as `market_date`, so their files count days left
+  and yields from that day. Archived days are write-once, so the files stay as
+  they are. The dashboard instead recounts each such close from its own
+  session when it loads it, with the same rules as the live roll forward: days
+  left from the session, the annualized premium, the daily factor and
+  1D/30D/365D yields, and the USD/TRY expected spot and profit. Prices,
+  bid/ask, spot, premium, spot trend, timestamps and the contract list stay as
+  published. The view, the Comparison table, the History table and chart, the
+  overlays and the CSV all use the recounted values, and the view says so, for
+  example "Days left and yields recounted from the 11 Nov 2026 session. This
+  close was captured at 01:50 on 12 Nov 2026 and published counted from
+  12 Nov 2026." The audit pins the three in `LEGACY_NEXT_DAY_CLOSES` and fails
+  on any other close whose `market_date` isn't its file's day.
 - **Half days.** A half-day holiday is still a trading day, but its only session
   ends at 12:40 and it has no evening session, so snapshots from 12:55 onward
   count as that day. On the year's last trading day the evening session is not
@@ -157,6 +197,14 @@ end-of-day snapshot per VİOP trading day on a separate `data-history` branch.
   rejects a live or archived file with an unknown `schema_version`, or with
   contracts missing their maturity date or days to maturity, and shows its
   usual load error.
+- **Audited in CI.** Every CI run checks the real `data-history` archive
+  read-only: `python -m scripts.audit_history <history-dir>` fails if a close
+  breaks the current schema or end-of-day rule, if its `market_date` isn't its
+  file's day (outside the three pinned legacy closes), if `index.json` no longer
+  matches its files, or if anything else is in the directory. The smoke test
+  then opens every archived close in a headless browser when
+  `VADE_ARCHIVE_DIR` points at that directory. A change that would strand
+  archived closes fails CI instead of the live site.
 - **Size.** About 27 KB per trading day, roughly 7 MB a year.
 
 ### Browsing past closes
@@ -166,6 +214,17 @@ status. It lists **Live** and every archived close, newest first. Choosing a
 close renders the whole dashboard (spot, curves, yields, carry and the contract
 board) from that day's snapshot, for every market.
 
+- **Coverage.** Beside the menu, a line says how deep the archive is, for
+  example "19 closes since 26 Oct 2026 · 1 weekday not captured". It counts
+  the closes the history index lists and the weekdays strictly between the
+  earliest and latest of them that have no close; weekdays after the latest
+  close are not counted, since a day is archived only after 23:15. The
+  "not captured" part opens a list of those days, oldest first, such as
+  "Thu 29 Oct 2026: no capture". Each may have been a public holiday or a
+  missed capture; the page never says which, and never fills one in. Escape,
+  a click elsewhere or leaving the list closes it. With
+  none missing the line says "no weekday missing". It reads only the index
+  already loaded, updates when a re-read changes it, and hides with the menu.
 - **Unmistakable.** A "Past close" banner and a "Historical · close of …"
   status replace the live freshness state. The one-minute poll never replaces a
   past close; **Back to live**, **Refresh**, or choosing **Live** returns to live
@@ -199,6 +258,17 @@ board) from that day's snapshot, for every market.
   fetched, without a reload. The view, comparison, maturity, period and URL
   stay as they are. A failed re-read keeps the closes already listed, and a
   close the index stops listing only drops out of the menus.
+- **Links wait for an unreadable archive.** If the index has never been read,
+  because it failed at start-up, a well-formed `?date=` or `?compare=` is not
+  rejected: the page shows live data with a notice that the archive could not
+  be read and the close will open once it can, and keeps the dates in the URL
+  so a reload retries them. When a later read succeeds, the close opens in
+  place (no new history entry, same market, maturity and period), then its
+  comparison; a date the index doesn't list then falls back with the usual
+  notice. Choosing **Live**, **Refresh**, a close or a comparison first, or
+  going Back or Forward to another entry, drops the waiting dates. A malformed
+  date is still rejected at once, and **Copy link** copies the live view on
+  screen while dates wait.
 - **One contract across the archive.** With a maturity selected, the
   inspector's **History** group lists that exact contract on every archived
   close up to the day on screen, each date linking to that close. See
@@ -257,7 +327,11 @@ never blocks or undoes the Pages deploy. It is the only job with
 logic lives in `scripts/archive_snapshot.py`, and
 `scripts/archive_history.sh SNAPSHOT [WORKTREE]` runs it against a checkout of
 the branch, creating the branch as an orphan holding only `history/` on the
-first run.
+first run. `tests/test_archive_history.py` runs that script end to end against
+a throwaway local bare origin that refuses non-fast-forward updates: orphan
+creation, one fast-forward commit per new day, write-once days, no-op repeats,
+invalid snapshots, an unreachable origin, and a concurrent update that must not
+be overwritten.
 
 ### Sharing a view
 
@@ -312,8 +386,9 @@ example `vade-USDTRY-2026-10-07-vs-2026-09-30.csv`.
   `on 2026-09-30: no bid` (a value missing on the compared close) or
   `not listed on 2026-09-30`. Reasons are separated by `; ` and each is listed
   once. `missing` is empty when the row has every value.
-  `days_rolled_forward_from` is context, not a value, so it is empty without a
-  reason when nothing was rolled forward.
+  `days_rolled_forward_from` and `published_market_date` are context, not
+  values, so they are empty without a reason when nothing was rolled forward
+  or recounted.
 
 Prices and spot are in the market's `spot_unit` (TRY per USD, per EUR or per
 gram). Times are ISO 8601 with an offset, as the snapshot stores them.
@@ -325,6 +400,7 @@ gram). Times are ISO 8601 with an offset, as the snapshot stores them.
 | `market_date` | The day the values describe, `YYYY-MM-DD`, after any roll forward |
 | `snapshot_generated_at` | When the snapshot on screen was generated |
 | `days_rolled_forward_from` | The live snapshot's own `market_date` when its days left and yields were rolled forward to `market_date`; empty otherwise |
+| `published_market_date` | An archived close's published `market_date` when it was published counted from the next day and its days left and yields were recounted from its session, `market_date`; empty otherwise |
 | `spot`, `spot_unit` | Spot reference and its unit |
 | `spot_time`, `spot_source` | When the spot reference was taken, and its source |
 | `maturity_month` | Maturity month, `YYYY-MM`, as in `?maturity=` |
@@ -356,7 +432,8 @@ carry table, and left out for EUR/TRY and XAU/TRY. The `compare_*` and
 `delta_*` columns are present only while a comparison is loaded, and left out
 otherwise. Every change is the day on screen minus the compared close, exactly
 as the inspector's **Comparison** table computes it, and the compared close
-keeps its stored values; it is never rolled forward.
+keeps its stored values; it is never rolled forward. A legacy close published
+counted from the next day is recounted from its session on either side.
 
 The expected spot and profit are a projection from the recent spot trend, not a
 forecast, and nothing in the file is investment advice.
@@ -392,7 +469,8 @@ OnCalendar=Mon..Fri *-*-* 09..23:20:00 Europe/Istanbul
 ```
 
 Refreshes stop whenever that machine is offline; the dashboard then shows
-**Update delayed** once its snapshot is older than the schedule allows.
+**Update delayed**, with the snapshot's time and how many hours or days old it
+is, once its snapshot is older than the schedule allows.
 
 ## Run locally
 
@@ -408,6 +486,19 @@ python -m http.server 8000
 ```
 
 Then open <http://localhost:8000>.
+
+**Recorded-response tests.** `tests/test_update_data_replay.py` runs the
+updater end to end, offline, against real borsapy 0.10.2 responses recorded in
+`tests/fixtures/borsapy/`: FX intraday and daily history, FX current quotes,
+the VİOP futures table, contract discovery and TradingView stream quotes. It
+replaces only the `bp` module in `scripts/update_data.py`, so every fetch,
+fallback and normalization step runs for real. It checks the happy path, known
+upstream quirks such as missing bids or trade times, malformed numbers, a dead
+stream or table, and an expired contract. It checks runs that must fail without
+writing a snapshot, and renamed or remapped upstream columns. The quirk and
+drift cases edit copies of the recordings and say so. After a borsapy upgrade
+the suite fails on purpose until the responses are re-recorded; the
+[fixtures README](tests/fixtures/borsapy/README.md) has the capture commands.
 
 To assemble the deployable site into `_site/` exactly as the Pages workflow
 does, run `bash scripts/build_site.sh`.
@@ -510,7 +601,9 @@ unusual point can be checked without reading across the board:
   next to the repricing. Each change is the day on screen minus the compared
   close, as in the chart tooltips, and Δ yield equals the tooltip's. The
   compared contract is matched by maturity month, as on the charts, and keeps
-  the values its own snapshot stored: it is never rolled forward. A maturity
+  the values its own snapshot stored: it is never rolled forward. A legacy
+  close published counted from the next day is recounted from its session,
+  and the Date row says so on its side. A maturity
   that wasn't listed yet on the compared close says "Not listed on" that date
   and shows no changes. A side without a price or a yield shows "—" with the
   same reason as above, and that row's change is "—". Only observed values
@@ -579,7 +672,8 @@ Every value is the one the board, the carry table and the chart tooltips show.
 Nothing missing is filled in: without a bid there is no profit, a contract
 maturing today has no daily factor or yield, and each says why. When the live
 snapshot has been rolled forward to a later Istanbul day, the inspector shows
-the adjusted days left and yields and repeats the note saying so. It updates in
+the adjusted days left and yields and repeats the note saying so; a legacy
+close recounted from its session does the same. It updates in
 place on the one-minute refresh, on yield-period switches and when the
 comparison changes, and hides with the selection.
 
