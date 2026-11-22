@@ -2900,6 +2900,241 @@ class DashboardSmokeTests(unittest.TestCase):
         expect(self.page.locator("#inspector-compare-table")).to_be_visible()
         expect(self.page.locator("#inspector-compare-spot-note")).to_be_hidden()
 
+    # History marks the closes whose spot was taken after the futures' last trade
+
+    LATE_TAG = "spot 23:15 · 5 h 6 min later"
+    LATE_NAME = ", spot taken 5 h 6 min after the futures' last trade"
+    LATE_NOTE = (
+        " Closes tagged “spot … later”, ringed with dashes in the chart, price the futures "
+        "against a spot taken more than 15 min after their last trade, so part of a change "
+        "across them comes from when the spot was taken."
+    )
+
+    def history_spot_marks(self):
+        """By date, each History row's late-spot tag (visible text, full text)
+        and each chart point's late-spot mark, name, value and position."""
+        return self.page.evaluate(
+            """() => ({
+                rows: Object.fromEntries(
+                    [...document.querySelectorAll('#inspector-history-rows tr[data-history-row]')]
+                    .map((row) => {
+                        const tag = row.querySelector('.spot-late-tag');
+                        return [row.dataset.historyRow, tag
+                            ? { text: tag.firstChild.textContent, full: tag.textContent }
+                            : null];
+                    })),
+                points: Object.fromEntries(
+                    [...document.querySelectorAll('#history-chart-svg .history-point')]
+                    .map((node) => [node.dataset.historyDay, {
+                        late: node.dataset.spotLate ?? null,
+                        ring: Boolean(node.querySelector('.history-spot-late')),
+                        name: node.getAttribute('aria-label'),
+                        value: node.dataset.value,
+                        y: node.querySelector('.history-marker').getBBox().y,
+                    }])),
+            })"""
+        )
+
+    def late_spot_history(self, spot_time="23:15"):
+        """The fixture archive with 05 and 06 Oct (and the closes where the
+        history contract has no price or isn't listed) taken like closes
+        archived before #97, their futures last trading at 18:09 and their
+        spot taken at spot_time, and 30 Sep's spot within a bar of its trade."""
+        closes = copy.deepcopy(self.history)
+        for day in ("2026-10-05", "2026-10-06", NO_PRICE_DAY, ROLLED_DAY):
+            closes[day] = self.late_spot_close(day, spot_time)
+        closes["2026-09-30"] = self.late_spot_close("2026-09-30", spot_time="18:24")
+        return closes
+
+    def serve_history(self, closes, bundled=True):
+        """Serve closes as each close's own file, and as the USD/TRY bundle or
+        with no bundle, so each close is fetched on its own."""
+        for day, close in closes.items():
+            self.serve_close(day, close)
+        if bundled:
+            self.serve_bundle("USDTRY", self.history_bundle("USDTRY", closes))
+        else:
+            self.serve_bundle("USDTRY", "", 404)
+
+    def test_history_marks_closes_whose_spot_was_taken_after_the_last_trade(self):
+        query = "?market=USDTRY&maturity=2028-01"
+        # The same closes with each spot taken within a bar of its futures'
+        # last trade: the same prices, trades and spots, only timed apart.
+        self.serve_snapshot(re.compile(r"/data/market\.json"), self.aligned_snapshot())
+        self.serve_history(self.late_spot_history(spot_time="18:20"))
+        self.open_dashboard(query)
+        self.load_history(len(HISTORY_FIXTURE))
+        plain = self.history_view()
+        plain_marks = self.history_spot_marks()
+        self.assertEqual(set(plain_marks["rows"].values()), {None})
+        self.assertFalse(any(p["late"] or p["ring"] for p in plain_marks["points"].values()))
+        expect(self.page.locator("#history-chart-key")).not_to_contain_text("Dashed ring")
+
+        # The live spot is matched; 05 and 06 Oct paired an 18:09 trade with a
+        # 23:15 spot; 30 Sep's spot came within a bar of its trade.
+        self.reopen_at(FIXTURE_DAY_TIME)
+        self.page.clock.install(time=FIXTURE_DAY_TIME)
+        self.serve_snapshot(re.compile(r"/data/market\.json"), self.aligned_snapshot())
+        self.serve_history(self.late_spot_history())
+        self.open_dashboard(query)
+        self.load_history(len(HISTORY_FIXTURE))
+        late_days = ("2026-10-05", "2026-10-06")
+
+        def assert_marked():
+            marks = self.history_spot_marks()
+            self.assertEqual(marks["rows"], {
+                "2026-10-07": None,
+                "2026-10-06": {
+                    "text": self.LATE_TAG,
+                    "full": f"{self.LATE_TAG} than the futures' last trade at 18:09 TRT",
+                },
+                "2026-10-05": {
+                    "text": self.LATE_TAG,
+                    "full": f"{self.LATE_TAG} than the futures' last trade at 18:09 TRT",
+                },
+                "2026-09-30": None,
+                # No price, and not listed: no premium or yield rests on the spot.
+                NO_PRICE_DAY: None,
+                ROLLED_DAY: None,
+            })
+            # Table and chart agree on every point.
+            for day, point in marks["points"].items():
+                late = day in late_days
+                self.assertEqual(point["late"], "306" if late else None, day)
+                self.assertEqual(point["ring"], late, day)
+                self.assertEqual(point["name"].endswith(self.LATE_NAME), late, day)
+                self.assertEqual(bool(marks["rows"][day]), late, day)
+            key = self.page.locator("#history-chart-key")
+            expect(key).to_contain_text(
+                "Dashed ring: spot taken more than 15 min after the futures’ last trade"
+            )
+            expect(self.page.locator("#inspector-history-note")).to_have_text(
+                re.compile(re.escape(self.LATE_NOTE) + "$")
+            )
+            return marks
+
+        marks = assert_marked()
+        # No value changes: every cell, point value and point height is the same.
+        view = self.history_view()
+        self.assertEqual(
+            [(r["cells"], r["stale"]) for r in view["rows"]],
+            [(r["cells"], r["stale"]) for r in plain["rows"]],
+        )
+        self.assertEqual(view["note"], plain["note"] + self.LATE_NOTE)
+        self.assertEqual(
+            {day: (p["value"], p["y"]) for day, p in marks["points"].items()},
+            {day: (p["value"], p["y"]) for day, p in plain_marks["points"].items()},
+        )
+        self.assertEqual(
+            marks["points"]["2026-10-05"]["name"],
+            plain_marks["points"]["2026-10-05"]["name"] + self.LATE_NAME,
+        )
+
+        # It survives a period change, the one-minute redraw and a market switch.
+        self.page.locator('[data-yield-period="annualized"]').click()
+        expect(self.page.locator("#inspector-history-head th").nth(3)).to_have_text(
+            "Annualized yield · 365D"
+        )
+        assert_marked()
+        self.page.evaluate(
+            "() => { document.querySelector('#inspector-history-rows tr').__old = true; }"
+        )
+        self.page.clock.run_for("01:01")
+        self.page.wait_for_function(
+            "() => !document.querySelector('#inspector-history-rows tr').__old"
+        )
+        assert_marked()
+        # EUR/TRY's spots were all taken within their sessions.
+        self.page.locator('.market-options [data-market="EURTRY"]').click()
+        self.assert_market("EURTRY")
+        self.select_button("Dec 2026", "EURTRY").click()
+        expect(self.page.locator("#inspector-history-scroll")).to_be_visible()
+        expect(self.page.locator("#inspector-history-status")).to_have_text(
+            re.compile(r"^History loaded")
+        )
+        self.assertEqual(set(self.history_spot_marks()["rows"].values()), {None})
+        expect(self.page.locator("#inspector-history-note")).not_to_contain_text("spot … later")
+        expect(self.page.locator("#history-chart-key")).not_to_contain_text("Dashed ring")
+        self.page.locator('.market-options [data-market="USDTRY"]').click()
+        self.assert_market("USDTRY")
+        self.select_button("Jan 2028").click()
+        expect(self.page.locator("#inspector-history-scroll")).to_be_visible()
+        assert_marked()
+
+    def test_history_spot_marks_are_the_same_from_the_bundle_and_each_close(self):
+        closes = self.late_spot_history()
+        views = {}
+        for bundled in (True, False):
+            with self.subTest(bundled=bundled):
+                self.reopen_at(FIXTURE_DAY_TIME)
+                self.serve_snapshot(re.compile(r"/data/market\.json"), self.aligned_snapshot())
+                self.serve_history(closes, bundled)
+                bundles = self.watch_bundle_fetches()
+                fetched = self.watch_history_fetches()
+                self.open_dashboard("?market=USDTRY&maturity=2028-01")
+                self.load_history(len(HISTORY_FIXTURE))
+                views[bundled] = (self.history_view(), self.history_spot_marks())
+                self.assertEqual(bundles, ["USDTRY"])
+                self.assertEqual(sorted(fetched), [] if bundled else sorted(closes))
+                marks = views[bundled][1]
+                self.assertEqual(
+                    sorted(day for day, tag in marks["rows"].items() if tag),
+                    ["2026-10-05", "2026-10-06"],
+                )
+                if not bundled:
+                    # The browser's own report of the bundle's 404.
+                    self.assertEqual(len(self.errors), 1, self.errors)
+                    self.errors = []
+        self.assertEqual(views[True], views[False])
+
+    def test_history_note_on_spot_timing_needs_two_known_kinds(self):
+        view = "2026-10-05"
+        late = self.late_spot_close(view)
+        no_times = self.late_spot_close("2026-09-30")
+        for contract in no_times["markets"]["USDTRY"]["contracts"]:
+            contract["updated_at"] = None
+        cases = {
+            # Every priced close late: each is tagged, and nothing is mixed.
+            "all late": (
+                {"2026-09-30": self.late_spot_close("2026-09-30", "21:00")},
+                {"2026-09-30": "spot 21:00 · 2 h 51 min later", view: self.LATE_TAG},
+            ),
+            # The only other close's timing is unknown.
+            "late beside unknown": ({"2026-09-30": no_times}, {view: self.LATE_TAG}),
+        }
+        for name, (others, tags) in cases.items():
+            with self.subTest(case=name):
+                self.reopen_at(FIXTURE_DAY_TIME)
+                closes = {**self.history, view: late, **others}
+                self.serve_history(closes)
+                self.open_day(view, "&market=USDTRY&maturity=2028-01")
+                self.load_history(4)
+                marks = self.history_spot_marks()
+                self.assertEqual(
+                    {day: tag["text"] for day, tag in marks["rows"].items() if tag}, tags
+                )
+                self.assertEqual(
+                    {day for day, point in marks["points"].items() if point["ring"]}, set(tags)
+                )
+                expect(self.page.locator("#inspector-history-note")).not_to_contain_text(
+                    "spot … later"
+                )
+                expect(self.page.locator("#history-chart-key")).to_contain_text("Dashed ring")
+
+    @unittest.skipIf(Axe is None, "axe-playwright-python is not installed")
+    def test_history_spot_marks_fit_a_phone(self):
+        for width in (320, 360):
+            with self.subTest(width=width):
+                self.reopen_at(FIXTURE_DAY_TIME, viewport={"width": width, "height": 800})
+                self.serve_snapshot(re.compile(r"/data/market\.json"), self.aligned_snapshot())
+                self.serve_history(self.late_spot_history())
+                self.open_dashboard("?market=USDTRY&maturity=2028-01")
+                self.load_history(len(HISTORY_FIXTURE))
+                expect(self.page.locator(".spot-late-tag")).to_have_count(2)
+                expect(self.page.locator("#history-chart .history-spot-late")).to_have_count(3)
+                self.assert_no_sideways_scroll()
+                self.assert_accessible(f"history spot marks at {width} px")
+
     # The inspector's comparison with an archived close
 
     def comparison(self):
@@ -7583,6 +7818,85 @@ class RealArchiveSmokeTests(unittest.TestCase):
                         )
             with self.subTest(market=key):
                 self.assertEqual(views[True], views[False])
+
+    @staticmethod
+    def spot_lag_minutes(market):
+        """The page's rule for a spot taken after its futures' last trade:
+        whole minutes from the newest priced trade to an unmatched spot taken
+        more than 15 minutes after it, else None."""
+        spot = market.get("spot") or {}
+        if spot.get("aligned_to") is not None or not isinstance(spot.get("updated_at"), str):
+            return None
+        trades = [
+            datetime.fromisoformat(contract["updated_at"])
+            for contract in market["contracts"]
+            if isinstance(contract.get("last"), (int, float))
+            and isinstance(contract.get("updated_at"), str)
+        ]
+        if not trades:
+            return None
+        spot_time, clock = datetime.fromisoformat(spot["updated_at"]), max(trades)
+        if spot_time - clock <= timedelta(minutes=15):
+            return None
+        return int(spot_time.timestamp() // 60) - int(clock.timestamp() // 60)
+
+    def test_history_marks_every_close_whose_spot_came_after_its_last_trade(self):
+        # Each History row is tagged exactly when its close's spot was taken
+        # more than 15 minutes after its futures' last trade, and its chart
+        # point agrees.
+        newest = max(self.days)
+        marked = 0
+        for key in self.days[newest]["market_order"]:
+            contracts = self.days[newest]["markets"][key]["contracts"]
+            contract = contracts[min(1, len(contracts) - 1)]
+            with self.subTest(market=key):
+                page = self.page
+                page.goto(
+                    f"{self.base_url}?market={key}&maturity={contract['maturity_date'][:7]}"
+                )
+                load = page.locator("#history-load")
+                expect(load).to_be_visible()
+                load.click()
+                expect(page.locator("#inspector-history-status")).to_have_text(
+                    re.compile(r"^History loaded")
+                )
+                marks = page.evaluate(
+                    """() => ({
+                        rows: Object.fromEntries(
+                            [...document.querySelectorAll('#inspector-history-rows tr[data-history-row]')]
+                            .map((row) => [row.dataset.historyRow,
+                                row.querySelector('.spot-late-tag')?.firstChild.textContent ?? null])),
+                        points: Object.fromEntries(
+                            [...document.querySelectorAll('#history-chart-svg .history-point')]
+                            .map((node) => [node.dataset.historyDay, node.dataset.spotLate ?? null])),
+                    })"""
+                )
+                for day, tag in marks["rows"].items():
+                    market = self.days[day]["markets"].get(key)
+                    listed = next(
+                        (c for c in (market or {}).get("contracts", [])
+                         if c["symbol"] == contract["symbol"]),
+                        None,
+                    )
+                    priced = listed is not None and isinstance(listed.get("last"), (int, float))
+                    minutes = self.spot_lag_minutes(market) if priced else None
+                    if minutes is None:
+                        self.assertIsNone(tag, day)
+                    else:
+                        marked += 1
+                        hours, rest = divmod(minutes, 60)
+                        gap = f"{hours} h {rest} min" if hours and rest else (
+                            f"{hours} h" if hours else f"{rest} min"
+                        )
+                        self.assertRegex(tag, rf"^spot \S.* · {re.escape(gap)} later$", day)
+                    if day in marks["points"]:
+                        self.assertEqual(
+                            marks["points"][day], None if minutes is None else str(minutes), day
+                        )
+        self.assertEqual(self.errors, [], "page logged errors")
+        # Every close archived before the spot matching paired the futures
+        # with a later spot.
+        self.assertGreater(marked, 0)
 
 if __name__ == "__main__":
     unittest.main()

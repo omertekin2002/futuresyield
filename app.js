@@ -1215,6 +1215,44 @@ function spotLagNote(market) {
     "Premiums and yields include the spot's move in between.";
 }
 
+// The History table's tag for a close whose spot was taken more than a bar
+// after its futures' last trade: "spot 23:15 · 5 h 6 min later", with the
+// futures' trade time for screen readers. Worded and dotted, so it differs
+// from the stale and near-expiry tags without colour.
+function spotLateTagNode(lag) {
+  const tag = document.createElement("span");
+  tag.className = "spot-late-tag";
+  tag.textContent = `spot ${clockBeside(lag.spotTime, lag.clock)} · ${formatMinutes(lag.minutes)} later`;
+  const note = document.createElement("span");
+  note.className = "sr-only";
+  note.textContent = ` than the futures' last trade at ${clockBeside(lag.clock, lag.spotTime)} TRT`;
+  tag.append(note);
+  return tag;
+}
+
+// A History row's spot lag: spotLag for a close where the contract has a
+// price, so its premium and yield rest on that spot, else null.
+function historySpotLag(row) {
+  return row.state === "listed" && hasNumber(row.contract?.last) ? spotLag(row.market) : null;
+}
+
+// The History note's sentence on spot timing, or "" unless the rows with a
+// price mix spots taken more than a bar after their futures' last trade with
+// spots whose timing is known and not late. Rows of unknown timing say
+// nothing either way.
+function historySpotTimingNote(rows) {
+  const kinds = new Set(
+    rows
+      .filter((row) => row.state === "listed" && hasNumber(row.contract?.last))
+      .map((row) => spotTiming(row.market).kind),
+  );
+  kinds.delete("unknown");
+  if (!kinds.has("after") || kinds.size < 2) return "";
+  return " Closes tagged “spot … later”, ringed with dashes in the chart, price the futures " +
+    "against a spot taken more than 15 min after their last trade, so part of a change " +
+    "across them comes from when the spot was taken.";
+}
+
 // How a market's spot was timed against its futures' last trade, for the
 // comparison: "matched" by the updater, "within" a bar of it, "after" or
 // "before" it by more than a bar (with whole minutes), or "unknown" when the
@@ -1509,7 +1547,7 @@ function comparisonCells({ contract, spot, trade, yield: value }) {
 // One comparison cell: a value, an optional stale tag and an optional line
 // under it saying why the value is missing. Snapshot strings go in as text.
 function comparisonCell({
-  value = "", detail = "", stale = false, nearExpiry = null, className = "",
+  value = "", detail = "", stale = false, nearExpiry = null, spotLate = null, className = "",
 } = {}) {
   const cell = document.createElement("td");
   const valueNode = document.createElement("span");
@@ -1517,6 +1555,7 @@ function comparisonCell({
   valueNode.textContent = value;
   if (stale) valueNode.append(" ", staleTagNode());
   if (nearExpiry) valueNode.append(" ", nearExpiryTagNode(nearExpiryDescription(nearExpiry)));
+  if (spotLate) valueNode.append(" ", spotLateTagNode(spotLate));
   cell.append(valueNode);
   if (detail) {
     const detailNode = document.createElement("small");
@@ -1935,7 +1974,7 @@ function historyRow(row) {
       value: String(contract.days_to_maturity),
       nearExpiry: isNearExpiry(contract) ? contract.days_to_maturity : null,
     }),
-    comparisonCell({ value: trade.text, stale: trade.stale }),
+    comparisonCell({ value: trade.text, stale: trade.stale, spotLate: historySpotLag(row) }),
   );
   return tr;
 }
@@ -1992,7 +2031,7 @@ function renderInspectorHistory(contract) {
 
   const live = !state.renderedDate;
   const recounted = listed.filter((day) => historyEntry(day)?.snapshot?.published_market_date);
-  elements.inspectorHistoryNote.textContent =
+  const note =
     `${contract.symbol} on each archived close up to ${formatDay(referenceDate())}, ` +
     "newest first, matched by its exact VİOP symbol. Missing values are never filled in." +
     (recounted.length === 1
@@ -2002,6 +2041,7 @@ function renderInspectorHistory(contract) {
         ? ` Days left and yields on the closes of ${[...recounted].sort().map(formatDay).join(", ")} ` +
           "are recounted from their sessions; each was published counted from the next day."
         : "");
+  elements.inspectorHistoryNote.textContent = note;
   elements.historyLoad.hidden = state.historyOpen;
   elements.historyLoad.textContent =
     `Load history · ${countText(listed.length, "archived close", "archived closes")}`;
@@ -2085,6 +2125,7 @@ function renderInspectorHistory(contract) {
     body.push(historyRow(row));
   });
   elements.inspectorHistoryRows.replaceChildren(...body);
+  elements.inspectorHistoryNote.textContent = note + historySpotTimingNote(rows);
   if (focused) {
     elements.inspectorHistoryRows.querySelector(`a[data-history-day="${focused}"]`)?.focus();
   }
@@ -2155,7 +2196,7 @@ function historyChartPoint(row) {
   const value = yieldValue(row.contract, state.yieldPeriod, row.market.spot?.last);
   if (!hasNumber(value)) return { ...row, value: null, reason: "Listed, no yield on this close." };
   const trade = lastTrades(row.market.contracts, row.generatedAt).get(row.contract);
-  return { ...row, value, trade };
+  return { ...row, value, trade, spotLag: historySpotLag(row) };
 }
 
 // A point's accessible name: its date, yield and last trade, as the table
@@ -2169,6 +2210,9 @@ function historyPointName(point) {
     (point.trade.stale ? ", stale" : "") +
     (point.nearExpiry
       ? `, near expiry with ${countText(point.contract.days_to_maturity, "day", "days")} left`
+      : "") +
+    (point.spotLag
+      ? `, spot taken ${formatMinutes(point.spotLag.minutes)} after the futures' last trade`
       : "") +
     (point.offScale
       ? `, off the scale, drawn at its ${point.offScale === "above" ? "top" : "bottom"} edge`
@@ -2359,6 +2403,7 @@ function renderHistoryChart() {
     node.dataset.value = String(row.value);
     if (stale) node.dataset.stale = "";
     if (row.nearExpiry) node.dataset.nearExpiry = String(row.contract.days_to_maturity);
+    if (row.spotLag) node.dataset.spotLate = String(row.spotLag.minutes);
     if (row.offScale) node.dataset.offScale = row.offScale;
     node.append(svgNode("rect", {
       class: "history-hit", x: px - reach[0], y: top,
@@ -2374,6 +2419,11 @@ function renderHistoryChart() {
       );
     } else {
       node.append(svgNode("circle", { class: "history-ring", cx: px, cy: py, r: 10 }));
+    }
+    // A spot taken more than a bar after the futures' last trade: a dashed
+    // ring around whatever marker the point has.
+    if (row.spotLag) {
+      node.append(svgNode("circle", { class: "history-spot-late", cx: px, cy: py, r: 9.5 }));
     }
     node.append(marker);
     if (row.offScale) {
@@ -2413,6 +2463,15 @@ function renderHistoryChart() {
       [svgNode("path", { class: "history-marker is-near-expiry", d: "M 8 1.5 L 14 12 L 2 12 Z" })],
       `Triangle: fewer than ${NEAR_EXPIRY_DAYS} days left; ${NEAR_EXPIRY_NOISE}` +
         (settled.length ? ", so it sets no scale" : ""),
+    ));
+  }
+  if (plotted.some((row) => row.spotLag)) {
+    items.push(historyKeyItem(
+      [
+        svgNode("circle", { class: "history-spot-late", cx: 8, cy: 7, r: 6 }),
+        svgNode("circle", { class: "history-marker", cx: 8, cy: 7, r: 2.5 }),
+      ],
+      "Dashed ring: spot taken more than 15 min after the futures’ last trade",
     ));
   }
   if (plotted.some((row) => row.offScale)) {
