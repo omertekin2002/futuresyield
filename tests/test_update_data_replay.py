@@ -185,7 +185,9 @@ class HappyPathTests(ReplayTestCase):
         # volume_qty is TRY turnover under borsapy 0.10.2's remap.
         self.assertEqual(dec["turnover_try"], 11922511259.0)
         self.assertEqual(dec["updated_at"], "2026-11-20T18:09:00+03:00")
-        self.assertAlmostEqual(dec["premium_percent"], (52.26 / 50.53719 - 1) * 100)
+        # Against the 18:00 spot bar that holds the 18:09 trade, not 22:15's.
+        self.assertAlmostEqual(dec["premium_percent"], (52.26 / 50.57642 - 1) * 100)
+        self.assertAlmostEqual(dec["daily_yield_factor"], (52.26 / 50.57642) ** (1 / 41))
 
         gold = self.contract(snapshot, "XAUTRY", "XAUTRYG2027")
         self.assertEqual(gold["code"], "F_XAUTRYM0227")
@@ -212,32 +214,73 @@ class HappyPathTests(ReplayTestCase):
         self.assertEqual(dec["change_percent"], 0.02)
         self.assertEqual(dec["last"], 52.26)
 
-    def test_usdtry_spot_from_the_intraday_history(self):
+    def test_usdtry_spot_is_aligned_to_the_futures_last_trade(self):
+        """The newest USD/TRY trade is 18:09, so the 18:00 bar replaces 22:15's."""
         spot = self.build()["markets"]["USDTRY"]["spot"]
 
-        self.assertEqual(spot["last"], 50.53719)
+        self.assertEqual(spot["last"], 50.57642)  # 18:00 bar's close
         self.assertEqual(spot["open"], 50.44719)  # first 15-minute bar of 20 Nov
-        self.assertEqual(spot["high"], 50.57419)
+        # The day up to 18:00: the later 21:45-22:15 bars are left out.
+        self.assertEqual(spot["high"], 50.57656)
         self.assertEqual(spot["low"], 50.43181)
-        self.assertEqual(spot["updated_at"], "2026-11-20T22:15:00+03:00")
+        self.assertAlmostEqual(spot["change"], 50.57642 - 50.44719)
+        self.assertAlmostEqual(
+            spot["change_percent"], (50.57642 - 50.44719) / 50.44719 * 100
+        )
+        self.assertEqual(spot["updated_at"], "2026-11-20T18:00:00+03:00")
         self.assertEqual(spot["source"], "TradingView intraday via borsapy FX")
+        self.assertEqual(spot["aligned_to"], "2026-11-20T18:09:00+03:00")
+        self.assertEqual(
+            spot["latest"],
+            {"last": 50.53719, "updated_at": "2026-11-20T22:15:00+03:00"},
+        )
 
-    def test_eurtry_spot_from_the_intraday_history(self):
+    def test_eurtry_spot_is_aligned_to_its_own_futures_clock(self):
+        """EUR/TRY's newest trade is EURTRYX2026 at 15:35, so the 15:30 bar is used."""
         spot = self.build()["markets"]["EURTRY"]["spot"]
 
-        self.assertEqual(spot["last"], 55.45519)
+        self.assertEqual(spot["last"], 55.59368)
         self.assertEqual(spot["open"], 55.50119)
+        self.assertEqual(spot["high"], 55.59864)
+        self.assertEqual(spot["low"], 55.4407)
+        self.assertEqual(spot["updated_at"], "2026-11-20T15:30:00+03:00")
         self.assertEqual(spot["source"], "TradingView intraday via borsapy FX")
+        self.assertEqual(spot["aligned_to"], "2026-11-20T15:35:00+03:00")
+        self.assertEqual(
+            spot["latest"],
+            {"last": 55.45519, "updated_at": "2026-11-20T22:15:00+03:00"},
+        )
 
     def test_xautry_spot_is_synthetic_xauusd_times_usdtry(self):
+        """Both legs come from the 18:00 bars that hold gold's 18:09 trade."""
         spot = self.build()["markets"]["XAUTRY"]["spot"]
 
-        self.assertAlmostEqual(spot["last"], 3515.22 * 50.53719 / TROY_OUNCE_GRAMS)
+        self.assertAlmostEqual(spot["last"], 3558.825 * 50.57642 / TROY_OUNCE_GRAMS)
         self.assertAlmostEqual(spot["open"], 3660.045 * 50.44719 / TROY_OUNCE_GRAMS)
-        self.assertAlmostEqual(spot["high"], 3662.325 * 50.57419 / TROY_OUNCE_GRAMS)
-        self.assertAlmostEqual(spot["low"], 3502.99 * 50.43181 / TROY_OUNCE_GRAMS)
-        self.assertEqual(spot["updated_at"], "2026-11-20T22:15:00+03:00")
+        self.assertAlmostEqual(spot["high"], 3662.325 * 50.57656 / TROY_OUNCE_GRAMS)
+        self.assertAlmostEqual(spot["low"], 3558.815 * 50.43181 / TROY_OUNCE_GRAMS)
+        self.assertEqual(spot["updated_at"], "2026-11-20T18:00:00+03:00")
         self.assertEqual(spot["source"], "Synthetic XAUUSD × USDTRY via borsapy FX")
+        self.assertEqual(spot["aligned_to"], "2026-11-20T18:09:00+03:00")
+        self.assertEqual(spot["latest"]["updated_at"], "2026-11-20T22:15:00+03:00")
+        self.assertAlmostEqual(
+            spot["latest"]["last"], 3515.22 * 50.53719 / TROY_OUNCE_GRAMS
+        )
+
+    def test_every_derived_value_uses_the_aligned_spot(self):
+        snapshot = self.build()
+
+        for market in MARKET_KEYS:
+            spot = snapshot["markets"][market]["spot"]["last"]
+            for item in snapshot["markets"][market]["contracts"]:
+                with self.subTest(symbol=item["symbol"]):
+                    days = item["days_to_maturity"]
+                    self.assertAlmostEqual(
+                        item["premium_percent"], (item["last"] / spot - 1) * 100
+                    )
+                    self.assertAlmostEqual(
+                        item["daily_yield_factor"], (item["last"] / spot) ** (1 / days)
+                    )
 
     def test_usdtry_trend_uses_the_close_on_or_before_the_target(self):
         snapshot = self.build()
@@ -248,13 +291,14 @@ class HappyPathTests(ReplayTestCase):
         self.assertEqual(trend["start_date"], "2026-05-22")
         self.assertEqual(trend["start_spot"], 45.7392)
         self.assertEqual(trend["end_date"], "2026-11-20")
-        self.assertEqual(trend["end_spot"], 50.53719)
+        # The trend ends at the aligned spot, the one the contracts use.
+        self.assertEqual(trend["end_spot"], 50.57642)
         self.assertEqual(trend["days"], 182)
-        factor = (50.53719 / 45.7392) ** (1 / 182)
+        factor = (50.57642 / 45.7392) ** (1 / 182)
         self.assertAlmostEqual(trend["daily_factor"], factor, places=12)
 
         dec = self.contract(snapshot, "USDTRY", "USDTRYZ2026")
-        expected_spot = 50.53719 * factor**41
+        expected_spot = 50.57642 * factor**41
         self.assertAlmostEqual(dec["expected_spot_at_maturity"], expected_spot)
         self.assertAlmostEqual(
             dec["expected_short_profit_try"], (52.24 - expected_spot) * 1_000
@@ -305,6 +349,136 @@ class AfterMidnightTests(ReplayTestCase):
                     for field in ("daily_yield_factor", "annualized_yield_percent",
                                   "expected_spot_at_maturity", "expected_short_profit_try"):
                         self.assertEqual(contract[field], same[field], field)
+
+    def test_spot_after_midnight_is_still_matched_to_fridays_bar(self):
+        """Saturday 00:30 still finds Friday 18:00's bar and that day's range."""
+        snapshot = self.build(now=AFTER_MIDNIGHT)
+
+        spot = snapshot["markets"]["USDTRY"]["spot"]
+        self.assertEqual(spot["aligned_to"], "2026-11-20T18:09:00+03:00")
+        self.assertEqual(spot["updated_at"], "2026-11-20T18:00:00+03:00")
+        self.assertEqual(spot["last"], 50.57642)
+        self.assertEqual(spot["open"], 50.44719)
+        self.assertEqual(snapshot["markets"], self.build()["markets"])
+
+
+class SpotAlignmentTests(ReplayTestCase):
+    """When the spot is matched to the futures' last trade, and when it isn't."""
+
+    def shift_trades_to(self, moment: datetime) -> None:
+        """Derived: every recorded trade time moved to ``moment``."""
+        stamp = moment.timestamp()
+        for quote in self.replay.quotes.values():
+            if quote.get("timestamp") is not None:
+                quote["timestamp"] = stamp
+
+    def drop_bar(self, asset: str, at: str) -> None:
+        recording = self.replay.fx_15m[asset]
+        position = recording["index"].index(at)
+        del recording["index"][position]
+        del recording["data"][position]
+
+    def test_fresh_spot_during_the_session_is_left_as_it_is(self):
+        """Derived: every trade at 22:10, five minutes before the 22:15 spot bar."""
+        self.shift_trades_to(datetime(2026, 11, 20, 22, 10, tzinfo=ISTANBUL))
+        snapshot = self.build()
+
+        for market in MARKET_KEYS:
+            spot = snapshot["markets"][market]["spot"]
+            with self.subTest(market=market):
+                self.assertNotIn("aligned_to", spot)
+                self.assertNotIn("latest", spot)
+                self.assertEqual(spot["updated_at"], "2026-11-20T22:15:00+03:00")
+        usd = snapshot["markets"]["USDTRY"]["spot"]
+        self.assertEqual(
+            list(usd),
+            ["symbol", "last", "open", "high", "low", "change", "change_percent",
+             "updated_at", "source"],
+        )
+        self.assertEqual(usd["last"], 50.53719)
+        self.assertEqual(usd["high"], 50.57686)  # the whole day so far
+        self.assertFalse(any("spot bar" in line for line in self.printed))
+
+    def test_a_trade_exactly_fifteen_minutes_before_the_spot_bar_keeps_it(self):
+        """Derived: every trade at 22:00, the 22:15 bar starts 15 minutes later."""
+        self.shift_trades_to(datetime(2026, 11, 20, 22, 0, tzinfo=ISTANBUL))
+        snapshot = self.build()
+
+        self.assertNotIn("aligned_to", snapshot["markets"]["USDTRY"]["spot"])
+
+    def test_missing_bar_keeps_the_latest_spot_with_a_warning(self):
+        """Derived: the USD 18:00 bar dropped, so no bar holds 18:09."""
+        self.drop_bar("USD", "2026-11-20T18:00:00+03:00")
+        snapshot = self.build()
+
+        usd = snapshot["markets"]["USDTRY"]["spot"]
+        self.assertEqual(usd["last"], 50.53719)
+        self.assertEqual(usd["updated_at"], "2026-11-20T22:15:00+03:00")
+        self.assertNotIn("aligned_to", usd)
+        self.assertNotIn("latest", usd)
+        # Gold needs the same USD bar, so it keeps its latest spot too.
+        gold = snapshot["markets"]["XAUTRY"]["spot"]
+        self.assertNotIn("aligned_to", gold)
+        self.assertAlmostEqual(gold["last"], 3515.22 * 50.53719 / TROY_OUNCE_GRAMS)
+        # EUR/TRY's own bar is still there.
+        self.assertEqual(
+            snapshot["markets"]["EURTRY"]["spot"]["aligned_to"],
+            "2026-11-20T15:35:00+03:00",
+        )
+        for pair in ("USD/TRY", "XAU/TRY"):
+            self.assertIn(
+                f"Warning: no 15-minute {pair} spot bar holds the futures' last trade "
+                "at 2026-11-20T18:09:00+03:00; keeping the latest spot",
+                self.printed,
+            )
+        dec = self.contract(snapshot, "USDTRY", "USDTRYZ2026")
+        self.assertAlmostEqual(dec["premium_percent"], (52.26 / 50.53719 - 1) * 100)
+
+    def test_a_bar_that_ends_before_the_trade_does_not_hold_it(self):
+        """Derived: the EUR 15:30 bar moved to 15:15, so it ends at 15:30, before 15:35."""
+        recording = self.replay.fx_15m["EUR"]
+        position = recording["index"].index("2026-11-20T15:30:00+03:00")
+        recording["index"][position] = "2026-11-20T15:15:00+03:00"
+        snapshot = self.build()
+
+        eur = snapshot["markets"]["EURTRY"]["spot"]
+        self.assertNotIn("aligned_to", eur)
+        self.assertEqual(eur["last"], 55.45519)
+        self.assertTrue(any("EUR/TRY spot bar" in line for line in self.printed))
+
+    def test_bar_without_a_close_is_missing(self):
+        """Derived: the USD 18:00 bar's close is null."""
+        recording = self.replay.fx_15m["USD"]
+        recording["data"][recording["index"].index("2026-11-20T18:00:00+03:00")][3] = None
+        snapshot = self.build()
+
+        self.assertNotIn("aligned_to", snapshot["markets"]["USDTRY"]["spot"])
+        self.assertEqual(snapshot["markets"]["USDTRY"]["spot"]["last"], 50.53719)
+
+    def test_unknown_futures_clock_keeps_the_latest_spot_with_a_warning(self):
+        """Derived: no EUR/TRY quote carries a trade time."""
+        for symbol in self.recorded_symbols("EURTRY"):
+            self.replay.quotes[symbol]["timestamp"] = None
+        snapshot = self.build()
+
+        eur = snapshot["markets"]["EURTRY"]["spot"]
+        self.assertNotIn("aligned_to", eur)
+        self.assertEqual(eur["last"], 55.45519)
+        self.assertIn(
+            "Warning: EUR/TRY futures have no last-trade time; keeping the latest spot",
+            self.printed,
+        )
+        self.assertIn("aligned_to", snapshot["markets"]["USDTRY"]["spot"])
+
+    def test_fallback_spot_without_a_frame_is_never_aligned(self):
+        """Derived: the USD history's ``Close`` renamed, so USD/TRY uses ``.current``."""
+        columns = self.replay.fx_15m["USD"]["columns"]
+        columns[columns.index("Close")] = "close"
+        snapshot = self.build()
+
+        usd = snapshot["markets"]["USDTRY"]["spot"]
+        self.assertEqual(usd["source"], "borsapy FX current fallback")
+        self.assertNotIn("aligned_to", usd)
 
 
 class QuirkTests(ReplayTestCase):

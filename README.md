@@ -118,13 +118,46 @@ days to maturity, a `status` that matches `last`, sorted contracts without
 duplicate symbols, and at least one priced contract per market. A contract's
 `updated_at` is the time of its last trade, as an ISO timestamp with an offset,
 or null when the quote carried no time; the updater never fills in the
-snapshot time. The strings
+snapshot time. A spot matched to the futures' last trade (below) carries
+`aligned_to`, an ISO timestamp, and `latest`, a positive `last` with an ISO
+`updated_at`; both are optional but come together, so earlier closes still
+validate. The strings
 the dashboard renders must keep the updater's formats: VİOP symbols like
 `USDTRYV2026`, table codes like `F_USDTRY1026`, and labels like `Oct 2026`, so
 markup in upstream data is rejected before it is published. It lists every
 problem it finds by path. A snapshot that fails counts as a failed attempt, so
 it is never published. Check a file by hand with
 `python -m scripts.snapshot_schema data/market.json`.
+
+**Spot matched to the futures' last trade.** The spot reference is the
+latest 15-minute bar of `bp.FX(...).history(period="1g", interval="15m")`
+(XAU/TRY's is XAU/USD × USD/TRY per gram). After VİOP's last futures trade of
+the day, that bar keeps moving for hours, so the updater matches it to the
+futures before pricing them:
+
+- A market's futures clock is the newest last-trade time (`updated_at`) among
+  its priced contracts.
+- If the spot bar starts more than 15 minutes after that clock, the updater
+  re-reads the spot from the 15-minute bar that holds the clock, from the
+  frames it already downloaded: `last` is that bar's close, `updated_at` its
+  start, `open` the day's first bar, `high` and `low` the day up to that bar,
+  and the change is recomputed against that open. XAU/TRY combines the
+  XAU/USD and USD/TRY bars that hold the gold futures' own clock.
+- The spot then records `aligned_to`, the futures clock it was matched to, and
+  `latest`, `{ "last", "updated_at" }` of the newest bar it replaced. The
+  header, the inspector and the CSV (`spot_aligned_to`, `latest_spot`,
+  `latest_spot_time`) say so and show the latest spot.
+- During the session the spot is already within 15 minutes of the futures, so
+  it is kept as it is, without either field. So is a spot when the clock is
+  unknown (no priced contract has a trade time) or no recorded bar holds it,
+  with a `Warning:` line; a rate is never interpolated or filled in.
+- Every value built on the spot uses the matched one: premium, daily factor,
+  yields, and the USD/TRY spot trend's `end_spot` and projection.
+
+Each market keeps one clock: a contract that last traded earlier in the day
+still uses its market's newest trade. Closes archived before this rule were
+captured without it and stay as published, with no `aligned_to`; the page shows
+them as before.
 
 The yield curve starts with the gross daily factor
 `(contract price / spot rate)^(1 / days left)`. The chart converts the selected
@@ -133,12 +166,13 @@ one and multiplying by 100.
 
 **Near expiry.** A contract with fewer than 7 days left (`NEAR_EXPIRY_DAYS` in
 `app.js`), counted after any recount below, is **near expiry**. Its yields
-annualize the premium over only a few days, and that premium is not clean: the
-futures last trade and the spot reference are taken hours apart (archived
-closes pair a last trade around 18:09 with spot around 23:15), which moves
-`price / spot` by roughly ±0.1–0.6%. Compounded over `365 / days left`, a 0.3%
-gap is worth about 17 annualized points at 7 days left, 20 at 6, and from −67
-to +198 at 1 day, so the 365D figure stops reading as a rate. The dashboard
+annualize the premium over only a few days, so any noise in `price / spot` is
+magnified. Even with the spot matched to the futures' last trade (above), the
+two are up to 15 minutes and one bar apart, and closes archived before that
+rule paired a last trade around 18:09 with spot around 23:15, a gap of roughly
+±0.1–0.6%. Compounded over `365 / days left`, a 0.3% gap is worth about 17
+annualized points at 7 days left, 20 at 6, and from −67 to +198 at 1 day, so
+the 365D figure stops reading as a rate. The dashboard
 keeps every value as published and only changes how it presents them:
 
 - The board's contract cell, the inspector, and its Comparison and History tables

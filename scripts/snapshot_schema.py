@@ -217,6 +217,7 @@ class Checker:
             self.positive_number(spot, "last", f"{path}.spot")
             for field in SPOT_NUMBERS:
                 self.number_or_null(spot, field, f"{path}.spot")
+            self.spot_alignment(spot, f"{path}.spot")
         else:
             self.fail(f"{path}.spot", "must be an object")
 
@@ -259,6 +260,35 @@ class Checker:
                 previous_maturity = maturity
         if not priced:
             self.fail(f"{path}.contracts", "must include at least one priced contract")
+
+    def spot_alignment(self, spot: dict[str, Any], path: str) -> None:
+        """A spot matched to the futures' last trade names that time and the
+        newest bar it replaced. Both are optional, but come together."""
+        has_aligned, has_latest = "aligned_to" in spot, "latest" in spot
+        if has_aligned != has_latest:
+            missing = "latest" if has_aligned else "aligned_to"
+            self.fail(
+                f"{path}.{missing}",
+                "must be present with "
+                f"{'aligned_to' if has_aligned else 'latest'}",
+            )
+        if has_aligned and not is_iso_timestamp(spot["aligned_to"]):
+            self.fail(
+                f"{path}.aligned_to",
+                f"must be an ISO timestamp with offset, got {spot['aligned_to']!r}",
+            )
+        if not has_latest:
+            return
+        latest = spot["latest"]
+        if not isinstance(latest, dict):
+            self.fail(f"{path}.latest", f"must be an object, got {latest!r}")
+            return
+        self.positive_number(latest, "last", f"{path}.latest")
+        if not is_iso_timestamp(latest.get("updated_at")):
+            self.fail(
+                f"{path}.latest.updated_at",
+                f"must be an ISO timestamp with offset, got {latest.get('updated_at')!r}",
+            )
 
     def contract(self, contract: dict[str, Any], path: str) -> None:
         missing = [key for key in CONTRACT_KEYS if key not in contract]

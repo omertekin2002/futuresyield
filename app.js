@@ -44,6 +44,7 @@ const elements = {
   spotValue: document.querySelector("#spot-value"),
   spotChange: document.querySelector("#spot-change"),
   spotLow: document.querySelector("#spot-low"),
+  spotNote: document.querySelector("#spot-note"),
   spotHigh: document.querySelector("#spot-high"),
   spotUnit: document.querySelector("#spot-unit"),
   marketDate: document.querySelector("#market-date"),
@@ -764,6 +765,10 @@ function renderSpot(spot) {
   elements.spotChange.className = `change-value ${signedClass(spot.change_percent)}`;
   const absolute = formatSignedPrice(spot.change);
   elements.spotChange.textContent = `${absolute} · ${formatPercent(spot.change_percent)}`;
+
+  const note = spotAlignmentNote(spot);
+  elements.spotNote.hidden = !note;
+  elements.spotNote.textContent = note;
 }
 
 function renderStats(data) {
@@ -1108,6 +1113,37 @@ function formatSpotTime(spot) {
   return Number.isNaN(updated) ? "—" : `${dateTimeFormat.format(updated)} TRT`;
 }
 
+// When the updater matched the spot to the futures' last trade, the times
+// involved and the newest spot it set aside; null for a spot taken as it was,
+// which includes every close archived before the rule.
+function spotAlignment(spot) {
+  const time = (value) => typeof value === "string" ? Date.parse(value) : NaN;
+  const spotTime = time(spot?.updated_at);
+  const alignedTo = time(spot?.aligned_to);
+  const latestTime = time(spot?.latest?.updated_at);
+  if ([spotTime, alignedTo, latestTime].some(Number.isNaN)) return null;
+  return { spotTime, alignedTo, latestTime, latestLast: spot.latest.last };
+}
+
+// A time as "18:09", or "21 Nov, 00:30" when it falls on another Istanbul day
+// than the reference time.
+function clockBeside(time, reference) {
+  return tradeDayFormat.format(time) === tradeDayFormat.format(reference)
+    ? tradeTimeFormat.format(time)
+    : dateTimeFormat.format(time);
+}
+
+// "Spot at 18:00 TRT, matched to the futures' last trade at 18:09; latest spot
+// 23:15 TRT: 50.5730", or "" for a spot that wasn't matched.
+function spotAlignmentNote(spot) {
+  const aligned = spotAlignment(spot);
+  if (!aligned) return "";
+  const { spotTime, alignedTo, latestTime, latestLast } = aligned;
+  return `Spot at ${tradeTimeFormat.format(spotTime)} TRT, matched to the futures' ` +
+    `last trade at ${clockBeside(alignedTo, spotTime)}; latest spot ` +
+    `${clockBeside(latestTime, spotTime)} TRT: ${formatPrice(latestLast)}`;
+}
+
 // Why a contract has no daily factor, and so no yield.
 function noYieldReason(contract, spot) {
   if (!hasNumber(contract.last)) return "No yield: the contract has no last price.";
@@ -1170,9 +1206,25 @@ function renderInspector(contract) {
 
   const spotTime = formatSpotTime(data.spot);
   const synthetic = /^synthetic/i.test(data.spot.source ?? "");
+  const aligned = spotAlignment(data.spot);
   fillInspectorList(elements.inspectorSpot, [
     { key: "spot", term: "Spot", value: formatPrice(spot), detail: data.spot_unit },
-    { key: "spot-time", term: "Spot time", value: spotTime },
+    {
+      key: "spot-time",
+      term: "Spot time",
+      value: spotTime,
+      detail: aligned
+        ? `Matched to the futures' last trade at ${clockBeside(aligned.alignedTo, aligned.spotTime)} TRT`
+        : undefined,
+    },
+    ...aligned
+      ? [{
+        key: "latest-spot",
+        term: "Latest spot",
+        value: formatPrice(aligned.latestLast),
+        detail: `${formatSpotTime(data.spot.latest)}; not used for premiums or yields`,
+      }]
+      : [],
     {
       key: "spot-source",
       term: "Reference",
@@ -2328,6 +2380,11 @@ function boardCsvColumns(data, { carry, compareDate, compareMarket }) {
     const { value, gap } = sideField(field);
     return { name: field, value: (row) => value(row.now), gap: (row) => gap(row.now) };
   };
+  const spotAlignmentField = (field) => {
+    if (!spotAlignment(data.spot)) return null;
+    if (field === "aligned_to") return isoTime(data.spot.aligned_to);
+    return field === "last" ? data.spot.latest.last : isoTime(data.spot.latest.updated_at);
+  };
   const columns = [
     { name: "market", value: () => data.key },
     { name: "view", value: () => state.renderedDate ? "close" : "live" },
@@ -2346,6 +2403,10 @@ function boardCsvColumns(data, { carry, compareDate, compareMarket }) {
     side("spot"),
     { name: "spot_unit", value: () => data.spot_unit },
     { name: "spot_time", value: () => isoTime(data.spot.updated_at), gap: () => "no spot time" },
+    // Set only when the spot was matched to the futures' last trade.
+    { name: "spot_aligned_to", value: () => spotAlignmentField("aligned_to"), context: true },
+    { name: "latest_spot", value: () => spotAlignmentField("last"), context: true },
+    { name: "latest_spot_time", value: () => spotAlignmentField("updated_at"), context: true },
     { name: "spot_source", value: () => data.spot.source, gap: () => "no spot source" },
     { name: "maturity_month", value: (row) => maturityKey(row.now.contract) },
     { name: "label", value: (row) => row.now.contract.label, gap: () => "no label" },

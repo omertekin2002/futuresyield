@@ -139,8 +139,8 @@ STALE_CHARTS = (
 # loaded comparison. "missing" always comes last.
 CSV_COLUMNS = [
     "market", "view", "market_date", "snapshot_generated_at", "days_rolled_forward_from",
-    "published_market_date", "spot", "spot_unit", "spot_time", "spot_source",
-    "maturity_month", "label", "symbol", "code", "maturity_date", "days_left",
+    "published_market_date", "spot", "spot_unit", "spot_time", "spot_aligned_to",
+    "latest_spot", "latest_spot_time", "spot_source", "maturity_month", "label", "symbol", "code", "maturity_date", "days_left",
     "last", "change_percent", "bid", "ask", "volume", "last_trade_at", "stale",
     "premium_percent", "yield_1d_percent", "yield_30d_percent", "yield_365d_percent",
 ]
@@ -160,7 +160,10 @@ CSV_YIELDS = (
     ("365d", "annualized_yield_percent", 365, "annualized"),
 )
 # Columns that are never a missing value: context, and the reasons themselves.
-CSV_CONTEXT_COLUMNS = ("days_rolled_forward_from", "published_market_date", "missing")
+CSV_CONTEXT_COLUMNS = (
+    "days_rolled_forward_from", "published_market_date", "spot_aligned_to",
+    "latest_spot", "latest_spot_time", "missing",
+)
 # Printing. The content width of an A4 portrait page with the stylesheet's
 # 15 mm margins (210 mm - 30 mm, at 96 px per inch), and of US Letter's.
 A4_CONTENT_WIDTH = 680
@@ -2599,6 +2602,79 @@ class DashboardSmokeTests(unittest.TestCase):
                     contract, market["spot"]["last"], contract["days_to_maturity"],
                     digits=market["price_digits"],
                 ))
+
+    def aligned_snapshot(self):
+        """The fixture with its USD/TRY spot matched to an earlier futures trade."""
+        aligned = copy.deepcopy(self.snapshot)
+        spot = aligned["markets"]["USDTRY"]["spot"]
+        spot["latest"] = {"last": 49.25, "updated_at": spot["updated_at"]}
+        spot["updated_at"] = "2026-10-07T13:45:00+03:00"
+        spot["aligned_to"] = "2026-10-07T13:49:00+03:00"
+        return aligned
+
+    def test_spot_matched_to_the_futures_last_trade_says_so(self):
+        aligned = self.aligned_snapshot()
+        self.serve_snapshot(re.compile(r"/data/market\.json"), aligned)
+        self.open_dashboard("?market=USDTRY")
+
+        note = self.page.locator("#spot-note")
+        expect(note).to_be_visible()
+        expect(note).to_have_text(
+            "Spot at 13:45 TRT, matched to the futures' last trade at 13:49; "
+            "latest spot 14:00 TRT: 49.2500"
+        )
+
+        self.select_button("Oct 2026").click()
+        self.assert_selected("Oct 2026")
+        rows = self.inspector()
+        self.assertEqual(rows["spot-time"]["value"], "07 Oct, 13:45 TRT")
+        self.assertEqual(
+            rows["spot-time"]["detail"], "Matched to the futures' last trade at 13:49 TRT"
+        )
+        self.assertEqual(rows["latest-spot"]["term"], "Latest spot")
+        self.assertEqual(rows["latest-spot"]["value"], "49.2500")
+        self.assertEqual(
+            rows["latest-spot"]["detail"], "07 Oct, 14:00 TRT; not used for premiums or yields"
+        )
+        # Premiums and yields stay the published ones, on the matched spot.
+        market = aligned["markets"]["USDTRY"]
+        contract = self.contract("Oct 2026")
+        self.assert_inspector(*self.expected_inspector(
+            contract, market["spot"]["last"], contract["days_to_maturity"],
+            market["spot_trend"], market["contract_size"],
+        ))
+
+        _, raw, table = self.download_csv()
+        self.assert_csv_format(raw, table)
+        csv_rows = self.csv_rows(table)
+        self.assert_missing_is_explained(csv_rows)
+        for row in csv_rows:
+            self.assertEqual(row["spot_time"], "2026-10-07T13:45:00+03:00")
+            self.assertEqual(row["spot_aligned_to"], "2026-10-07T13:49:00+03:00")
+            self.assertEqual(float(row["latest_spot"]), 49.25)
+            self.assertEqual(row["latest_spot_time"], "2026-10-07T14:00:00+03:00")
+
+        # Another market's spot wasn't matched, so it says nothing more.
+        self.page.locator('.market-options [data-market="EURTRY"]').click()
+        expect(note).to_be_hidden()
+
+    def test_spot_taken_as_it_was_shows_no_matching_note(self):
+        self.open_dashboard("?market=USDTRY")
+        expect(self.page.locator("#spot-note")).to_be_hidden()
+        self.select_button("Oct 2026").click()
+        self.assert_selected("Oct 2026")
+        rows = self.inspector()
+        self.assertEqual(rows["spot-time"]["detail"], "")
+        self.assertNotIn("latest-spot", rows)
+
+        _, _, table = self.download_csv()
+        for row in self.csv_rows(table):
+            self.assertEqual(
+                (row["spot_aligned_to"], row["latest_spot"], row["latest_spot_time"]),
+                ("", "", ""),
+            )
+            self.assertNotIn("latest", row["missing"])
+            self.assertNotIn("aligned", row["missing"])
 
     # The inspector's comparison with an archived close
 

@@ -42,6 +42,14 @@ class ValidSnapshotTests(unittest.TestCase):
         contracts[2]["updated_at"] = "2026-10-07T10:58:00Z"
         validate_snapshot(snapshot)
 
+    def test_accepts_spot_aligned_to_the_futures_last_trade(self):
+        snapshot = load(FIXTURE)
+        spot = snapshot["markets"]["USDTRY"]["spot"]
+        self.assertNotIn("aligned_to", spot)  # the fixture is an unaligned close
+        spot["aligned_to"] = "2026-11-20T18:09:00+03:00"
+        spot["latest"] = {"last": 50.53719, "updated_at": "2026-11-20T22:15:00+03:00"}
+        validate_snapshot(snapshot)
+
     def test_accepts_contract_on_maturity_day(self):
         snapshot = load(FIXTURE)
         snapshot["markets"]["EURTRY"]["contracts"][0]["days_to_maturity"] = 0
@@ -124,6 +132,42 @@ class InvalidSnapshotTests(unittest.TestCase):
             with self.subTest(last=last):
                 self.usd["spot"]["last"] = last
                 self.assert_rejected("markets.USDTRY.spot.last")
+
+    def aligned(self, aligned_to="2026-11-20T18:09:00+03:00", latest=None):
+        self.usd["spot"]["aligned_to"] = aligned_to
+        self.usd["spot"]["latest"] = latest or {
+            "last": 50.53719,
+            "updated_at": "2026-11-20T22:15:00+03:00",
+        }
+
+    def test_aligned_to_needs_an_iso_timestamp(self):
+        for value in (None, "", "2026-11-20T18:09:00", "18:09", 1_795_187_340):
+            with self.subTest(value=value):
+                self.aligned(aligned_to=value)
+                self.assert_rejected("markets.USDTRY.spot.aligned_to")
+
+    def test_latest_spot_needs_a_positive_last_and_a_time(self):
+        cases = [
+            ({"last": 0, "updated_at": "2026-11-20T22:15:00+03:00"}, "latest.last"),
+            ({"last": "50.5", "updated_at": "2026-11-20T22:15:00+03:00"}, "latest.last"),
+            ({"updated_at": "2026-11-20T22:15:00+03:00"}, "latest.last"),
+            ({"last": 50.5, "updated_at": "2026-11-20T22:15:00"}, "latest.updated_at"),
+            ({"last": 50.5}, "latest.updated_at"),
+        ]
+        for latest, path in cases:
+            with self.subTest(latest=latest):
+                self.aligned(latest=latest)
+                self.assert_rejected(f"markets.USDTRY.spot.{path}")
+        self.usd["spot"]["latest"] = [50.5, "2026-11-20T22:15:00+03:00"]
+        self.assert_rejected("markets.USDTRY.spot.latest")
+
+    def test_aligned_to_and_latest_come_together(self):
+        self.aligned()
+        del self.usd["spot"]["latest"]
+        self.assert_rejected("markets.USDTRY.spot.latest")
+        self.aligned()
+        del self.usd["spot"]["aligned_to"]
+        self.assert_rejected("markets.USDTRY.spot.aligned_to")
 
     def test_spot_trend_needs_a_positive_daily_factor(self):
         for trend in ({"daily_factor": None}, {"daily_factor": -1.0}, {}):
