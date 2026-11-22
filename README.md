@@ -107,6 +107,35 @@ The yield curve starts with the gross daily factor
 1-, 30-, or 365-day compounded factor to net percentage yield by subtracting
 one and multiplying by 100.
 
+**Near expiry.** A contract with fewer than 7 days left (`NEAR_EXPIRY_DAYS` in
+`app.js`), counted after any recount below, is **near expiry**. Its yields
+annualize the premium over only a few days, and that premium is not clean: the
+futures last trade and the spot reference are taken hours apart (archived
+closes pair a last trade around 18:09 with spot around 23:15), which moves
+`price / spot` by roughly ±0.1–0.6%. Compounded over `365 / days left`, a 0.3%
+gap is worth about 17 annualized points at 7 days left, 20 at 6, and from −67
+to +198 at 1 day, so the 365D figure stops reading as a rate. The dashboard
+keeps every value as published and only changes how it presents them:
+
+- The board's contract cell, the inspector, and its Comparison and History tables
+  carry a worded **near expiry** tag. The inspector adds one sentence on why
+  the yield is unreliable, naming the days left.
+- The yield chart and the History chart draw near-expiry points as triangles.
+  While any other maturity (or close) has a yield, near-expiry values don't
+  set the y-axis range; one that falls outside it is drawn at the chart's edge
+  with an arrow, and its tooltip and accessible label give the true value. A
+  key under the chart counts them.
+- **Highest** (the peak tag) and the curve **Average** leave near-expiry
+  maturities out while another maturity has a yield, and the summary under
+  the chart names those left out. **Front** still shows the nearest contract,
+  tagged. If every maturity with a yield is near expiry, all of them count,
+  and the peak tag, Front and Average are tagged instead.
+- The CSV columns and the comparison values are unchanged.
+
+The updater never fails a snapshot over a yield it can't compound: a factor so
+large that `factor ** 365` overflows (a mis-scaled quote a day before expiry)
+publishes that yield as null, and the contract keeps its price and premium.
+
 Days left are counted from the snapshot's `market_date`: the VİOP session
 whose quotes it holds, by the same calendar the archive uses
 (`scripts/market_calendar.py`). On a trading day, from the 09:20 open until

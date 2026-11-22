@@ -194,10 +194,17 @@ def daily_yield_factor(
 
 
 def compounded_yield_percent(factor: float | None, period_days: int) -> float | None:
-    """Compound a gross daily factor and express the net result as a percentage."""
+    """Compound a gross daily factor and express the net result as a percentage.
+
+    A factor too large to compound, such as a mis-scaled quote a day or two
+    before expiry, gives None: one absurd quote must not stop the snapshot.
+    """
     if factor is None or factor <= 0 or period_days <= 0:
         return None
-    return (factor**period_days - 1) * 100
+    try:
+        return (factor**period_days - 1) * 100
+    except OverflowError:
+        return None
 
 
 def projected_spot(

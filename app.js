@@ -503,6 +503,40 @@ function lastTrades(contracts, generatedAt) {
 
 const STALE_DESCRIPTION = ", last traded before the market’s latest quote day";
 
+// A contract with fewer than this many days left, after any recount, is near
+// expiry. Its yields annualize the premium over only a few days, so the hours
+// between its futures last trade and the spot reference (archived closes pair
+// a last trade around 18:09 with spot around 23:15) are magnified: a 0.3%
+// gap is worth about 17 annualized points at 7 days left, 20 at 6 and up to
+// 198 at 1. Its values are shown unchanged and tagged, but while another
+// maturity has a yield they never set a chart's scale, the highest yield or
+// the average. The README's "Near expiry" section explains the rule.
+const NEAR_EXPIRY_DAYS = 7;
+
+function isNearExpiry(contract) {
+  const days = contract?.days_to_maturity;
+  return hasNumber(days) && days > 0 && days < NEAR_EXPIRY_DAYS;
+}
+
+const NEAR_EXPIRY_NOISE = "annualizing a few days’ premium magnifies noise";
+
+function nearExpiryDescription(days) {
+  return `, ${countText(days, "day", "days")} to maturity: ${NEAR_EXPIRY_NOISE}`;
+}
+
+// The near-expiry tag, with its description for screen readers. It is a
+// worded, outlined tag, so it never relies on colour.
+function nearExpiryTagNode(description) {
+  const tag = document.createElement("span");
+  tag.className = "expiry-tag";
+  tag.textContent = "near expiry";
+  const note = document.createElement("span");
+  note.className = "sr-only";
+  note.textContent = description;
+  tag.append(note);
+  return tag;
+}
+
 // The tooltip line for a contract of the day on screen.
 function lastTradeLine(contract) {
   const trade = lastTrades(state.data.contracts, state.snapshot.generated_at).get(contract);
@@ -764,6 +798,9 @@ function renderRows(contracts) {
     const volume = hasNumber(contract.volume) ? compactFormat.format(contract.volume) : "—";
     const spread = formatBidAsk(contract);
     const nearClass = contract.days_to_maturity <= 31 ? "is-near" : "";
+    const expiryTag = isNearExpiry(contract)
+      ? ` ${nearExpiryTagNode(nearExpiryDescription(contract.days_to_maturity)).outerHTML}`
+      : "";
     const unavailable = contract.status !== "available" ? " (unavailable)" : "";
     const trade = trades.get(contract);
     const staleTag = trade.stale
@@ -779,7 +816,7 @@ function renderRows(contracts) {
           <span class="contract-cell">
             <span class="contract-name">
               <strong>${escapeHtml(contract.label)}</strong>
-              <small>${escapeHtml(contract.code)}${index === 0 ? " · FRONT" : ""}${unavailable}</small>
+              <small>${escapeHtml(contract.code)}${index === 0 ? " · FRONT" : ""}${unavailable}${expiryTag}</small>
             </span>
             <button
               type="button"
@@ -1025,7 +1062,9 @@ function inChartTag(tag) {
 // One inspector row: a term, its value, and an optional line under the value
 // with the formula filled in or the reason the value is missing. Snapshot
 // strings go in as text.
-function inspectorRow({ key, term, value, detail, className = "", tag = "", stale = false }) {
+function inspectorRow({
+  key, term, value, detail, className = "", tag = "", stale = false, nearExpiry = null,
+}) {
   const row = document.createElement("div");
   row.dataset.item = key;
   const termNode = document.createElement("dt");
@@ -1035,6 +1074,7 @@ function inspectorRow({ key, term, value, detail, className = "", tag = "", stal
   valueNode.className = `inspector-value ${className}`.trim();
   valueNode.textContent = value;
   if (stale) valueNode.append(" ", staleTagNode());
+  if (nearExpiry) valueNode.append(" ", nearExpiryTagNode(nearExpiryDescription(nearExpiry)));
   const description = document.createElement("dd");
   description.append(valueNode);
   if (detail) {
@@ -1100,6 +1140,7 @@ function renderInspector(contract) {
       key: "days",
       term: "Days left",
       value: String(days),
+      nearExpiry: isNearExpiry(contract) ? days : null,
       detail: `Calendar days from ${formatDay(countedFrom)}` +
         (state.adjustedDay ? ", adjusted" : state.snapshot.published_market_date ? ", recounted" : ""),
     },
@@ -1165,6 +1206,16 @@ function renderInspector(contract) {
           : hasNumber(value) ? "" : "No yield without a daily factor.",
       };
     }),
+    ...(isNearExpiry(contract)
+      ? [{
+        key: "near-expiry",
+        term: "Near expiry",
+        value: `${countText(days, "day", "days")} left`,
+        detail: `These yields annualize a premium over only ${countText(days, "day", "days")}, ` +
+          "so the gap between the futures last-trade time and the spot reference time " +
+          "(both shown above) is magnified, and the 365D figure should not be read as a rate.",
+      }]
+      : []),
   ]);
 
   renderInspectorComparison(contract);
@@ -1253,7 +1304,10 @@ function comparisonCells({ contract, spot, trade, yield: value }) {
           ? "No premium in this snapshot."
           : "No premium: the contract has no last price.",
     },
-    days: { value: String(contract.days_to_maturity) },
+    days: {
+      value: String(contract.days_to_maturity),
+      nearExpiry: isNearExpiry(contract) ? contract.days_to_maturity : null,
+    },
     yield: {
       value: formatYield(value),
       className: signedClass(value),
@@ -1264,12 +1318,15 @@ function comparisonCells({ contract, spot, trade, yield: value }) {
 
 // One comparison cell: a value, an optional stale tag and an optional line
 // under it saying why the value is missing. Snapshot strings go in as text.
-function comparisonCell({ value = "", detail = "", stale = false, className = "" } = {}) {
+function comparisonCell({
+  value = "", detail = "", stale = false, nearExpiry = null, className = "",
+} = {}) {
   const cell = document.createElement("td");
   const valueNode = document.createElement("span");
   valueNode.className = `inspector-value ${className}`.trim();
   valueNode.textContent = value;
   if (stale) valueNode.append(" ", staleTagNode());
+  if (nearExpiry) valueNode.append(" ", nearExpiryTagNode(nearExpiryDescription(nearExpiry)));
   cell.append(valueNode);
   if (detail) {
     const detailNode = document.createElement("small");
@@ -1588,7 +1645,10 @@ function historyRow(row) {
     priced
       ? comparisonCell({ value: formatYield(value), className: signedClass(value) })
       : comparisonCell(),
-    comparisonCell({ value: String(contract.days_to_maturity) }),
+    comparisonCell({
+      value: String(contract.days_to_maturity),
+      nearExpiry: isNearExpiry(contract) ? contract.days_to_maturity : null,
+    }),
     comparisonCell({ value: trade.text, stale: trade.stale }),
   );
   return tr;
@@ -1820,7 +1880,13 @@ function historyPointName(point) {
   const trade = point.trade.time ? `last trade ${point.trade.text}` : "no last trade time";
   return `${formatDay(point.day)}${tag}: ${formatYield(point.value)} ` +
     `${settings.label.toLowerCase()} yield (${settings.shortLabel}), ${trade}` +
-    (point.trade.stale ? ", stale" : "");
+    (point.trade.stale ? ", stale" : "") +
+    (point.nearExpiry
+      ? `, near expiry with ${countText(point.contract.days_to_maturity, "day", "days")} left`
+      : "") +
+    (point.offScale
+      ? `, off the scale, drawn at its ${point.offScale === "above" ? "top" : "bottom"} edge`
+      : "");
 }
 
 // A key entry: a small drawing and its text.
@@ -1860,7 +1926,10 @@ function renderHistoryChart() {
   const x = (day) => span
     ? left + 10 + (daysUntil(first, day) / span) * (right - left - 20)
     : (left + right) / 2;
-  const values = plotted.map((row) => row.value);
+  // Closes where the contract was near expiry don't set the scale while
+  // another close has a value.
+  const settled = plotted.filter((row) => !isNearExpiry(row.contract));
+  const values = (settled.length ? settled : plotted).map((row) => row.value);
   let low = values.length ? Math.min(...values) : 0;
   let high = values.length ? Math.max(...values) : 1;
   if (low === high) {
@@ -1871,6 +1940,13 @@ function renderHistoryChart() {
   // Points stay clear of the plot's top and of the strip along its bottom.
   const lowest = bottom - HISTORY_STRIP - 10;
   const y = (value) => lowest - ((value - low) / (high - low)) * (lowest - top - 8);
+  // A value off the scale is drawn at the scale's edge and marked with an arrow.
+  plotted.forEach((row) => {
+    const py = y(row.value);
+    row.nearExpiry = isNearExpiry(row.contract);
+    row.offScale = py < top + 8 ? "above" : py > lowest ? "below" : null;
+    row.y = Math.min(Math.max(py, top + 8), lowest);
+  });
 
   elements.historyChartCaption.textContent =
     `${chart.symbol} · ${settings.label} yield · ${settings.shortLabel} on each close, ` +
@@ -1950,7 +2026,7 @@ function renderHistoryChart() {
   const lines = svgNode("g", { class: "history-lines", "aria-hidden": "true" });
   segments.filter((run) => run.length > 1).forEach((run) => {
     lines.append(svgNode("polyline", {
-      points: run.map((row) => `${x(row.day)},${y(row.value)}`).join(" "),
+      points: run.map((row) => `${x(row.day)},${row.y}`).join(" "),
       "data-days": run.map((row) => row.day).join(" "),
     }));
   });
@@ -1974,15 +2050,21 @@ function renderHistoryChart() {
   const points = svgNode("g", { class: "history-points" });
   plotted.forEach((row, index) => {
     const px = x(row.day);
-    const py = y(row.value);
+    const py = row.y;
     const before = index ? (px - x(plotted[index - 1].day)) / 2 : HISTORY_POINT_REACH;
     const after = index < plotted.length - 1 ? (x(plotted[index + 1].day) - px) / 2 : HISTORY_POINT_REACH;
     const reach = [Math.min(before, HISTORY_POINT_REACH), Math.min(after, HISTORY_POINT_REACH)];
     const stale = row.trade.stale;
-    const marker = row.live
-      ? svgNode("rect", { x: px - 4.5, y: py - 4.5, width: 9, height: 9 })
-      : svgNode("circle", { cx: px, cy: py, r: stale ? 5.5 : 4.5 });
-    marker.setAttribute("class", `history-marker${stale ? " is-stale" : ""}`);
+    // Near expiry is a triangle, whatever else the point is.
+    const marker = row.nearExpiry
+      ? svgNode("path", { d: `M ${px} ${py - 6.5} L ${px + 6.5} ${py + 5} L ${px - 6.5} ${py + 5} Z` })
+      : row.live
+        ? svgNode("rect", { x: px - 4.5, y: py - 4.5, width: 9, height: 9 })
+        : svgNode("circle", { cx: px, cy: py, r: stale ? 5.5 : 4.5 });
+    marker.setAttribute(
+      "class",
+      `history-marker${stale ? " is-stale" : ""}${row.nearExpiry ? " is-near-expiry" : ""}`,
+    );
     const node = row.onScreen
       ? svgNode("g", { role: "img", class: "history-point is-on-screen" })
       : svgNode("a", { href: historyDayHref(row.day), class: "history-point" });
@@ -1990,6 +2072,8 @@ function renderHistoryChart() {
     node.dataset.historyDay = row.day;
     node.dataset.value = String(row.value);
     if (stale) node.dataset.stale = "";
+    if (row.nearExpiry) node.dataset.nearExpiry = String(row.contract.days_to_maturity);
+    if (row.offScale) node.dataset.offScale = row.offScale;
     node.append(svgNode("rect", {
       class: "history-hit", x: px - reach[0], y: top,
       width: Math.max(reach[0] + reach[1], 1), height: bottom - HISTORY_STRIP - top,
@@ -2006,6 +2090,13 @@ function renderHistoryChart() {
       node.append(svgNode("circle", { class: "history-ring", cx: px, cy: py, r: 10 }));
     }
     node.append(marker);
+    if (row.offScale) {
+      const way = row.offScale === "above" ? -1 : 1;
+      node.append(svgNode("path", {
+        class: "history-off-scale",
+        d: `M ${px} ${py + way * 17} L ${px + 4.5} ${py + way * 10} L ${px - 4.5} ${py + way * 10} Z`,
+      }));
+    }
     points.append(node);
   });
 
@@ -2029,6 +2120,19 @@ function renderHistoryChart() {
     items.push(historyKeyItem(
       [svgNode("circle", { class: "history-marker is-stale", cx: 8, cy: 7, r: 4.5 })],
       "Hollow: last traded before that close’s latest quote day",
+    ));
+  }
+  if (plotted.some((row) => row.nearExpiry)) {
+    items.push(historyKeyItem(
+      [svgNode("path", { class: "history-marker is-near-expiry", d: "M 8 1.5 L 14 12 L 2 12 Z" })],
+      `Triangle: fewer than ${NEAR_EXPIRY_DAYS} days left; ${NEAR_EXPIRY_NOISE}` +
+        (settled.length ? ", so it sets no scale" : ""),
+    ));
+  }
+  if (plotted.some((row) => row.offScale)) {
+    items.push(historyKeyItem(
+      [svgNode("path", { class: "history-off-scale", d: "M 8 1 L 13 9 L 3 9 Z" })],
+      "Arrow: off the scale, drawn at its edge",
     ));
   }
   if (rows.some((row) => row.value === null)) {
@@ -2387,16 +2491,48 @@ function staleCountText(staleCount, total) {
     "last traded before the latest quote day.";
 }
 
-// The key under a chart, shown only when the day on screen plots a stale point.
-function renderChartKey(key, staleCount, total) {
-  key.hidden = !staleCount;
-  if (!staleCount) return;
-  const swatch = document.createElement("span");
-  swatch.className = "stale-swatch";
-  swatch.setAttribute("aria-hidden", "true");
-  const name = document.createElement("strong");
-  name.textContent = "Stale:";
-  key.replaceChildren(swatch, name, ` ${staleCountText(staleCount, total)}`);
+// What the key says about near-expiry points: how many, and, unless every
+// point is near expiry, that they are left out of the scale and summaries.
+function nearCountText(nearCount, allNear) {
+  return allNear
+    ? `every maturity plotted has fewer than ${NEAR_EXPIRY_DAYS} days left; ` +
+      `${NEAR_EXPIRY_NOISE}.`
+    : `${nearCount} with fewer than ${NEAR_EXPIRY_DAYS} days left, drawn as ` +
+      `${nearCount === 1 ? "a triangle" : "triangles"}; ${NEAR_EXPIRY_NOISE}, so ` +
+      `${nearCount === 1 ? "it sets" : "they set"} neither the scale, the highest ` +
+      "yield nor the average. An arrow marks a value off the scale.";
+}
+
+// The key under a chart, shown only when the day on screen plots a stale or
+// a near-expiry point.
+function renderChartKey(key, staleCount, total, { near = 0, allNear = false } = {}) {
+  key.hidden = !staleCount && !near;
+  if (key.hidden) return;
+  const entries = [];
+  if (staleCount) {
+    const swatch = document.createElement("span");
+    swatch.className = "stale-swatch";
+    swatch.setAttribute("aria-hidden", "true");
+    const name = document.createElement("strong");
+    name.textContent = "Stale:";
+    entries.push(swatch, name, ` ${staleCountText(staleCount, total)}`);
+  }
+  if (near) {
+    const entry = document.createElement("span");
+    entry.className = "chart-key-entry";
+    entry.dataset.keyEntry = "near-expiry";
+    // Drawn like the canvas's hollow triangle.
+    const swatch = svgNode("svg", {
+      class: "expiry-swatch", width: 14, height: 12, viewBox: "0 0 14 12", "aria-hidden": "true",
+    });
+    swatch.append(svgNode("path", { d: "M 7 1.5 L 12.5 10.5 L 1.5 10.5 Z" }));
+    const name = document.createElement("strong");
+    name.textContent = "Near expiry:";
+    entry.append(swatch, name, ` ${nearCountText(near, allNear)}`);
+    if (entries.length) entries.push(" ");
+    entries.push(entry);
+  }
+  key.replaceChildren(...entries);
 }
 
 // A round point marker. A stale one is hollow with a dotted outline and at
@@ -2412,6 +2548,42 @@ function drawPointMarker(context, { x, y }, { radius, filled, lineWidth = 2, sta
   context.lineWidth = lineWidth;
   if (stale) context.setLineDash([2.5, 2.5]);
   context.stroke();
+  context.restore();
+}
+
+// A near-expiry point: an upward triangle, so it differs from the round
+// markers in shape, not only in colour. Filled and stale follow the round
+// marker's rules.
+function drawNearExpiryMarker(context, { x, y }, { radius, filled, lineWidth = 2, stale = false }) {
+  const size = Math.max(radius, 5) + 1.5;
+  context.save();
+  context.beginPath();
+  context.moveTo(x, y - size);
+  context.lineTo(x + size, y + size * 0.8);
+  context.lineTo(x - size, y + size * 0.8);
+  context.closePath();
+  context.fillStyle = filled && !stale ? "#000000" : "#ffffff";
+  context.fill();
+  context.strokeStyle = "#000000";
+  context.lineWidth = lineWidth;
+  if (stale) context.setLineDash([2.5, 2.5]);
+  context.stroke();
+  context.restore();
+}
+
+// A point drawn at the plot's edge because its value is off the scale: a
+// solid arrow just outside the edge, pointing the way the value lies.
+function drawOffScaleArrow(context, { x, y, offScale }, color) {
+  if (!offScale) return;
+  const way = offScale === "above" ? -1 : 1;
+  context.save();
+  context.beginPath();
+  context.moveTo(x, y + way * 18);
+  context.lineTo(x + 5, y + way * 10);
+  context.lineTo(x - 5, y + way * 10);
+  context.closePath();
+  context.fillStyle = color;
+  context.fill();
   context.restore();
 }
 
@@ -2657,7 +2829,15 @@ function renderYieldChart() {
   }
   elements.yieldEmpty.hidden = true;
   const stale = staleContracts(contracts.map((point) => point.contract));
-  renderChartKey(elements.yieldKey, stale.size, contracts.length);
+  // Near-expiry maturities are drawn and tagged, but while another maturity
+  // has a yield they set neither the scale, the highest yield nor the average.
+  const near = new Set(
+    contracts.filter((point) => isNearExpiry(point.contract)).map((point) => point.contract),
+  );
+  const summarized = contracts.filter((point) => !near.has(point.contract));
+  const allNear = !summarized.length;
+  if (allNear) summarized.push(...contracts);
+  renderChartKey(elements.yieldKey, stale.size, contracts.length, { near: near.size, allNear });
   const bounds = canvas.getBoundingClientRect();
   if (!bounds.width || !bounds.height) {
     state.yieldChartPoints = [];
@@ -2675,14 +2855,20 @@ function renderYieldChart() {
   const margin = { top: 24, right: 20, bottom: 48, left: 62 };
   const chartWidth = width - margin.left - margin.right;
   const chartHeight = height - margin.top - margin.bottom;
-  const values = contracts.map((point) => point.value);
-  const plotted = slots.flatMap((slot) => [slot.current?.value, slot.compare?.value]).filter(hasNumber);
+  const values = summarized.map((point) => point.value);
+  // Both series' points; a comparison point near expiry on its own close
+  // counts as near expiry too.
+  const sides = slots.flatMap((slot) => [slot.current, slot.compare]).filter(Boolean);
+  const settled = sides.filter((point) => !isNearExpiry(point.contract));
+  const plotted = (settled.length ? settled : sides).map((point) => point.value);
   const rawMin = Math.min(0, ...plotted);
   const rawMax = Math.max(0, ...plotted);
   const range = rawMax - rawMin;
   const padding = Math.max(range * 0.12, state.yieldPeriod === "daily" ? 0.001 : 0.05);
   const min = rawMin - padding;
   const max = rawMax + padding;
+  const plotTop = margin.top;
+  const plotBottom = height - margin.bottom;
 
   const xAt = (index) => margin.left + (
     slots.length === 1
@@ -2690,10 +2876,26 @@ function renderYieldChart() {
       : index * chartWidth / (slots.length - 1)
   );
   const yAt = (value) => margin.top + (max - value) / (max - min) * chartHeight;
+  // A value outside the scale is drawn at the plot's edge, marked off scale.
+  const place = (value) => {
+    const y = yAt(value);
+    if (y < plotTop) return { y: plotTop, offScale: "above" };
+    if (y > plotBottom) return { y: plotBottom, offScale: "below" };
+    return { y, offScale: null };
+  };
   const seriesPoints = (side) => slots.flatMap((slot, index) =>
-    slot[side] ? [{ ...slot[side], key: slot.key, x: xAt(index), y: yAt(slot[side].value) }] : []
+    slot[side]
+      ? [{
+        ...slot[side],
+        key: slot.key,
+        x: xAt(index),
+        ...place(slot[side].value),
+        nearExpiry: isNearExpiry(slot[side].contract),
+      }]
+      : []
   );
   const currentPoints = seriesPoints("current");
+  const comparePoints = seriesPoints("compare");
   const selectedPoint = currentPoints.find((point) => point.key === state.selectedKey);
 
   context.font = '11px Helvetica, Arial, sans-serif';
@@ -2732,16 +2934,17 @@ function renderYieldChart() {
   context.fill();
 
   drawSelectionGuide(context, selectedPoint, margin.top, height - margin.bottom);
-  drawComparison(context, seriesPoints("compare"));
+  drawComparison(context, comparePoints);
+  comparePoints.forEach((point) => drawOffScaleArrow(context, point, COMPARE_COLOR));
 
   tracePath(context, currentPoints);
   context.strokeStyle = "#000000";
   context.lineWidth = 2.5;
   context.stroke();
 
-  const peak = currentPoints.reduce(
-    (highest, point) => point.value > highest.value ? point : highest,
-  );
+  const peak = currentPoints
+    .filter((point) => allNear || !point.nearExpiry)
+    .reduce((highest, point) => point.value > highest.value ? point : highest);
 
   context.save();
   context.setLineDash([4, 5]);
@@ -2755,12 +2958,15 @@ function renderYieldChart() {
 
   currentPoints.forEach((point, index) => {
     const isPeak = point === peak;
-    drawPointMarker(context, point, {
+    const marker = {
       radius: isPeak ? 7 : index === 0 ? 5 : 3.5,
       filled: isPeak || index === 0,
       lineWidth: isPeak ? 3 : 2,
       stale: stale.has(point.contract),
-    });
+    };
+    if (point.nearExpiry) drawNearExpiryMarker(context, point, marker);
+    else drawPointMarker(context, point, marker);
+    drawOffScaleArrow(context, point, "#000000");
 
     if (isPeak) {
       context.beginPath();
@@ -2773,18 +2979,28 @@ function renderYieldChart() {
   drawSelectionMarker(context, selectedPoint);
 
   drawAxisLabels(context, slots, xAt, width, height);
-  state.yieldChartPoints = slots.map((slot, index) => ({
-    ...slot,
-    x: xAt(index),
-    y: yAt((slot.current ?? slot.compare).value),
-    isPeak: slot.key === peak.key,
-    isSelected: slot.key === selectedPoint?.key,
-    stale: Boolean(slot.current && stale.has(slot.current.contract)),
-  }));
+  const placed = (points, key) => points.find((point) => point.key === key);
+  state.yieldChartPoints = slots.map((slot, index) => {
+    const current = placed(currentPoints, slot.key);
+    const compare = placed(comparePoints, slot.key);
+    return {
+      ...slot,
+      x: xAt(index),
+      y: (current ?? compare).y,
+      isPeak: slot.key === peak.key,
+      isSelected: slot.key === selectedPoint?.key,
+      stale: Boolean(slot.current && stale.has(slot.current.contract)),
+      nearExpiry: Boolean(current?.nearExpiry),
+      offScale: current?.offScale ?? null,
+      compareNearExpiry: Boolean(compare?.nearExpiry),
+      compareOffScale: compare?.offScale ?? null,
+    };
+  });
 
   const peakStale = stale.has(peak.contract);
   const peakTag = `HIGHEST ${settings.label.toUpperCase()} · ${formatYield(peak.value)}` +
-    (peakStale ? " · STALE" : "");
+    (peakStale ? " · STALE" : "") +
+    (peak.nearExpiry ? " · NEAR EXPIRY" : "");
   context.font = '700 11px Helvetica, Arial, sans-serif';
   const peakTagWidth = context.measureText(peakTag).width + 18;
   const peakTagX = Math.min(
@@ -2801,23 +3017,57 @@ function renderYieldChart() {
   const front = contracts[0];
   const average = values.reduce((sum, value) => sum + value, 0) / values.length;
   elements.yieldPeriodLabel.textContent = `${settings.label} · ${settings.shortLabel}`;
-  elements.yieldFrontValue.textContent = formatYield(front.value);
+  elements.yieldFrontValue.replaceChildren(formatYield(front.value));
+  if (near.has(front.contract)) {
+    elements.yieldFrontValue.append(
+      " ",
+      nearExpiryTagNode(nearExpiryDescription(front.contract.days_to_maturity)),
+    );
+  }
   elements.yieldFrontValue.className = signedClass(front.value);
-  elements.yieldAverageValue.textContent = formatYield(average);
+  elements.yieldAverageValue.replaceChildren(formatYield(average));
+  if (allNear) {
+    elements.yieldAverageValue.append(
+      " ",
+      nearExpiryTagNode(`: every maturity in it is near expiry, and ${NEAR_EXPIRY_NOISE}`),
+    );
+  }
   elements.yieldAverageValue.className = signedClass(average);
   const peakText =
     `Highest ${settings.label.toLowerCase()} yield is ${formatYield(peak.value)} at ` +
     `${peak.contract.label}` +
     (peakStale ? ", which is stale: it last traded before the latest quote day." : ".");
+  const nearPoints = currentPoints.filter((point) => point.nearExpiry);
+  const nearNote = allNear
+    ? ` Every maturity with a yield is near expiry, with fewer than ${NEAR_EXPIRY_DAYS} ` +
+      `days left, and ${NEAR_EXPIRY_NOISE}.`
+    : nearPoints.length
+      ? ` The highest yield, the average and this range leave out ` +
+        `${countText(nearPoints.length, "maturity", "maturities")} near expiry, with ` +
+        `fewer than ${NEAR_EXPIRY_DAYS} days left: ` +
+        `${nearPoints.map(nearExpiryPointText).join("; ")}.`
+      : "";
   elements.yieldSummary.textContent =
     `${peakText} ${settings.label} net yield ranges from ` +
-    `${formatYield(Math.min(...values))} to ${formatYield(Math.max(...values))}.`;
+    `${formatYield(Math.min(...values))} to ${formatYield(Math.max(...values))}.${nearNote}`;
   const staleNote = stale.size ? ` ${staleCountText(stale.size, contracts.length)}` : "";
+  const offScale = nearPoints.filter((point) => point.offScale);
+  const offScaleNote = offScale.length
+    ? ` ${offScale.map((point) =>
+      `${point.contract.label} is off the scale, drawn at its ` +
+      `${point.offScale === "above" ? "top" : "bottom"} edge.`).join(" ")}`
+    : "";
   canvas.setAttribute(
     "aria-label",
     `${settings.label} compounded ${state.data.pair} futures net yield by maturity. ` +
-    `${peakText}${staleNote}${comparisonNote()}`,
+    `${peakText}${nearNote}${offScaleNote}${staleNote}${comparisonNote()}`,
   );
+}
+
+// A near-expiry point as the summary names it: its label, yield and days left.
+function nearExpiryPointText(point) {
+  return `${point.contract.label} at ${formatYield(point.value)}, ` +
+    `${countText(point.contract.days_to_maturity, "day", "days")} left`;
 }
 
 function selectMarket(marketKey, updateUrl = false) {
@@ -3679,6 +3929,25 @@ function yieldTooltip(point) {
       lastTradeLine(point.current.contract),
     ];
   if (point.isPeak) lines.push({ text: `Highest ${settings.label.toLowerCase()} yield` });
+  if (point.nearExpiry) {
+    lines.push({ text: `Near expiry: ${NEAR_EXPIRY_NOISE}` });
+  }
+  if (point.compareNearExpiry) {
+    lines.push({
+      text: `Near expiry on ${formatDay(state.compareDate)}, with ` +
+        `${countText(point.compare.contract.days_to_maturity, "day", "days")} left`,
+    });
+  }
+  const edge = (offScale) => offScale === "above" ? "top" : "bottom";
+  if (point.offScale) {
+    lines.push({ text: `Off the scale, drawn at the chart’s ${edge(point.offScale)} edge` });
+  }
+  if (point.compareOffScale) {
+    lines.push({
+      text: `${formatDay(state.compareDate)}: off the scale, drawn at the chart’s ` +
+        `${edge(point.compareOffScale)} edge`,
+    });
+  }
   return { label: point.label, lines };
 }
 
