@@ -540,13 +540,35 @@ Python 3.10 or newer is required (the workflow uses Python 3.12).
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements.txt
+python -m pip install -r requirements.txt -c constraints.txt
 python -m unittest discover -s tests -v
 python scripts/update_data.py
 python -m http.server 8000
 ```
 
 Then open <http://localhost:8000>.
+
+**Pinned dependencies.** `requirements.txt` and `requirements-dev.txt` pin the
+direct dependencies. `constraints.txt` pins everything they pull in as well,
+for Python 3.10 and newer, with environment markers where versions differ
+(numpy and pandas do). Every `pip install` in the Pages and CI workflows passes
+`--constraint constraints.txt`, so a new upstream release can't change the
+hourly refresh without a commit here; `tests/test_workflows.py` fails if an
+install leaves it out.
+
+**Updating dependencies.** Edit the pin in `requirements.txt` (or
+`requirements-dev.txt`), then regenerate the constraints with
+[uv](https://docs.astral.sh/uv/) and network access:
+
+```bash
+bash scripts/lock_dependencies.sh            # keeps every other pin that still fits
+bash scripts/lock_dependencies.sh --upgrade  # resolves everything afresh
+```
+
+If borsapy changed, re-record the responses as the
+[fixtures README](tests/fixtures/borsapy/README.md) describes. Then reinstall
+with `-c constraints.txt` and run the tests. `tests/test_constraints.py` fails,
+offline, while a direct pin and `constraints.txt` disagree.
 
 **Recorded-response tests.** `tests/test_update_data_replay.py` runs the
 updater end to end, offline, against real borsapy 0.10.2 responses recorded in
@@ -568,7 +590,7 @@ To run the headless browser smoke test of the dashboard, install the dev
 requirements and a Playwright Chromium, then run the test directly:
 
 ```bash
-python -m pip install -r requirements-dev.txt
+python -m pip install -r requirements-dev.txt -c constraints.txt
 python -m playwright install chromium
 python -m unittest tests/e2e/test_dashboard_smoke.py -v
 ```
@@ -750,7 +772,8 @@ is missing, and lints both workflows with a pinned, checksum-verified
 `actionlint` release. `tests/test_workflows.py` checks the workflows' design:
 every job has a timeout, `archive` doesn't wait on the Pages build, write
 permissions stay per job, every action is on its Node 24 major, and every
-`data-history` fetch goes through `scripts/fetch_history.sh`.
+`data-history` fetch goes through `scripts/fetch_history.sh`, and every
+`pip install` passes `--constraint constraints.txt`.
 A separate `smoke` job installs `requirements-dev.txt` and Chromium and runs
 `python -m unittest tests/e2e/test_dashboard_smoke.py -v`, including the
 accessibility audit.
