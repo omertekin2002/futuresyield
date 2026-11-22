@@ -1,3 +1,4 @@
+from html.parser import HTMLParser
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
 HISTORY = ROOT / "_site" / "data" / "history"
+INDEX = ROOT / "_site" / "index.html"
 CLOSE = (ROOT / "tests" / "fixtures" / "market.json").read_text(encoding="utf-8")
 
 
@@ -21,6 +23,82 @@ def build(history_dir, check=True):
         capture_output=True,
         text=True,
     )
+
+
+class HeadElements(HTMLParser):
+    """Each start tag in <head>, in order, with its attributes."""
+
+    def __init__(self):
+        super().__init__()
+        self.elements = []
+        self.in_head = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "head":
+            self.in_head = True
+        elif self.in_head:
+            self.elements.append((tag, dict(attrs)))
+
+    def handle_endtag(self, tag):
+        if tag == "head":
+            self.in_head = False
+
+
+def head_elements(html):
+    parser = HeadElements()
+    parser.feed(html)
+    return parser.elements
+
+
+def policy_directives(content):
+    """A Content-Security-Policy value as {directive: [sources]}."""
+    directives = {}
+    for part in content.split(";"):
+        name, *sources = part.split()
+        if name:
+            directives[name.lower()] = sources
+    return directives
+
+
+class BuildSiteContentSecurityPolicyTests(unittest.TestCase):
+    def built_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            build(Path(tmp) / "missing")
+        elements = head_elements(INDEX.read_text(encoding="utf-8"))
+        policies = [
+            attrs for tag, attrs in elements
+            if tag == "meta"
+            and (attrs.get("http-equiv") or "").lower() == "content-security-policy"
+        ]
+        self.assertEqual(len(policies), 1, "index.html must carry exactly one CSP meta tag")
+        return elements, policy_directives(policies[0].get("content") or "")
+
+    def test_policy_is_the_first_element_after_charset(self):
+        # A meta policy covers only what comes after it.
+        elements, _ = self.built_policy()
+        self.assertEqual(elements[0], ("meta", {"charset": "utf-8"}))
+        tag, attrs = elements[1]
+        self.assertEqual(tag, "meta")
+        self.assertEqual(attrs.get("http-equiv"), "Content-Security-Policy")
+
+    def test_scripts_come_only_from_the_page_origin(self):
+        _, directives = self.built_policy()
+        self.assertEqual(directives.get("script-src"), ["'self'"])
+        for source in ("'unsafe-inline'", "'unsafe-eval'", "'unsafe-hashes'", "data:", "*"):
+            self.assertNotIn(source, directives["script-src"])
+
+    def test_everything_else_is_refused_or_same_origin(self):
+        _, directives = self.built_policy()
+        self.assertEqual(directives, {
+            "default-src": ["'none'"],
+            "script-src": ["'self'"],
+            "style-src": ["'self'"],
+            "img-src": ["'self'"],
+            "connect-src": ["'self'"],
+            "base-uri": ["'none'"],
+            "form-action": ["'none'"],
+            "object-src": ["'none'"],
+        })
 
 
 class BuildSiteHistoryTests(unittest.TestCase):

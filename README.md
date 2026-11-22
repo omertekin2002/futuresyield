@@ -800,6 +800,18 @@ A separate `smoke` job installs `requirements-dev.txt` and Chromium and runs
 `python -m unittest tests/e2e/test_dashboard_smoke.py -v`, including the
 accessibility audit.
 
+The page locks itself to its own origin with a Content Security Policy, set by
+a `<meta http-equiv="Content-Security-Policy">` tag right after `charset` in
+`index.html` (GitHub Pages can't send response headers, so `frame-ancestors`
+can't be set). Scripts, styles, images and `fetch` may come only from the
+site itself, with no inline script or style and no `eval`; everything else,
+including plugins, `<base>` and form submissions, is refused. So markup that
+ever slipped past `escapeHtml` or the snapshot schema still couldn't run
+script. `tests/test_build_site.py` fails if the built page loses or loosens the
+policy; the smoke tests fail on any CSP violation in any test and check that
+an injected inline script is blocked. A new external resource, or a new kind
+of resource, must be added to the policy deliberately.
+
 ## Data notes
 
 - Futures discovery uses `borsapy.viop_contracts(..., full_info=True)` for
