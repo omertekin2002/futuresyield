@@ -4,7 +4,8 @@ The workflows only run on GitHub, so these tests pin the properties that keep
 the live site and its archive safe: every job has a timeout, the end-of-day
 archive never waits on the Pages build, permissions stay per job, the Pages
 actions run on Node 24, and every data-history fetch goes through
-scripts/fetch_history.sh. actionlint (run in CI's static job) checks the
+scripts/fetch_history.sh, and every pip install is held to constraints.txt.
+actionlint (run in CI's static job) checks the
 syntax; this checks the design.
 
 The repo's dependencies don't include a YAML parser, so the workflows are read
@@ -13,6 +14,7 @@ with a small reader for the block layout they use: jobs at two spaces under
 """
 
 from pathlib import Path
+import itertools
 import re
 import unittest
 
@@ -32,6 +34,8 @@ NODE24_MAJOR = {
 }
 
 FETCH_STEP = 'bash scripts/fetch_history.sh "$RUNNER_TEMP/data-history"'
+PIP_INSTALL = re.compile(r"\bpip3?\s+install\b")
+CONSTRAINT = "--constraint constraints.txt"
 
 
 class Job:
@@ -308,6 +312,73 @@ class HistoryFetchTests(unittest.TestCase):
             "HISTORY_DIR: ${{ runner.temp }}/data-history/history",
             PAGES.jobs["build"].text,
         )
+
+
+class DependencyPinTests(unittest.TestCase):
+    """Every install resolves against constraints.txt, so an upstream release
+    reaches the refresh only through scripts/lock_dependencies.sh."""
+
+    @staticmethod
+    def code(step):
+        return "\n".join(
+            line for line in step.splitlines() if not line.lstrip().startswith("#")
+        )
+
+    def install_steps(self, workflow):
+        return [
+            (name, step)
+            for name, job in workflow.jobs.items()
+            for step in job.steps
+            if PIP_INSTALL.search(self.code(step))
+        ]
+
+    def test_every_pip_install_passes_the_constraints(self):
+        for workflow, label in ((PAGES, "pages.yml"), (CI, "ci.yml")):
+            for name, step in self.install_steps(workflow):
+                with self.subTest(workflow=label, job=name, step=step.splitlines()[0]):
+                    for install in PIP_INSTALL.finditer(self.code(step)):
+                        line = self.code(step)[install.start():].splitlines()[0]
+                        self.assertIn(CONSTRAINT, line)
+
+    def test_the_reader_finds_every_install(self):
+        """Guards the check above: an install it can't see isn't checked."""
+        self.assertEqual(
+            {name for name, _ in self.install_steps(PAGES)}, {"refresh", "archive"}
+        )
+        self.assertEqual(
+            {name for name, _ in self.install_steps(CI)}, {"tests", "smoke", "archive"}
+        )
+        for workflow in (PAGES, CI):
+            self.assertEqual(
+                len(PIP_INSTALL.findall(workflow.code)),
+                len(self.install_steps(workflow)),
+                "one install per step, each inside a job step",
+            )
+
+    def test_pip_caches_are_keyed_on_the_constraints(self):
+        """A cached wheel set from before a re-lock is never restored."""
+        for workflow, label in ((PAGES, "pages.yml"), (CI, "ci.yml")):
+            for name, job in workflow.jobs.items():
+                for step in job.steps:
+                    if "cache: pip" not in step:
+                        continue
+                    with self.subTest(workflow=label, job=name):
+                        lines = step.splitlines()
+                        start = next(
+                            (i for i, line in enumerate(lines)
+                             if "cache-dependency-path:" in line),
+                            None,
+                        )
+                        self.assertIsNotNone(start, "cache: pip without cache-dependency-path")
+                        paths = lines[start].partition(":")[2].strip()
+                        if paths == "|":
+                            paths = " ".join(
+                                line.strip() for line in itertools.takewhile(
+                                    lambda line: line.startswith("            "),
+                                    lines[start + 1:],
+                                )
+                            )
+                        self.assertIn("constraints.txt", paths.split())
 
 
 if __name__ == "__main__":
