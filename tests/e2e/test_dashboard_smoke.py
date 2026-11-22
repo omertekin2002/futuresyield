@@ -24,6 +24,8 @@ import threading
 import unittest
 from urllib.parse import parse_qsl, urlsplit
 
+from scripts import build_history_series
+
 try:
     from playwright.sync_api import expect, sync_playwright
 except ImportError:  # pragma: no cover - exercised only without Playwright
@@ -1815,6 +1817,8 @@ class DashboardSmokeTests(unittest.TestCase):
         )
 
     def test_history_shows_a_recounted_close_from_its_session(self):
+        # The close's own file, as the bundle doesn't cover it.
+        self.serve_bundles_without(MISDATED_DAY)
         self.serve_misdated()
         self.open_dashboard("?market=USDTRY")
         self.select_button("Jan 2028").click()
@@ -2976,6 +2980,7 @@ class DashboardSmokeTests(unittest.TestCase):
         return market, next(c for c in market["contracts"] if c["symbol"] == HISTORY_SYMBOL)
 
     def test_history_loads_on_demand_and_lists_each_close(self):
+        bundles = self.watch_bundle_fetches()
         fetched = self.watch_history_fetches()
         self.open_dashboard("?market=USDTRY&maturity=2028-01")
         self.assert_selected("Jan 2028")
@@ -2985,7 +2990,8 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assertEqual(fetched, [], "fetched archived closes before Load history")
 
         self.load_history(len(HISTORY_FIXTURE))
-        self.assertEqual(sorted(fetched), sorted(HISTORY_FIXTURE))
+        # One request: the market's bundle, and no close on its own.
+        self.assertEqual((bundles, fetched), (["USDTRY"], []))
         expect(self.page.locator("#inspector-history-status")).to_have_text(
             "History loaded: 5 archived closes."
         )
@@ -3060,11 +3066,11 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assertEqual(self.errors, [])
 
     def test_history_reuses_its_closes_across_periods_selections_and_markets(self):
+        bundles = self.watch_bundle_fetches()
         fetched = self.watch_history_fetches()
         self.open_dashboard("?market=USDTRY&maturity=2028-01")
         self.load_history(len(HISTORY_FIXTURE))
-        self.assertEqual(len(fetched), len(HISTORY_FIXTURE))
-        fetched.clear()
+        self.assertEqual((bundles, fetched), (["USDTRY"], []))
 
         # The period switch changes only the yield column.
         self.page.locator('[data-yield-period="monthly"]').click()
@@ -3076,7 +3082,8 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assertEqual(row["cells"][:4], self.expected_history_row(market, contract, "monthly"))
         self.assertIn("period=monthly", row["href"])
 
-        # Another maturity and another market load straight from the cache.
+        # Another maturity loads straight from the cache, and another market
+        # from its own bundle.
         self.select_button("Dec 2026").click()
         self.assert_selected("Dec 2026")
         expect(self.page.locator("#inspector-history-scroll")).to_be_visible()
@@ -3094,6 +3101,7 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assertEqual(row["cells"][:4], self.expected_history_row(market, contract, "monthly"))
         self.assertIn("market=EURTRY", row["href"])
         self.assertEqual(fetched, [], "refetched cached closes")
+        self.assertEqual(bundles, ["USDTRY", "EURTRY"])
 
     def test_history_date_opens_that_close_with_the_same_maturity(self):
         fetched = self.watch_history_fetches()
@@ -3120,7 +3128,8 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assertEqual([row["day"] for row in rows], [day, NO_PRICE_DAY, ROLLED_DAY])
         self.assertEqual((rows[0]["tag"], rows[0]["href"]), ("On screen", None))
         self.assertTrue(rows[0]["onScreen"])
-        self.assertEqual(fetched, [], "refetched cached closes")
+        # The close opens from its own full file, never from the History bundle.
+        self.assertEqual(fetched, [day])
         # The board agrees with the History row on screen.
         market, contract = self.history_symbol_on(day)
         self.assertEqual(
@@ -3197,13 +3206,15 @@ class DashboardSmokeTests(unittest.TestCase):
             )
         self.assertEqual(self.history_length(), length)
         self.expect_load_errors(1)
-        # The browser's own reports of the two 404s are the only other errors.
-        self.assertEqual(len(self.errors), 2, self.errors)
-        self.assertTrue(all("404" in error for error in self.errors), self.errors)
+        # History read the close from the bundle; opening it fetched its own
+        # file, whose 404 the browser reports as the only other error.
+        self.assertEqual(len(self.errors), 1, self.errors)
+        self.assertIn("404", self.errors[0])
         self.errors = []
 
     def test_history_says_which_close_could_not_be_loaded(self):
         failed = "2026-10-05"
+        self.serve_bundles_without(failed)
         self.page.route(f"**/data/history/{failed}.json", lambda route: route.fulfill(status=404))
         self.open_dashboard("?market=USDTRY&maturity=2028-01")
         self.load_history(len(HISTORY_FIXTURE))
@@ -3255,6 +3266,7 @@ class DashboardSmokeTests(unittest.TestCase):
 
     def test_history_retries_only_the_closes_that_failed(self):
         failed = "2026-10-05"
+        self.serve_bundles_without(failed)
         modes, _ = self.route_history_close(failed)
         fetched = self.watch_history_fetches()
         self.open_dashboard("?market=USDTRY&maturity=2028-01")
@@ -3266,7 +3278,8 @@ class DashboardSmokeTests(unittest.TestCase):
             "History loaded: 5 archived closes. 1 close could not be loaded."
         )
         expect(self.page.locator(f'.history-missing-mark[data-history-day="{failed}"]')).to_have_count(1)
-        self.assertEqual(sorted(fetched), sorted(HISTORY_FIXTURE))
+        # Only the close the bundle doesn't cover was fetched on its own.
+        self.assertEqual(fetched, [failed])
 
         # Once the close can be fetched, Retry asks for it alone, once.
         fetched.clear()
@@ -3307,6 +3320,7 @@ class DashboardSmokeTests(unittest.TestCase):
             lambda request: "data/market.json" in request.url and live_requests.append(request.url),
         )
         self.page.clock.install(time=FIXTURE_DAY_TIME)
+        self.serve_bundles_without(failed)
         modes, held = self.route_history_close(failed)
         fetched = self.watch_history_fetches()
         self.open_dashboard("?market=USDTRY&maturity=2028-01")
@@ -3391,6 +3405,7 @@ class DashboardSmokeTests(unittest.TestCase):
 
     def test_history_retry_is_keyboard_operable_and_keeps_focus(self):
         failed = "2026-10-05"
+        self.serve_bundles_without(failed)
         modes, _ = self.route_history_close(failed)
         self.open_dashboard("?market=USDTRY&maturity=2028-01")
         self.load_history(len(HISTORY_FIXTURE))
@@ -3422,6 +3437,7 @@ class DashboardSmokeTests(unittest.TestCase):
             with self.subTest(viewport=viewport):
                 if viewport:
                     self.reopen_at(FIXTURE_DAY_TIME, viewport=viewport)
+                self.serve_bundles_without(failed)
                 self.route_history_close(failed)
                 self.open_dashboard("?market=USDTRY&maturity=2028-01")
                 self.load_history(len(HISTORY_FIXTURE))
@@ -4420,7 +4436,8 @@ class DashboardSmokeTests(unittest.TestCase):
         fetched = self.watch_history_fetches()
         self.open_dashboard("?market=USDTRY&maturity=2028-01")
         self.load_history(len(HISTORY_FIXTURE) - 1)
-        self.assertEqual(sorted(fetched), sorted(day for day in HISTORY_FIXTURE if day != added))
+        # From the bundle, which covers only the closes the index listed.
+        self.assertEqual(fetched, [])
         status = self.page.locator("#inspector-history-status")
         coverage = self.page.locator("#inspector-history-coverage")
         expect(status).to_have_text("History loaded: 4 archived closes.")
@@ -4665,10 +4682,9 @@ class DashboardSmokeTests(unittest.TestCase):
             "USDTRYF2028 · Daily yield · 1D on each close, oldest to newest. "
             "Each point opens its close; the table below lists every value."
         )
-        self.assertEqual(sorted(fetched), sorted(HISTORY_FIXTURE))
-        fetched.clear()
+        self.assertEqual(fetched, [], "fetched a close the bundle covers")
 
-        # Period, selection and market switches redraw from the cache.
+        # Period, selection and market switches fetch no close.
         self.page.locator('[data-yield-period="monthly"]').click()
         expect(self.page.locator("#history-chart-caption")).to_contain_text("Monthly yield · 30D")
         self.select_button("Dec 2026").click()
@@ -4717,6 +4733,7 @@ class DashboardSmokeTests(unittest.TestCase):
 
     def test_history_chart_breaks_at_every_missing_close_and_gap(self):
         failed = "2026-10-06"
+        self.serve_bundles_without(failed)
         self.page.route(f"**/data/history/{failed}.json", lambda route: route.fulfill(status=404))
         self.open_dashboard("?market=USDTRY&maturity=2028-01")
         self.load_history(len(HISTORY_FIXTURE))
@@ -4828,7 +4845,8 @@ class DashboardSmokeTests(unittest.TestCase):
         points = self.history_chart()["points"]
         self.assertEqual(points[-1]["day"], day)
         self.assertTrue(points[-1]["onScreen"])
-        self.assertEqual(fetched, [], "refetched cached closes")
+        # The close opens from its own full file, never from the History bundle.
+        self.assertEqual(fetched, [day])
 
     def test_history_chart_point_opens_its_close_from_the_keyboard_and_a_tap(self):
         self.open_dashboard("?market=USDTRY&maturity=2028-01")
@@ -5208,7 +5226,8 @@ class DashboardSmokeTests(unittest.TestCase):
                 on_screen = [row for row in self.history_rows() if row["onScreen"]]
                 self.assertEqual([row["day"] for row in on_screen], [day or self.snapshot["market_date"]])
                 self.assert_focus_not_lost()
-        self.assertEqual(fetched, [], "refetched cached closes")
+        # Each close opened from its own full file once; Back and Forward reuse it.
+        self.assertEqual(fetched, [first, second])
         self.assertEqual(self.history_length(), length + 2)
 
     def test_back_restores_the_previous_market_and_its_maturity(self):
@@ -6768,6 +6787,218 @@ class DashboardSmokeTests(unittest.TestCase):
                 self.assert_no_sideways_scroll()
                 self.assert_accessible(f"near expiry at {viewport or 'desktop'}")
 
+    # The History bundle: one file per market, built with the site.
+
+    BUNDLE_URL = re.compile(r"/data/history/markets/([A-Z]+)\.json(\?|$)")
+
+    def watch_bundle_fetches(self):
+        """Record each market's History bundle the page requests, by key."""
+        fetched = []
+        def record(request):
+            match = self.BUNDLE_URL.search(request.url)
+            if match:
+                fetched.append(match.group(1))
+        self.page.on("request", record)
+        return fetched
+
+    def history_bundle(self, key, closes):
+        """The bundle the build writes for key from closes ({day: snapshot})."""
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            for day, snapshot in closes.items():
+                (directory / f"{day}.json").write_text(json.dumps(snapshot), encoding="utf-8")
+            (directory / "index.json").write_text(
+                json.dumps(self.history_manifest(closes)), encoding="utf-8"
+            )
+            return build_history_series.build_bundles(directory)[key]
+
+    def serve_bundles_without(self, *days):
+        """Serve each market's bundle without days, so History fetches those
+        closes on their own, as when the bundle predates them."""
+        closes = {day: snapshot for day, snapshot in self.history.items() if day not in days}
+        bundles = {
+            key: self.history_bundle(key, closes) for key in self.snapshot["market_order"]
+        }
+        self.page.route(
+            self.BUNDLE_URL,
+            lambda route: route.fulfill(
+                status=200, content_type="application/json",
+                body=json.dumps(bundles[self.BUNDLE_URL.search(route.request.url).group(1)]),
+            ),
+        )
+
+    def serve_bundle(self, key, body, status=200):
+        self.page.route(
+            re.compile(rf"/data/history/markets/{key}\.json(\?|$)"),
+            lambda route: route.fulfill(
+                status=status, content_type="application/json",
+                body=body if isinstance(body, str) else json.dumps(body),
+            ),
+        )
+
+    def history_view(self):
+        """Everything History shows once loaded: rows, coverage, note and chart."""
+        expect(self.page.locator("#inspector-history-status")).to_have_text(
+            re.compile(r"^History loaded")
+        )
+        return {
+            "rows": self.history_rows(),
+            "status": self.page.locator("#inspector-history-status").text_content(),
+            "coverage": self.page.locator("#inspector-history-coverage").text_content(),
+            "note": self.page.locator("#inspector-history-note").text_content(),
+            "retry": self.page.locator("#history-retry").is_visible(),
+            "chart": self.page.locator("#history-chart").evaluate("(node) => node.outerHTML"),
+            "chart_rows": self.page.evaluate("() => state.historyChart.rows"),
+        }
+
+    def test_history_reads_one_bundle_per_market(self):
+        bundles = self.watch_bundle_fetches()
+        fetched = self.watch_history_fetches()
+        keys = []
+        self.page.on(
+            "request",
+            lambda request: self.BUNDLE_URL.search(request.url)
+            and keys.append(parse_qsl(urlsplit(request.url).query)),
+        )
+        self.open_dashboard("?market=USDTRY&maturity=2028-01")
+        self.load_history(len(HISTORY_FIXTURE))
+        status = self.page.locator("#inspector-history-status")
+        expect(status).to_have_text("History loaded: 5 archived closes.")
+        self.assertEqual((bundles, fetched), (["USDTRY"], []))
+        # Its cache key follows the index.
+        self.assertEqual([[name for name, _ in query] for query in keys], [["v"]])
+
+        # Another market reads its own bundle, once.
+        self.page.locator('.market-options [data-market="EURTRY"]').click()
+        self.assert_market("EURTRY")
+        self.select_button("Dec 2026", "EURTRY").click()
+        expect(self.page.locator("#inspector-history-scroll")).to_be_visible()
+        expect(status).to_have_text("History loaded: 5 archived closes.")
+        self.assertEqual(
+            [r["state"] for r in self.history_rows() if r["state"] != "gap"], ["listed"] * 6
+        )
+        self.assertEqual((bundles, fetched), (["USDTRY", "EURTRY"], []))
+
+        # Switching back reuses the bundle already loaded.
+        self.page.locator('.market-options [data-market="USDTRY"]').click()
+        self.assert_market("USDTRY")
+        self.select_button("Jan 2028").click()
+        expect(self.page.locator("#inspector-history-scroll")).to_be_visible()
+        expect(status).to_have_text("History loaded: 5 archived closes.")
+        self.page.locator('.market-options [data-market="EURTRY"]').click()
+        self.assert_market("EURTRY")
+        self.assertEqual((bundles, fetched), (["USDTRY", "EURTRY"], []))
+        self.assertEqual(len(set(map(tuple, keys))), 1)
+
+    def test_history_from_the_bundle_matches_each_close_and_falls_back_quietly(self):
+        # The fixture archive with a legacy close recounted from its session,
+        # a close where the contract is listed with no price and one where it
+        # isn't listed.
+        closes = {**self.history, MISDATED_DAY: self.misdated_close()}
+        bundle = self.history_bundle("USDTRY", closes)
+        query = "?market=USDTRY&maturity=2028-01&period=annualized"
+
+        def open_history(body, status=200):
+            self.serve_misdated(closes[MISDATED_DAY])
+            if body is not None:
+                self.serve_bundle("USDTRY", body, status)
+            bundles = self.watch_bundle_fetches()
+            fetched = self.watch_history_fetches()
+            self.open_dashboard(query)
+            self.load_history(len(HISTORY_FIXTURE))
+            view = self.history_view()
+            expect(self.page.locator("#history-notice")).to_be_hidden()
+            return view, bundles, fetched
+
+        expected, bundles, fetched = open_history(bundle)
+        self.assertEqual((bundles, fetched), (["USDTRY"], []))
+        self.assertIn("recounted from its session", expected["note"])
+        states = {row["day"]: row["state"] for row in expected["rows"] if row["day"]}
+        self.assertEqual(states[ROLLED_DAY], "not-listed")
+        self.assertEqual(
+            next(r for r in expected["rows"] if r["day"] == NO_PRICE_DAY)["cells"][0],
+            "Listed, no price",
+        )
+        market, contract = self.history_symbol_on(MISDATED_DAY)
+        self.assertEqual(
+            next(r for r in expected["rows"] if r["day"] == MISDATED_DAY)["cells"][:4],
+            self.expected_history_row(market, contract, "annualized", 4),
+        )
+
+        invalid_entry = copy.deepcopy(bundle)
+        invalid_entry["days"][2]["market"]["contracts"][0].pop("days_to_maturity")
+        cases = {
+            "missing": (None, 404),
+            "not JSON": ("{", 200),
+            "another schema": ({**bundle, "schema_version": 2}, 200),
+            "another market": ({**bundle, "market": "EURTRY"}, 200),
+            "entries failing the snapshot check": (
+                {**bundle, "days": [{**day, "schema_version": 3} for day in bundle["days"]]},
+                200,
+            ),
+        }
+        for case, (body, status) in cases.items():
+            with self.subTest(case=case):
+                self.context.close()
+                self.open_context()
+                view, bundles, fetched = open_history(
+                    body if status == 200 else "", status
+                )
+                self.assertEqual(view, expected)
+                self.assertEqual(bundles, ["USDTRY"])
+                self.assertEqual(sorted(fetched), sorted(HISTORY_FIXTURE))
+                if status == 404:
+                    # The browser's own report of the 404 is the only error.
+                    self.assertEqual(len(self.errors), 1, self.errors)
+                    self.assertIn("404", self.errors[0])
+                    self.errors = []
+
+        # One entry failing the check costs only its own close.
+        self.context.close()
+        self.open_context()
+        view, bundles, fetched = open_history(invalid_entry)
+        self.assertEqual(view, expected)
+        self.assertEqual((bundles, fetched), (["USDTRY"], [bundle["days"][2]["date"]]))
+
+    def test_closes_opened_from_history_load_their_own_full_file(self):
+        bundles = self.watch_bundle_fetches()
+        fetched = self.watch_history_fetches()
+        self.open_dashboard("?market=USDTRY&maturity=2028-01")
+        self.load_history(len(HISTORY_FIXTURE))
+        self.assertEqual((bundles, fetched), (["USDTRY"], []))
+
+        def assert_full_close(day):
+            self.assert_historical(day)
+            # Every market of the close is on screen, not just the bundle's.
+            self.assertEqual(
+                self.page.evaluate("() => Object.keys(state.snapshot.markets)"),
+                ["USDTRY", "EURTRY", "XAUTRY"],
+            )
+            for key in ("USDTRY", "EURTRY", "XAUTRY"):
+                expect(self.page.locator(f'.market-options [data-market="{key}"]')).to_be_enabled()
+            self.assert_market("USDTRY", self.history[day])
+
+        # A History date.
+        self.page.locator('#inspector-history-rows a[data-history-day="2026-10-05"]').click()
+        assert_full_close("2026-10-05")
+        self.assertEqual(fetched, ["2026-10-05"])
+        # Back and Forward reuse the close loaded in full.
+        self.page.go_back()
+        expect(self.page.locator("#data-state")).to_have_class(re.compile(r"\bis-delayed\b"))
+        self.page.go_forward()
+        assert_full_close("2026-10-05")
+        # A History chart point.
+        self.page.locator('#history-chart-svg a[data-history-day="2026-09-30"]').click()
+        assert_full_close("2026-09-30")
+        # The View menu and Compare.
+        self.page.locator("#history-select").select_option(NO_PRICE_DAY)
+        assert_full_close(NO_PRICE_DAY)
+        self.compare_select().select_option(ROLLED_DAY)
+        self.assert_comparing(ROLLED_DAY, HISTORY_LABELS[NO_PRICE_DAY])
+        self.assertEqual(fetched, ["2026-10-05", "2026-09-30", NO_PRICE_DAY, ROLLED_DAY])
+        self.assertEqual(bundles, ["USDTRY"])
+
+
 # A real history/ directory, laid out like the data-history branch. CI points
 # this at a read-only checkout of that branch; without it the class is skipped.
 ARCHIVE_DIR = os.environ.get("VADE_ARCHIVE_DIR")
@@ -6889,6 +7120,55 @@ class RealArchiveSmokeTests(unittest.TestCase):
                     )
         self.assertEqual(self.errors, [], "page logged errors")
 
+    def test_history_from_the_bundles_matches_each_close(self):
+        # For a contract of each market, History read from the market's
+        # bundle shows exactly what it shows from each close's own file.
+        newest = max(self.days)
+        for key in self.days[newest]["market_order"]:
+            contracts = self.days[newest]["markets"][key]["contracts"]
+            maturity = contracts[min(1, len(contracts) - 1)]["maturity_date"][:7]
+            views = {}
+            for bundled in (True, False):
+                with self.subTest(market=key, bundled=bundled):
+                    # A fresh page, with nothing cached.
+                    self.context.close()
+                    self.setUp()
+                    page = self.page
+                    requested = []
+                    page.on(
+                        "request",
+                        lambda request: "/data/history/" in request.url
+                        and "index.json" not in request.url
+                        and requested.append(urlsplit(request.url).path.rsplit("/", 2)[-2:]),
+                    )
+                    if not bundled:
+                        page.route(
+                            re.compile(r"/data/history/markets/"),
+                            lambda route: route.fulfill(status=404),
+                        )
+                    page.goto(f"{self.base_url}?market={key}&maturity={maturity}&period=annualized")
+                    load = page.locator("#history-load")
+                    expect(load).to_be_visible()
+                    load.click()
+                    status = page.locator("#inspector-history-status")
+                    expect(status).to_have_text(re.compile(r"^History loaded"))
+                    views[bundled] = {
+                        "status": status.text_content(),
+                        "note": page.locator("#inspector-history-note").text_content(),
+                        "coverage": page.locator("#inspector-history-coverage").text_content(),
+                        "rows": page.locator("#inspector-history-rows").inner_text(),
+                        "chart": page.evaluate("() => JSON.stringify(state.historyChart.rows)"),
+                    }
+                    if bundled:
+                        self.assertEqual(requested, [["markets", f"{key}.json"]])
+                        self.assertEqual(self.errors, [], "page logged errors")
+                    else:
+                        self.assertEqual(
+                            sorted(name for folder, name in requested if folder == "history"),
+                            sorted(f"{day}.json" for day in self.days),
+                        )
+            with self.subTest(market=key):
+                self.assertEqual(views[True], views[False])
 
 if __name__ == "__main__":
     unittest.main()

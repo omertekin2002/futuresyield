@@ -6,7 +6,10 @@
 # Archived end-of-day snapshots are copied from HISTORY_DIR (default: a local
 # history/ directory, laid out like the data-history branch) into
 # _site/data/history/. Without a history/index.json there, the site ships an
-# empty manifest and the dashboard hides its history control.
+# empty manifest and the dashboard hides its history control. With one,
+# scripts/build_history_series.py then derives one History file per market,
+# _site/data/history/markets/<KEY>.json, from the copied closes, and fails the
+# build if the index lists a close that is missing or unreadable.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -23,6 +26,7 @@ if [[ -f "$history_dir/index.json" ]]; then
     \( -name index.json -o -name '????-??-??.json' \) \
     -exec cp {} _site/data/history/ \;
   echo "Copied $(find _site/data/history -name '????-??-??.json' | wc -l) archived days from $history_dir"
+  python3 scripts/build_history_series.py _site/data/history
 else
   echo "No history manifest at $history_dir/index.json; building without history"
   printf '{"schema_version": 1, "days": []}\n' > _site/data/history/index.json

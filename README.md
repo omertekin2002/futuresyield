@@ -301,7 +301,9 @@ board) from that day's snapshot, for every market.
 - **Published with the site.** The Pages `build` job checks out `data-history`
   with `scripts/fetch_history.sh`, and `scripts/build_site.sh` copies its
   `history/` into `_site/data/history/`, so the files are served from the same
-  origin. A close archived by a run appears in the next run's deploy. Only a
+  origin. It then derives one History file per market from those closes
+  into `_site/data/history/markets/` (see **History file** under
+  **Inspector**). A close archived by a run appears in the next run's deploy. Only a
   missing branch (`git ls-remote` exits 2) builds without history: the site
   then ships an empty manifest and the menu stays hidden. Any other failure to
   read origin, such as a network, auth or rate-limit error, fails the run
@@ -695,9 +697,29 @@ unusual point can be checked without reading across the board:
   every archived close up to and including the day on screen, newest first,
   so one contract, such as `USDTRYZ2026`, can be followed across the archive.
   Nothing is fetched until you press **Load history**, which names how many
-  closes it will load. They are then fetched a few at a time and kept in
-  memory, so switching the yield period, the selection or the market never
-  fetches them again, and opening a close from the table reuses its file.
+  closes it will load. It then reads the market's History file (see
+  **History file** below) in one request and keeps it in memory, so
+  switching the yield period or the selection never fetches anything again,
+  and switching the market fetches that market's file once. A close the file
+  doesn't cover is fetched on its own, a few at a time. Opening a close from
+  the table always loads that close's full file.
+  - **History file.** The Pages build writes one file per market,
+    `data/history/markets/<KEY>.json` (`USDTRY`, `EURTRY`, `XAUTRY`), with
+    `scripts/build_history_series.py`. It holds one entry per close in
+    `history/index.json`, in index order: the close's date, `schema_version`,
+    `generated_at` and `market_date`, and that market's object from the
+    close unchanged, or null when the close has none. It is derived at build
+    time from the `data-history` closes the site serves, so it is never
+    stored on that branch, and the build fails if the index lists a close
+    that is missing or unreadable. The page fetches it with a key that
+    changes whenever the index does, and runs each entry through the same
+    check and legacy recount as a close's own file, so the rows are the
+    same. If the file is missing, can't be read or fails that check, the
+    page quietly fetches each close instead, as it would without it; an
+    entry that fails, or a close a re-read of the index adds after the file
+    loaded, is fetched on its own. An entry is never shown as a full
+    dashboard: **View**, **Compare**, Back and Forward and History's links
+    always load the close's own file.
   - **Identity.** Rows are matched by the selected contract's exact VİOP
     symbol in the market on screen. Another contract, such as the next
     front month, is never stitched into the series.
