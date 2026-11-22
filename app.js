@@ -3,6 +3,8 @@ const DATA_URL = "data/market.json";
 const SNAPSHOT_SCHEMA_VERSION = 4;
 const HISTORY_URL = "data/history";
 const HISTORY_DATE = /^\d{4}-\d{2}-\d{2}$/;
+// The per-market History file scripts/build_history_series.py writes.
+const HISTORY_BUNDLE_SCHEMA_VERSION = 1;
 // A maturity in a shared link: its month, as maturityKey() gives it.
 const MATURITY_MONTH = /^\d{4}-(0[1-9]|1[0-2])$/;
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -181,6 +183,15 @@ const state = {
   // keeps its { error } entry until the new attempt settles.
   historyOpen: false,
   historyCache: new Map(),
+  // Each market's History bundle (data/history/markets/<KEY>.json), by market
+  // key, as { status, days }: status is "loading", "loaded" or "failed", and
+  // days maps each close it covers to { snapshot }, that close rebuilt with
+  // only this market. These one-market closes serve only the History table
+  // and chart; anything that opens a close as the full dashboard reads
+  // historyCache or the close's own file instead. A bundle is fetched once
+  // per market; a close it doesn't cover, or every close when it fails, is
+  // fetched on its own into historyCache, as without bundles.
+  historyBundles: new Map(),
   historyPending: new Set(),
   // Closes a re-read of the history index listed while History was open.
   // Until each is fetched, the table stays up without it rather than going
@@ -1537,6 +1548,82 @@ function countText(count, one, many) {
   return `${count} ${count === 1 ? one : many}`;
 }
 
+// A short key for the closes the history index lists, which changes whenever
+// they change, so a bundle fetched after a new deploy is never an older copy
+// from the browser's cache.
+function historyIndexKey(days = state.historyDays) {
+  let hash = 0;
+  for (const char of days.join(",")) hash = (Math.imul(hash, 31) + char.charCodeAt(0)) | 0;
+  return `${days.length}-${(hash >>> 0).toString(36)}`;
+}
+
+// One archived close as the History table reads it, or undefined while it
+// isn't loaded: the full close when one was fetched, else the market's bundle
+// entry for it, else the reason its own fetch failed.
+function historyEntry(day, marketKey = state.marketKey) {
+  const cached = state.historyCache.get(day);
+  if (cached?.snapshot) return cached;
+  return state.historyBundles.get(marketKey)?.days.get(day) ?? cached;
+}
+
+// One close of a market's History bundle, rebuilt as a snapshot holding only
+// that market, then checked and recounted exactly as its own file would be.
+function bundleClose(entry, marketKey) {
+  const snapshot = validateSnapshot({
+    schema_version: entry.schema_version,
+    generated_at: entry.generated_at,
+    market_date: entry.market_date,
+    market_order: entry.market ? [marketKey] : [],
+    markets: entry.market ? { [marketKey]: entry.market } : {},
+  });
+  return archivedClose(snapshot, entry.date);
+}
+
+// Fetch a market's History bundle once, then redraw the History table if that
+// market is still on screen. A bundle that fails to load, or isn't one, covers
+// no close, and an entry that fails the snapshot check leaves out only its
+// close; each close left out is then fetched on its own. Nothing is shown.
+async function fetchHistoryBundle(marketKey) {
+  const bundle = { status: "loading", days: new Map() };
+  state.historyBundles.set(marketKey, bundle);
+  try {
+    const response = await fetch(
+      `${HISTORY_URL}/markets/${encodeURIComponent(marketKey)}.json?v=${historyIndexKey()}`,
+    );
+    if (!response.ok) throw new Error(`History bundle returned ${response.status}`);
+    const data = await response.json();
+    if (
+      data?.schema_version !== HISTORY_BUNDLE_SCHEMA_VERSION ||
+      data.market !== marketKey ||
+      !Array.isArray(data.days)
+    ) {
+      throw new Error("Invalid History bundle");
+    }
+    data.days.forEach((entry) => {
+      if (typeof entry?.date !== "string" || !HISTORY_DATE.test(entry.date)) return;
+      try {
+        bundle.days.set(entry.date, { snapshot: bundleClose(entry, marketKey) });
+      } catch (error) {
+        console.warn(`The ${marketKey} History bundle's close of ${entry.date} is invalid.`, error);
+      }
+    });
+    bundle.status = "loaded";
+  } catch (error) {
+    console.warn(`The ${marketKey} History bundle could not be loaded; fetching each close.`, error);
+    bundle.days.clear();
+    bundle.status = "failed";
+  }
+  if (marketKey === state.marketKey) renderInspectorHistory(selectedContract());
+}
+
+// Load the History closes not loaded yet for the market on screen: its bundle
+// first, once, and then each close it doesn't cover on its own.
+function loadHistoryDays(days) {
+  const bundle = state.historyBundles.get(state.marketKey);
+  if (!bundle) fetchHistoryBundle(state.marketKey);
+  else if (bundle.status !== "loading") fetchHistoryDays(days);
+}
+
 // Fetch the archived closes not cached or already on their way, a few at a
 // time, then redraw the History table. A close that fails to load is cached
 // with the reason, so it is not fetched again on every redraw. With retry,
@@ -1687,11 +1774,11 @@ function renderInspectorHistory(contract) {
   // The table's closes: every listed close except a newly listed one that
   // is still on its way.
   const days = listed.filter((day) =>
-    state.historyCache.has(day) || !state.historyArriving.has(day)
+    historyEntry(day) || !state.historyArriving.has(day)
   );
   group.hidden = !contract || !listed.length;
   const loaded = !group.hidden && state.historyOpen && days.length > 0 &&
-    days.every((day) => state.historyCache.has(day));
+    days.every((day) => historyEntry(day));
   group.classList.toggle("is-loaded", loaded);
   elements.inspectorHistoryCoverage.hidden = !loaded;
   elements.inspectorHistoryScroll.hidden = !loaded;
@@ -1705,7 +1792,7 @@ function renderInspectorHistory(contract) {
   if (group.hidden) return;
 
   const live = !state.renderedDate;
-  const recounted = listed.filter((day) => state.historyCache.get(day)?.snapshot?.published_market_date);
+  const recounted = listed.filter((day) => historyEntry(day)?.snapshot?.published_market_date);
   elements.inspectorHistoryNote.textContent =
     `${contract.symbol} on each archived close up to ${formatDay(referenceDate())}, ` +
     "newest first, matched by its exact VİOP symbol. Missing values are never filled in." +
@@ -1723,8 +1810,8 @@ function renderInspectorHistory(contract) {
     setHistoryStatus("");
     return;
   }
-  const missing = listed.filter((day) => !state.historyCache.has(day));
-  if (missing.length) fetchHistoryDays(missing);
+  const missing = listed.filter((day) => !historyEntry(day));
+  if (missing.length) loadHistoryDays(missing);
   if (!loaded) {
     setHistoryStatus(
       `Loading ${countText(missing.length, "archived close", "archived closes")}…`,
@@ -1746,7 +1833,7 @@ function renderInspectorHistory(contract) {
   }
   days.forEach((day) => {
     const onScreen = day === state.renderedDate;
-    const entry = state.historyCache.get(day);
+    const entry = historyEntry(day);
     if (entry.error) {
       rows.push({
         day, onScreen, archived: true, state: "error", reason: entry.error,
@@ -3159,7 +3246,11 @@ function renderDaysNote(snapshot) {
 async function fetchSnapshot(url, options) {
   const response = await fetch(url, options);
   if (!response.ok) throw new Error(`Market snapshot returned ${response.status}`);
-  const data = await response.json();
+  return validateSnapshot(await response.json());
+}
+
+// Return data if it is a snapshot this dashboard can render, or throw.
+function validateSnapshot(data) {
   // A light mirror of the updater's schema check, so a bad live or archived
   // file shows the load error instead of a broken render.
   if (data?.schema_version !== SNAPSHOT_SCHEMA_VERSION) {
@@ -3635,7 +3726,7 @@ function setHistoryDays(days) {
   renderShareLink();
   if (state.historyOpen) {
     days
-      .filter((day) => !previous.includes(day) && !state.historyCache.has(day))
+      .filter((day) => !previous.includes(day) && !historyEntry(day))
       .forEach((day) => state.historyArriving.add(day));
   }
   renderHistoryControl();
