@@ -140,7 +140,8 @@ STALE_CHARTS = (
 CSV_COLUMNS = [
     "market", "view", "market_date", "snapshot_generated_at", "days_rolled_forward_from",
     "published_market_date", "spot", "spot_unit", "spot_time", "spot_aligned_to",
-    "latest_spot", "latest_spot_time", "spot_source", "maturity_month", "label", "symbol", "code", "maturity_date", "days_left",
+    "spot_after_futures_minutes", "latest_spot", "latest_spot_time", "spot_source",
+    "maturity_month", "label", "symbol", "code", "maturity_date", "days_left",
     "last", "change_percent", "bid", "ask", "volume", "last_trade_at", "stale",
     "premium_percent", "yield_1d_percent", "yield_30d_percent", "yield_365d_percent",
 ]
@@ -162,7 +163,7 @@ CSV_YIELDS = (
 # Columns that are never a missing value: context, and the reasons themselves.
 CSV_CONTEXT_COLUMNS = (
     "days_rolled_forward_from", "published_market_date", "spot_aligned_to",
-    "latest_spot", "latest_spot_time", "missing",
+    "spot_after_futures_minutes", "latest_spot", "latest_spot_time", "missing",
 )
 # Printing. The content width of an A4 portrait page with the stylesheet's
 # 15 mm margins (210 mm - 30 mm, at 96 px per inch), and of US Letter's.
@@ -250,6 +251,9 @@ def derive_day(snapshot, day, factor):
         for key in SPOT_PRICES:
             if isinstance(market["spot"].get(key), (int, float)):
                 market["spot"][key] *= factor
+        # The spot moves back with the trades, so it stays within their session.
+        spot_time = datetime.fromisoformat(market["spot"]["updated_at"]) - timedelta(days=gap)
+        market["spot"]["updated_at"] = spot_time.isoformat()
         for contract in market["contracts"]:
             for key in CONTRACT_PRICES:
                 if isinstance(contract.get(key), (int, float)):
@@ -2651,6 +2655,7 @@ class DashboardSmokeTests(unittest.TestCase):
         for row in csv_rows:
             self.assertEqual(row["spot_time"], "2026-10-07T13:45:00+03:00")
             self.assertEqual(row["spot_aligned_to"], "2026-10-07T13:49:00+03:00")
+            self.assertEqual(row["spot_after_futures_minutes"], "")
             self.assertEqual(float(row["latest_spot"]), 49.25)
             self.assertEqual(row["latest_spot_time"], "2026-10-07T14:00:00+03:00")
 
@@ -2670,11 +2675,230 @@ class DashboardSmokeTests(unittest.TestCase):
         _, _, table = self.download_csv()
         for row in self.csv_rows(table):
             self.assertEqual(
-                (row["spot_aligned_to"], row["latest_spot"], row["latest_spot_time"]),
-                ("", "", ""),
+                (row["spot_aligned_to"], row["latest_spot"], row["latest_spot_time"],
+                 row["spot_after_futures_minutes"]),
+                ("", "", "", ""),
             )
             self.assertNotIn("latest", row["missing"])
             self.assertNotIn("aligned", row["missing"])
+
+    def late_spot_close(self, day, spot_time="23:15", trade_time="18:09", key="USDTRY"):
+        """day's close shaped like one archived before #97: the futures last
+        traded at trade_time and the spot was taken at spot_time, unmatched."""
+        close = copy.deepcopy(self.history[day])
+        market = close["markets"][key]
+        for index, contract in enumerate(market["contracts"]):
+            if contract.get("updated_at"):
+                # The newest trade is trade_time; some contracts traded earlier.
+                at = trade_time if index % 2 == 0 else "12:30"
+                contract["updated_at"] = f"{day}T{at}:00+03:00"
+        market["spot"]["updated_at"] = f"{day}T{spot_time}:00+03:00"
+        return close
+
+    def serve_close(self, day, close):
+        self.serve_snapshot(re.compile(rf"/data/history/{day}\.json"), close)
+
+    def test_spot_taken_after_the_futures_last_trade_says_how_long(self):
+        day = "2026-10-05"
+        close = self.late_spot_close(day)
+        self.serve_close(day, close)
+        self.open_day(day, "&market=USDTRY")
+
+        note = self.page.locator("#spot-note")
+        expect(note).to_be_visible()
+        expect(note).to_have_text(
+            "Spot at 23:15 TRT, 5 h 6 min after the futures' last trade at 18:09. "
+            "Premiums and yields include the spot's move in between."
+        )
+
+        self.select_button("Oct 2026").click()
+        self.assert_selected("Oct 2026")
+        rows = self.inspector()
+        self.assertEqual(rows["spot-time"]["value"], "05 Oct, 23:15 TRT")
+        self.assertEqual(
+            rows["spot-time"]["detail"], "5 h 6 min after the futures' last trade at 18:09 TRT"
+        )
+        self.assertNotIn("latest-spot", rows)
+        # Nothing is recomputed: the inspector shows the close's own spot and premium.
+        market = close["markets"]["USDTRY"]
+        contract = next(c for c in market["contracts"] if c["label"] == "Oct 2026")
+        self.assertEqual(rows["spot"]["value"], f"{market['spot']['last']:,.4f}")
+        premium = (contract["last"] / market["spot"]["last"] - 1) * 100
+        self.assertEqual(rows["premium"]["value"], f"{premium:+.2f}%")
+
+        _, raw, table = self.download_csv()
+        self.assert_csv_format(raw, table)
+        csv_rows = self.csv_rows(table)
+        self.assert_missing_is_explained(csv_rows)
+        for row in csv_rows:
+            self.assertEqual(row["spot_time"], f"{day}T23:15:00+03:00")
+            self.assertEqual(row["spot_after_futures_minutes"], "306")
+            self.assertEqual(row["spot_aligned_to"], "")
+            self.assertNotIn("futures", row["missing"])
+
+        # Another market's spot was taken within its session.
+        self.page.locator('.market-options [data-market="EURTRY"]').click()
+        expect(note).to_be_hidden()
+
+    def test_live_spot_the_updater_could_not_match_says_how_long(self):
+        live = copy.deepcopy(self.snapshot)
+        # The futures last traded at 14:06:12; no bar held that trade.
+        live["markets"]["USDTRY"]["spot"]["updated_at"] = "2026-10-07T16:00:00+03:00"
+        self.serve_snapshot(re.compile(r"/data/market\.json"), live)
+        self.open_dashboard("?market=USDTRY")
+        expect(self.page.locator("#spot-note")).to_have_text(
+            "Spot at 16:00 TRT, 1 h 54 min after the futures' last trade at 14:06. "
+            "Premiums and yields include the spot's move in between."
+        )
+        _, _, table = self.download_csv()
+        for row in self.csv_rows(table):
+            self.assertEqual(row["spot_after_futures_minutes"], "114")
+
+    def test_spot_within_a_bar_or_without_trade_times_is_not_flagged(self):
+        day = "2026-10-05"
+        within = self.late_spot_close(day, spot_time="18:24")
+        no_times = self.late_spot_close(day)
+        for contract in no_times["markets"]["USDTRY"]["contracts"]:
+            contract["updated_at"] = None
+        # Only priced contracts set the clock: an unpriced one's later trade
+        # time would put the spot within a bar of it.
+        unpriced = self.late_spot_close(NO_PRICE_DAY, spot_time="18:25")
+        listed = unpriced["markets"]["USDTRY"]["contracts"]
+        unpriced_contract = next(c for c in listed if c["symbol"] == HISTORY_SYMBOL)
+        self.assertIsNone(unpriced_contract["last"])
+        unpriced_contract["updated_at"] = f"{NO_PRICE_DAY}T18:20:00+03:00"
+        cases = (
+            ("15 minutes after", day, within, ""),
+            ("no trade times", day, no_times, ""),
+            ("16 minutes after a priced trade", NO_PRICE_DAY, unpriced, "16"),
+        )
+        for name, close_day, close, minutes in cases:
+            with self.subTest(case=name):
+                self.serve_close(close_day, close)
+                self.open_day(close_day, "&market=USDTRY")
+                note = self.page.locator("#spot-note")
+                if minutes:
+                    expect(note).to_have_text(
+                        f"Spot at 18:25 TRT, {minutes} min after the futures' last trade at "
+                        "18:09. Premiums and yields include the spot's move in between."
+                    )
+                else:
+                    expect(note).to_be_hidden()
+                _, _, table = self.download_csv()
+                for row in self.csv_rows(table):
+                    self.assertEqual(row["spot_after_futures_minutes"], minutes)
+
+    def test_rolling_past_an_expiry_keeps_the_published_futures_clock(self):
+        live = copy.deepcopy(self.snapshot)
+        market = live["markets"]["USDTRY"]
+        # Oct 2026 held the newest trade; the spot came 6 minutes after it.
+        for contract in market["contracts"]:
+            traded = "18:09" if contract["label"] == "Oct 2026" else "17:00"
+            contract["updated_at"] = f"2026-10-07T{traded}:00+03:00"
+        market["spot"]["updated_at"] = "2026-10-07T18:15:00+03:00"
+        # After 30 Oct the board drops Oct 2026, but the spot's timing is unchanged.
+        self.reopen_at(datetime.fromisoformat("2026-10-31T10:00:00+03:00"))
+        self.serve_snapshot(re.compile(r"/data/market\.json"), live)
+        self.open_dashboard("?market=USDTRY")
+        self.assert_note("31 Oct 2026")
+        self.assertEqual(self.page.locator("#contract-rows strong", has_text="Oct 2026").count(), 0)
+        expect(self.page.locator("#spot-note")).to_be_hidden()
+        _, _, table = self.download_csv()
+        for row in self.csv_rows(table):
+            self.assertEqual(row["spot_after_futures_minutes"], "")
+
+    def test_comparison_says_when_the_two_spots_were_timed_differently(self):
+        compared = "2026-10-05"
+        late = self.late_spot_close(compared)
+        self.serve_snapshot(re.compile(r"/data/market\.json"), self.aligned_snapshot())
+        self.serve_close(compared, late)
+        self.open_dashboard("?market=USDTRY")
+        self.select_button("Oct 2026").click()
+        self.assert_selected("Oct 2026")
+        self.choose_compare(compared)
+
+        note = self.page.locator("#inspector-compare-spot-note")
+        expect(note).to_be_visible()
+        expect(note).to_have_text(
+            f"Spot timing differs. Live · {LIVE_LABEL}: spot at 13:45 TRT, matched to the "
+            f"futures' last trade at 13:49. Close · {HISTORY_LABELS[compared]}: spot at "
+            "23:15 TRT, 5 h 6 min after the futures' last trade at 18:09. Part of the "
+            "premium and yield change comes from when each spot was taken, not from the "
+            "futures' prices."
+        )
+        # The note changes no value.
+        live = self.aligned_snapshot()["markets"]["USDTRY"]
+        past = late["markets"]["USDTRY"]
+        self.assert_comparison(self.expected_comparison(
+            (live, self.contract("Oct 2026")),
+            (past, next(c for c in past["contracts"] if c["label"] == "Oct 2026")),
+        ))
+
+        # Another maturity of the same pair carries the same note.
+        self.select_button("Dec 2026").click()
+        self.assert_selected("Dec 2026")
+        expect(note).to_be_visible()
+
+        # Clearing the comparison hides it with the table.
+        self.compare_select().select_option("")
+        self.assert_not_comparing()
+        expect(note).to_be_hidden()
+
+    def test_comparison_of_two_late_spots_names_the_gap_only_when_it_differs(self):
+        view, similar, different = "2026-10-05", "2026-09-30", "2026-09-07"
+        self.serve_close(view, self.late_spot_close(view))
+        # 5 h 10 min against 5 h 6 min: the same timing.
+        self.serve_close(similar, self.late_spot_close(similar, "23:20", "18:10"))
+        # 2 h 51 min against 5 h 6 min.
+        self.serve_close(different, self.late_spot_close(different, "21:00"))
+        self.open_day(view, "&market=USDTRY")
+        self.select_button("Oct 2026").click()
+        self.assert_selected("Oct 2026")
+        note = self.page.locator("#inspector-compare-spot-note")
+
+        current = HISTORY_LABELS[view]
+        self.compare_select().select_option(similar)
+        self.assert_comparing(similar, current)
+        expect(self.page.locator("#inspector-compare-table")).to_be_visible()
+        expect(note).to_be_hidden()
+
+        self.compare_select().select_option(different)
+        self.assert_comparing(different, current)
+        expect(note).to_have_text(
+            f"Spot timing differs. Close · {HISTORY_LABELS[view]}: spot at 23:15 TRT, "
+            "5 h 6 min after the futures' last trade at 18:09. "
+            f"Close · {HISTORY_LABELS[different]}: spot at 21:00 TRT, 2 h 51 min after "
+            "the futures' last trade at 18:09. Part of the premium and yield change comes "
+            "from when each spot was taken, not from the futures' prices."
+        )
+
+        # A spot taken well before the futures' last trade is not "within" it.
+        before = self.late_spot_close(ROLLED_DAY, "17:00")
+        self.serve_close(ROLLED_DAY, before)
+        self.compare_select().select_option(ROLLED_DAY)
+        self.assert_comparing(ROLLED_DAY, current)
+        expect(note).to_have_text(
+            f"Spot timing differs. Close · {HISTORY_LABELS[view]}: spot at 23:15 TRT, "
+            "5 h 6 min after the futures' last trade at 18:09. "
+            f"Close · {HISTORY_LABELS[ROLLED_DAY]}: spot at 17:00 TRT, 1 h 9 min before "
+            "the futures' last trade at 18:09. Part of the premium and yield change comes "
+            "from when each spot was taken, not from the futures' prices."
+        )
+
+    def test_comparison_claims_nothing_when_a_sides_spot_timing_is_unknown(self):
+        view, compared = "2026-10-05", "2026-09-30"
+        self.serve_close(view, self.late_spot_close(view))
+        no_times = self.late_spot_close(compared)
+        for contract in no_times["markets"]["USDTRY"]["contracts"]:
+            contract["updated_at"] = None
+        self.serve_close(compared, no_times)
+        self.open_day(view, "&market=USDTRY")
+        self.select_button("Oct 2026").click()
+        self.assert_selected("Oct 2026")
+        self.compare_select().select_option(compared)
+        self.assert_comparing(compared, HISTORY_LABELS[view])
+        expect(self.page.locator("#inspector-compare-table")).to_be_visible()
+        expect(self.page.locator("#inspector-compare-spot-note")).to_be_hidden()
 
     # The inspector's comparison with an archived close
 
@@ -2809,9 +3033,11 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assertEqual(rows["last-trade"]["current"]["value"], "13:49")
         self.assertEqual(rows["last-trade"]["compared"]["value"], "13:49")
         self.assertFalse(rows["last-trade"]["compared"]["stale"])
-        # derive_day() keeps each spot's time, so both read 07 Oct.
+        # derive_day() moves each spot back with its trades.
         self.assertEqual(rows["spot-time"]["current"]["value"], "07 Oct, 14:00 TRT")
-        self.assertEqual(rows["spot-time"]["compared"]["value"], "07 Oct, 14:00 TRT")
+        self.assertEqual(rows["spot-time"]["compared"]["value"], "30 Sept, 14:00 TRT")
+        # Both spots were taken within the session, so nothing more is said.
+        expect(self.page.locator("#inspector-compare-spot-note")).to_be_hidden()
         self.assertEqual(rows["yield"]["term"], "Daily yield · 1D")
         self.assertEqual(rows["yield"]["tag"], "In chart")
         expect(self.page.locator("#inspector-compare-note")).to_have_text(

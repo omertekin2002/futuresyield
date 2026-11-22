@@ -156,8 +156,24 @@ futures before pricing them:
 
 Each market keeps one clock: a contract that last traded earlier in the day
 still uses its market's newest trade. Closes archived before this rule were
-captured without it and stay as published, with no `aligned_to`; the page shows
-them as before.
+captured without it and stay as published, with no `aligned_to`.
+
+**A spot taken after the futures' last trade.** The page applies the updater's
+rule itself: a spot with no `aligned_to` whose `updated_at` is more than 15
+minutes after its market's futures clock is **unmatched**. That covers every
+close archived before the rule (an 18:09 trade against a 23:15 spot) and a live
+spot the updater could not match. The header then says, for example, `Spot at
+23:15 TRT, 5 h 6 min after the futures' last trade at 18:09. Premiums and
+yields include the spot's move in between.`, the inspector's Spot time shows the
+same gap, and the CSV's `spot_after_futures_minutes` gives it in whole minutes
+(empty for any other spot). When a comparison's two sides were timed
+differently, one unmatched and the other matched or within 15 minutes, or both
+unmatched with gaps more than 15 minutes apart, a note under the Comparison
+table gives each side's spot time against its futures' last trade and says that
+part of the premium and yield change comes from when each spot was taken, not
+from the futures' prices. No value changes. A spot within 15 minutes of the
+futures, or one whose times are unknown, shows none of this, and a comparison
+with a side whose timing is unknown says nothing about timing.
 
 The yield curve starts with the gross daily factor
 `(contract price / spot rate)^(1 / days left)`. The chart converts the selected

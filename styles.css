@@ -775,6 +775,9 @@ h2 {
   margin: 0 0 8px;
   font: 12px/1.4 var(--serif);
 }
+.inspector-compare-spot-note {
+  margin: 8px 0 0;
+}
 .inspector-compare-table {
   table-layout: fixed;
 }
