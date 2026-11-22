@@ -2853,6 +2853,34 @@ class DashboardSmokeTests(unittest.TestCase):
             "from when each spot was taken, not from the futures' prices."
         )
 
+        # A spot taken well before the futures' last trade is not "within" it.
+        before = self.late_spot_close(ROLLED_DAY, "17:00")
+        self.serve_close(ROLLED_DAY, before)
+        self.compare_select().select_option(ROLLED_DAY)
+        self.assert_comparing(ROLLED_DAY, current)
+        expect(note).to_have_text(
+            f"Spot timing differs. Close · {HISTORY_LABELS[view]}: spot at 23:15 TRT, "
+            "5 h 6 min after the futures' last trade at 18:09. "
+            f"Close · {HISTORY_LABELS[ROLLED_DAY]}: spot at 17:00 TRT, 1 h 9 min before "
+            "the futures' last trade at 18:09. Part of the premium and yield change comes "
+            "from when each spot was taken, not from the futures' prices."
+        )
+
+    def test_comparison_claims_nothing_when_a_sides_spot_timing_is_unknown(self):
+        view, compared = "2026-10-05", "2026-09-30"
+        self.serve_close(view, self.late_spot_close(view))
+        no_times = self.late_spot_close(compared)
+        for contract in no_times["markets"]["USDTRY"]["contracts"]:
+            contract["updated_at"] = None
+        self.serve_close(compared, no_times)
+        self.open_day(view, "&market=USDTRY")
+        self.select_button("Oct 2026").click()
+        self.assert_selected("Oct 2026")
+        self.compare_select().select_option(compared)
+        self.assert_comparing(compared, HISTORY_LABELS[view])
+        expect(self.page.locator("#inspector-compare-table")).to_be_visible()
+        expect(self.page.locator("#inspector-compare-spot-note")).to_be_hidden()
+
     # The inspector's comparison with an archived close
 
     def comparison(self):

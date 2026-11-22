@@ -1200,34 +1200,55 @@ function spotLagNote(market) {
     "Premiums and yields include the spot's move in between.";
 }
 
-// One side's spot timing for the comparison's note: "spot at 23:15 TRT,
-// 5 h 6 min after the futures' last trade at 18:09".
-function spotTimingText(market) {
-  const spot = market.spot;
-  const spotTime = typeof spot?.updated_at === "string" ? Date.parse(spot.updated_at) : NaN;
-  if (Number.isNaN(spotTime)) return "spot time unknown";
-  const at = `spot at ${tradeTimeFormat.format(spotTime)} TRT`;
-  const lag = spotLag(market);
-  if (lag) return `${at}, ${spotLagText(lag)}`;
-  const aligned = spotAlignment(spot);
-  if (aligned) {
-    return `${at}, matched to the futures' last trade at ${clockBeside(aligned.alignedTo, spotTime)}`;
+// How a market's spot was timed against its futures' last trade, for the
+// comparison: "matched" by the updater, "within" a bar of it, "after" or
+// "before" it by more than a bar (with whole minutes), or "unknown" when the
+// spot time or the futures clock is missing.
+function spotTiming(market) {
+  const spot = market?.spot;
+  const time = (value) => typeof value === "string" ? Date.parse(value) : NaN;
+  const spotTime = time(spot?.updated_at);
+  if (Number.isNaN(spotTime)) return { kind: "unknown" };
+  if (spot.aligned_to != null) {
+    const alignedTo = time(spot.aligned_to);
+    return Number.isNaN(alignedTo)
+      ? { kind: "unknown" }
+      : { kind: "matched", spotTime, clock: alignedTo };
   }
   const clock = futuresClock(market.contracts);
-  return Number.isNaN(clock)
-    ? at
-    : `${at}, within 15 min of the futures' last trade at ${clockBeside(clock, spotTime)}`;
+  if (Number.isNaN(clock)) return { kind: "unknown" };
+  const lag = spotLag(market);
+  if (lag) return { kind: "after", ...lag };
+  if (clock - spotTime > SPOT_BAR_MS) {
+    const minutes = Math.floor(clock / 60000) - Math.floor(spotTime / 60000);
+    return { kind: "before", spotTime, clock, minutes };
+  }
+  return { kind: "within", spotTime, clock };
+}
+
+// One side's spot timing for the comparison's note: "spot at 23:15 TRT,
+// 5 h 6 min after the futures' last trade at 18:09".
+function spotTimingText(timing) {
+  const { kind, spotTime, clock, minutes } = timing;
+  const trade = `the futures' last trade at ${clockBeside(clock, spotTime)}`;
+  const relation = {
+    matched: `matched to ${trade}`,
+    within: `within 15 min of ${trade}`,
+    after: `${formatMinutes(minutes)} after ${trade}`,
+    before: `${formatMinutes(minutes)} before ${trade}`,
+  }[kind];
+  return `spot at ${tradeTimeFormat.format(spotTime)} TRT, ${relation}`;
 }
 
 // Whether two markets' spots were taken differently against their futures:
 // one a bar or more after the last trade and the other not, or both after it
 // by gaps more than a bar apart. Part of a change between them then comes
-// from when each spot was taken.
-function spotTimingDiffers(current, compared) {
-  const now = spotLag(current);
-  const then = spotLag(compared);
-  if (!now && !then) return false;
-  if (!now || !then) return true;
+// from when each spot was taken. Nothing is claimed when either side's
+// timing is unknown.
+function spotTimingDiffers(now, then) {
+  if (now.kind === "unknown" || then.kind === "unknown") return false;
+  if (now.kind !== "after" && then.kind !== "after") return false;
+  if (now.kind !== then.kind) return true;
   return Math.abs(now.minutes - then.minutes) * 60000 > SPOT_BAR_MS;
 }
 
@@ -1653,12 +1674,14 @@ function renderInspectorComparison(contract) {
 
   // When the two spots were taken differently against their futures' last
   // trade, say so: the values above stay as each close stored them.
-  if (spotTimingDiffers(data, market)) {
+  const nowTiming = spotTiming(data);
+  const thenTiming = spotTiming(market);
+  if (spotTimingDiffers(nowTiming, thenTiming)) {
     spotNote.hidden = false;
     spotNote.textContent =
       `Spot timing differs. ${state.renderedDate ? "Close" : "Live"} · ` +
-      `${formatDay(currentDay)}: ${spotTimingText(data)}. Close · ${comparedDay}: ` +
-      `${spotTimingText(market)}. Part of the premium and yield change comes from ` +
+      `${formatDay(currentDay)}: ${spotTimingText(nowTiming)}. Close · ${comparedDay}: ` +
+      `${spotTimingText(thenTiming)}. Part of the premium and yield change comes from ` +
       "when each spot was taken, not from the futures' prices.";
   }
 }

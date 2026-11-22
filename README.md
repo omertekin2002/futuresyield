@@ -172,7 +172,8 @@ unmatched with gaps more than 15 minutes apart, a note under the Comparison
 table gives each side's spot time against its futures' last trade and says that
 part of the premium and yield change comes from when each spot was taken, not
 from the futures' prices. No value changes. A spot within 15 minutes of the
-futures, or one whose times are unknown, shows none of this.
+futures, or one whose times are unknown, shows none of this, and a comparison
+with a side whose timing is unknown says nothing about timing.
 
 The yield curve starts with the gross daily factor
 `(contract price / spot rate)^(1 / days left)`. The chart converts the selected
