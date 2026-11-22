@@ -201,6 +201,19 @@ NO_PRICE_MESSAGE = "No priced maturities to plot."
 NO_YIELD_MESSAGE = (
     "No maturities with a yield to plot: every listed contract matures today or has no price."
 )
+# Reports each Content Security Policy violation on a page to the test through
+# the reportCspViolation binding, so every test can assert there were none.
+CSP_LISTENER = """
+document.addEventListener('securitypolicyviolation', (event) => {
+  window.reportCspViolation({
+    directive: event.effectiveDirective,
+    blocked: event.blockedURI,
+    source: `${event.sourceFile}:${event.lineNumber}`,
+  });
+});
+"""
+# How Chromium reports a CSP violation on the console.
+CSP_CONSOLE_ERROR = re.compile(r"violates the following Content Security Policy directive")
 
 
 def set_yields(contract, spot):
@@ -278,6 +291,14 @@ def shift_snapshot(snapshot, day):
             )
             set_yields(contract, market["spot"]["last"])
     return shifted
+
+
+def watch_csp(context, violations):
+    """Append every CSP violation on any page of context to violations."""
+    context.expose_binding(
+        "reportCspViolation", lambda source, violation: violations.append(violation)
+    )
+    context.add_init_script(CSP_LISTENER)
 
 
 def build_site(destination, history_dir):
@@ -359,6 +380,7 @@ class DashboardSmokeTests(unittest.TestCase):
     def setUp(self):
         self.errors = []
         self.external_requests = []
+        self.csp_violations = []
         self.open_context()
 
     def open_context(self, timezone_id=None, now=FIXTURE_DAY_TIME, **options):
@@ -370,6 +392,7 @@ class DashboardSmokeTests(unittest.TestCase):
                 **options,
             }
         )
+        watch_csp(self.context, self.csp_violations)
         self.page = self.context.new_page()
         # A test that installs fake timers passes its time again: install()
         # without one starts from the real clock.
@@ -386,6 +409,7 @@ class DashboardSmokeTests(unittest.TestCase):
     def tearDown(self):
         self.context.close()
         self.assertEqual(self.external_requests, [], "page requested a non-local URL")
+        self.assertEqual(self.csp_violations, [], "page broke its Content Security Policy")
         self.assertEqual(self.errors, [], "page logged errors")
 
     def block_external(self, route):
@@ -6998,6 +7022,91 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assertEqual(fetched, ["2026-10-05", "2026-09-30", NO_PRICE_DAY, ROLLED_DAY])
         self.assertEqual(bundles, ["USDTRY"])
 
+    def settle_csp_reports(self):
+        """Wait until violations already raised have reached the test.
+
+        A violation event is queued as a task and its report crosses the
+        binding asynchronously; two animation frames and a round trip cover both.
+        """
+        self.page.evaluate(
+            "() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))"
+        )
+
+    def test_every_major_flow_keeps_to_the_content_security_policy(self):
+        # The live view, a History chart, Copy link, the CSV and print, then
+        # an archived close compared with an older one, its History, Copy
+        # link, CSV and print. tearDown checks the same for every other test.
+        self.open_with_clipboard()
+        self.open_dashboard("?market=USDTRY&maturity=2028-01")
+        self.load_history(len(HISTORY_FIXTURE))
+        expect(self.page.locator("#history-chart")).to_be_visible()
+        self.copy_link(SHARE_LIVE_COPIED)
+        self.download_csv()
+        self.print_media()
+        self.page.emulate_media(media="screen")
+
+        day, older = "2026-10-05", ROLLED_DAY
+        self.open_day(day, "&market=USDTRY&maturity=2028-01")
+        self.compare_select().select_option(older)
+        self.assert_comparing(older, HISTORY_LABELS[day])
+        # An archived view lists the closes up to its own.
+        self.load_history(sum(close <= day for close in HISTORY_FIXTURE))
+        expect(self.page.locator("#history-chart")).to_be_visible()
+        self.copy_link(f"Copied a link to the close of {HISTORY_LABELS[day]}.")
+        self.download_csv()
+        self.print_media()
+        self.page.emulate_media(media="screen")
+        self.settle_csp_reports()
+        self.assertEqual(self.csp_violations, [])
+
+    def test_content_security_policy_blocks_injected_inline_script(self):
+        # Markup that got past escapeHtml or the snapshot schema: neither a
+        # <script> added to the DOM nor an inline event handler may run.
+        self.open_dashboard()
+        result = self.page.evaluate(
+            """() => new Promise((resolve) => {
+                const seen = [];
+                // Without a policy no violation comes, so stop waiting after 2 s.
+                const finish = () => resolve({
+                    seen,
+                    scriptRan: window.injectedScriptRan === true,
+                    handlerRan: window.injectedHandlerRan === true,
+                });
+                const timer = setTimeout(finish, 2000);
+                document.addEventListener('securitypolicyviolation', (event) => {
+                    seen.push(event.effectiveDirective);
+                    if (seen.length === 2) {
+                        clearTimeout(timer);
+                        finish();
+                    }
+                });
+                const script = document.createElement('script');
+                script.textContent = 'window.injectedScriptRan = true;';
+                document.head.append(script);
+                const row = document.querySelector('#contract-rows td');
+                row.insertAdjacentHTML(
+                    'beforeend',
+                    '<svg><rect onclick="window.injectedHandlerRan = true"></rect></svg>',
+                );
+                row.querySelector('rect').dispatchEvent(new MouseEvent('click'));
+            })"""
+        )
+        self.assertEqual(
+            result,
+            {"seen": ["script-src-elem", "script-src-attr"], "scriptRan": False, "handlerRan": False},
+        )
+        # The test's own listener saw both too; and Chromium logged each.
+        self.settle_csp_reports()
+        self.assertEqual(
+            [violation["directive"] for violation in self.csp_violations],
+            ["script-src-elem", "script-src-attr"],
+        )
+        self.assertTrue(all(violation["blocked"] == "inline" for violation in self.csp_violations))
+        self.assertEqual(len(self.errors), 2, self.errors)
+        self.assertTrue(all(CSP_CONSOLE_ERROR.search(error) for error in self.errors), self.errors)
+        self.csp_violations.clear()
+        self.errors.clear()
+
 
 # A real history/ directory, laid out like the data-history branch. CI points
 # this at a read-only checkout of that branch; without it the class is skipped.
@@ -7049,7 +7158,9 @@ class RealArchiveSmokeTests(unittest.TestCase):
     def setUp(self):
         self.errors = []
         self.external_requests = []
+        self.csp_violations = []
         self.context = self.browser.new_context(viewport={"width": 1280, "height": 900})
+        watch_csp(self.context, self.csp_violations)
         self.page = self.context.new_page()
         self.page.clock.set_fixed_time(self.now)
         self.page.on(
@@ -7063,6 +7174,7 @@ class RealArchiveSmokeTests(unittest.TestCase):
     def tearDown(self):
         self.context.close()
         self.assertEqual(self.external_requests, [], "page requested a non-local URL")
+        self.assertEqual(self.csp_violations, [], "page broke its Content Security Policy")
 
     def block_external(self, route):
         self.external_requests.append(route.request.url)
