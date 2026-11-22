@@ -607,6 +607,10 @@ function projectedSpot(spot, dailyFactor, days) {
     : null;
 }
 
+// Each recounted market's futures clock as its snapshot was published, before
+// any expired contract was dropped (see recountSnapshot).
+const publishedFuturesClocks = new WeakMap();
+
 // A snapshot's days left, and everything built on them, are fixed for its
 // market date. Return a copy with those terms recounted from day, earlier or
 // later, as the updater would count them, and expired contracts dropped.
@@ -614,7 +618,10 @@ function projectedSpot(spot, dailyFactor, days) {
 // published, and so does market_date.
 function recountSnapshot(snapshot, day) {
   const recounted = structuredClone(snapshot);
-  Object.values(recounted.markets).forEach((market) => {
+  Object.entries(recounted.markets).forEach(([key, market]) => {
+    // The futures' last trade stays the one the snapshot was published with,
+    // even when the contract that held it has expired since.
+    publishedFuturesClocks.set(market, marketFuturesClock(snapshot.markets[key]));
     const spot = market.spot?.last;
     const trendFactor = market.spot_trend?.daily_factor;
     market.contracts = market.contracts
@@ -1160,6 +1167,14 @@ function futuresClock(contracts) {
   return times.length ? Math.max(...times) : NaN;
 }
 
+// A market's futures clock: the published one for a recounted copy, otherwise
+// read from its contracts.
+function marketFuturesClock(market) {
+  return publishedFuturesClocks.has(market)
+    ? publishedFuturesClocks.get(market)
+    : futuresClock(market?.contracts);
+}
+
 // A spot the updater did not match although it was taken more than one bar
 // after the futures last traded: every close archived before the rule, and
 // any spot no bar could be found for. Returns the spot time, the futures'
@@ -1169,7 +1184,7 @@ function spotLag(market) {
   const spot = market?.spot;
   if (!spot || spot.aligned_to != null) return null;
   const spotTime = typeof spot.updated_at === "string" ? Date.parse(spot.updated_at) : NaN;
-  const clock = futuresClock(market.contracts);
+  const clock = marketFuturesClock(market);
   if (Number.isNaN(spotTime) || Number.isNaN(clock) || spotTime - clock <= SPOT_BAR_MS) {
     return null;
   }
@@ -1215,7 +1230,7 @@ function spotTiming(market) {
       ? { kind: "unknown" }
       : { kind: "matched", spotTime, clock: alignedTo };
   }
-  const clock = futuresClock(market.contracts);
+  const clock = marketFuturesClock(market);
   if (Number.isNaN(clock)) return { kind: "unknown" };
   const lag = spotLag(market);
   if (lag) return { kind: "after", ...lag };

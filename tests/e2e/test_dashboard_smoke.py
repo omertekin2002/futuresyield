@@ -2788,6 +2788,25 @@ class DashboardSmokeTests(unittest.TestCase):
                 for row in self.csv_rows(table):
                     self.assertEqual(row["spot_after_futures_minutes"], minutes)
 
+    def test_rolling_past_an_expiry_keeps_the_published_futures_clock(self):
+        live = copy.deepcopy(self.snapshot)
+        market = live["markets"]["USDTRY"]
+        # Oct 2026 held the newest trade; the spot came 6 minutes after it.
+        for contract in market["contracts"]:
+            traded = "18:09" if contract["label"] == "Oct 2026" else "17:00"
+            contract["updated_at"] = f"2026-10-07T{traded}:00+03:00"
+        market["spot"]["updated_at"] = "2026-10-07T18:15:00+03:00"
+        # After 30 Oct the board drops Oct 2026, but the spot's timing is unchanged.
+        self.reopen_at(datetime.fromisoformat("2026-10-31T10:00:00+03:00"))
+        self.serve_snapshot(re.compile(r"/data/market\.json"), live)
+        self.open_dashboard("?market=USDTRY")
+        self.assert_note("31 Oct 2026")
+        self.assertEqual(self.page.locator("#contract-rows strong", has_text="Oct 2026").count(), 0)
+        expect(self.page.locator("#spot-note")).to_be_hidden()
+        _, _, table = self.download_csv()
+        for row in self.csv_rows(table):
+            self.assertEqual(row["spot_after_futures_minutes"], "")
+
     def test_comparison_says_when_the_two_spots_were_timed_differently(self):
         compared = "2026-10-05"
         late = self.late_spot_close(compared)
