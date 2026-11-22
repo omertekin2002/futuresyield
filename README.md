@@ -86,6 +86,30 @@ The workflow only replaces the live site after a complete, valid snapshot
 is produced. If upstream market data is temporarily unavailable, the job fails
 and the previous successful Pages deployment stays online.
 
+`pages.yml` runs four jobs:
+
+```mermaid
+flowchart LR
+  R["refresh · tests, update_data.py, upload market-snapshot"] --> B["build · fetch data-history, build_site.sh, Pages artifact"]
+  B --> D["deploy · GitHub Pages"]
+  R --> A["archive · end-of-day close to data-history"]
+```
+
+- **refresh** runs the updater tests, refreshes `data/market.json` and uploads
+  it as the `market-snapshot` artifact. If the tests or the updater fail,
+  nothing else runs: no deploy and no archive.
+- **build** assembles the site from that artifact plus the archived history
+  and uploads the Pages artifact; **deploy** publishes it.
+- **archive** needs only `refresh`, so a failed history fetch or Pages step
+  never skips the day's close, and a failed archive never blocks the deploy.
+
+Every job has a `timeout-minutes` several times its usual run, so a hung
+upstream call or Pages step fails within minutes instead of holding a runner
+for six hours. A newer run may cancel an older run's refresh, build or deploy,
+each in its own concurrency group; the archive's group never cancels a push in
+progress. Only `archive` gets `contents: write`, and only `deploy` gets
+`pages: write` and `id-token: write`.
+
 Every snapshot is checked against an explicit schema before it is written.
 `scripts/snapshot_schema.py` encodes schema version 4: the top-level fields,
 each market's units and spot, and every contract's keys, ISO dates, numeric
@@ -274,11 +298,17 @@ board) from that day's snapshot, for every market.
   to the previous view, not the previous tweak. An entry whose close can no
   longer be loaded shows the "could not be loaded" notice and falls back to
   live.
-- **Published with the site.** The Pages `build` job checks out `data-history`,
-  if it exists, and `scripts/build_site.sh` copies its `history/` into
-  `_site/data/history/`, so the files are served from the same origin. A close
-  archived by a run appears in the next run's deploy. Without the branch the
-  site ships an empty manifest and the menu stays hidden.
+- **Published with the site.** The Pages `build` job checks out `data-history`
+  with `scripts/fetch_history.sh`, and `scripts/build_site.sh` copies its
+  `history/` into `_site/data/history/`, so the files are served from the same
+  origin. A close archived by a run appears in the next run's deploy. Only a
+  missing branch (`git ls-remote` exits 2) builds without history: the site
+  then ships an empty manifest and the menu stays hidden. Any other failure to
+  read origin, such as a network, auth or rate-limit error, fails the run
+  before anything is deployed, so a site with its history missing never
+  replaces the live one. CI's smoke and archive-audit jobs fetch the branch
+  with the same script and rule; `tests/test_fetch_history.py` covers it
+  against a local origin.
 - **Re-read while open.** An open page reads `history/index.json` again on
   the one-minute poll once its last read is 10 minutes old, and at once when
   the tab becomes visible again; a read that failed, such as the one at
@@ -350,8 +380,10 @@ To try it locally, put a copy of the branch's `history/` directory at the repo
 root (it's ignored by git) or point `HISTORY_DIR` at one, then run
 `bash scripts/build_site.sh` and serve `_site/`.
 
-The `archive` job runs after `build`, alongside `deploy`, so a failed archive
-never blocks or undoes the Pages deploy. It is the only job with
+The `archive` job needs only `refresh` and runs alongside `build` and
+`deploy`, so a failed archive never blocks or undoes the Pages deploy, and a
+failed history fetch or Pages step never costs the day's close. It is the only
+job with
 `contents: write` and pushes only to `data-history`, never with force. The
 logic lives in `scripts/archive_snapshot.py`, and
 `scripts/archive_history.sh SNAPSHOT [WORKTREE]` runs it against a checkout of
@@ -714,7 +746,11 @@ offline on Python 3.10 and 3.12, checks `app.js` syntax with `node --check`,
 checks that `data/market.json` parses, validates it and
 `tests/fixtures/market.json` with `scripts/snapshot_schema.py`, and assembles
 the site with `scripts/build_site.sh`, which fails if any file the site needs
-is missing.
+is missing, and lints both workflows with a pinned, checksum-verified
+`actionlint` release. `tests/test_workflows.py` checks the workflows' design:
+every job has a timeout, `archive` doesn't wait on the Pages build, write
+permissions stay per job, every action is on its Node 24 major, and every
+`data-history` fetch goes through `scripts/fetch_history.sh`.
 A separate `smoke` job installs `requirements-dev.txt` and Chromium and runs
 `python -m unittest tests/e2e/test_dashboard_smoke.py -v`, including the
 accessibility audit.
