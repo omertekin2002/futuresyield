@@ -104,6 +104,7 @@ const elements = {
   inspectorCompareTable: document.querySelector("#inspector-compare-table"),
   inspectorCompareHead: document.querySelector("#inspector-compare-head"),
   inspectorCompareRows: document.querySelector("#inspector-compare-rows"),
+  inspectorCompareSpotNote: document.querySelector("#inspector-compare-spot-note"),
   inspectorHistoryGroup: document.querySelector("#inspector-history-group"),
   inspectorHistoryNote: document.querySelector("#inspector-history-note"),
   historyLoad: document.querySelector("#history-load"),
@@ -756,7 +757,8 @@ function renderMarketIdentity(market) {
   });
 }
 
-function renderSpot(spot) {
+function renderSpot(market) {
+  const { spot } = market;
   elements.spotValue.textContent = formatPrice(spot.last);
   elements.spotValue.classList.remove("loading-value");
   elements.spotLow.textContent = formatPrice(spot.low);
@@ -766,7 +768,7 @@ function renderSpot(spot) {
   const absolute = formatSignedPrice(spot.change);
   elements.spotChange.textContent = `${absolute} · ${formatPercent(spot.change_percent)}`;
 
-  const note = spotAlignmentNote(spot);
+  const note = spotAlignmentNote(spot) || spotLagNote(market);
   elements.spotNote.hidden = !note;
   elements.spotNote.textContent = note;
 }
@@ -1144,6 +1146,91 @@ function spotAlignmentNote(spot) {
     `${clockBeside(latestTime, spotTime)} TRT: ${formatPrice(latestLast)}`;
 }
 
+// How far apart a spot and a futures trade may be and still count as taken
+// together: one 15-minute spot bar, the updater's SPOT_BAR.
+const SPOT_BAR_MS = 15 * 60 * 1000;
+
+// The futures' last trade, as the updater's futures_clock reads it: the
+// newest trade time among the market's priced contracts, or NaN without one.
+function futuresClock(contracts) {
+  const times = (contracts ?? [])
+    .filter((contract) => hasNumber(contract.last) && typeof contract.updated_at === "string")
+    .map((contract) => Date.parse(contract.updated_at))
+    .filter((time) => !Number.isNaN(time));
+  return times.length ? Math.max(...times) : NaN;
+}
+
+// A spot the updater did not match although it was taken more than one bar
+// after the futures last traded: every close archived before the rule, and
+// any spot no bar could be found for. Returns the spot time, the futures'
+// last trade and the whole minutes between their clocks, or null for a
+// matched spot, one taken within a bar, or one whose times are unknown.
+function spotLag(market) {
+  const spot = market?.spot;
+  if (!spot || spot.aligned_to != null) return null;
+  const spotTime = typeof spot.updated_at === "string" ? Date.parse(spot.updated_at) : NaN;
+  const clock = futuresClock(market.contracts);
+  if (Number.isNaN(spotTime) || Number.isNaN(clock) || spotTime - clock <= SPOT_BAR_MS) {
+    return null;
+  }
+  // Counted between the minutes the page shows, so 18:09 to 23:15 reads 5 h 6 min.
+  const minutes = Math.floor(spotTime / 60000) - Math.floor(clock / 60000);
+  return { spotTime, clock, minutes };
+}
+
+// Whole minutes as "45 min", "5 h" or "5 h 6 min".
+function formatMinutes(minutes) {
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  if (!hours) return `${rest} min`;
+  return rest ? `${hours} h ${rest} min` : `${hours} h`;
+}
+
+// "5 h 6 min after the futures' last trade at 18:09"
+function spotLagText({ spotTime, clock, minutes }) {
+  return `${formatMinutes(minutes)} after the futures' last trade at ${clockBeside(clock, spotTime)}`;
+}
+
+// "Spot at 23:15 TRT, 5 h 6 min after the futures' last trade at 18:09. ...",
+// or "" for a spot that was matched or taken within a bar of that trade.
+function spotLagNote(market) {
+  const lag = spotLag(market);
+  if (!lag) return "";
+  return `Spot at ${tradeTimeFormat.format(lag.spotTime)} TRT, ${spotLagText(lag)}. ` +
+    "Premiums and yields include the spot's move in between.";
+}
+
+// One side's spot timing for the comparison's note: "spot at 23:15 TRT,
+// 5 h 6 min after the futures' last trade at 18:09".
+function spotTimingText(market) {
+  const spot = market.spot;
+  const spotTime = typeof spot?.updated_at === "string" ? Date.parse(spot.updated_at) : NaN;
+  if (Number.isNaN(spotTime)) return "spot time unknown";
+  const at = `spot at ${tradeTimeFormat.format(spotTime)} TRT`;
+  const lag = spotLag(market);
+  if (lag) return `${at}, ${spotLagText(lag)}`;
+  const aligned = spotAlignment(spot);
+  if (aligned) {
+    return `${at}, matched to the futures' last trade at ${clockBeside(aligned.alignedTo, spotTime)}`;
+  }
+  const clock = futuresClock(market.contracts);
+  return Number.isNaN(clock)
+    ? at
+    : `${at}, within 15 min of the futures' last trade at ${clockBeside(clock, spotTime)}`;
+}
+
+// Whether two markets' spots were taken differently against their futures:
+// one a bar or more after the last trade and the other not, or both after it
+// by gaps more than a bar apart. Part of a change between them then comes
+// from when each spot was taken.
+function spotTimingDiffers(current, compared) {
+  const now = spotLag(current);
+  const then = spotLag(compared);
+  if (!now && !then) return false;
+  if (!now || !then) return true;
+  return Math.abs(now.minutes - then.minutes) * 60000 > SPOT_BAR_MS;
+}
+
 // Why a contract has no daily factor, and so no yield.
 function noYieldReason(contract, spot) {
   if (!hasNumber(contract.last)) return "No yield: the contract has no last price.";
@@ -1207,6 +1294,7 @@ function renderInspector(contract) {
   const spotTime = formatSpotTime(data.spot);
   const synthetic = /^synthetic/i.test(data.spot.source ?? "");
   const aligned = spotAlignment(data.spot);
+  const lag = spotLag(data);
   fillInspectorList(elements.inspectorSpot, [
     { key: "spot", term: "Spot", value: formatPrice(spot), detail: data.spot_unit },
     {
@@ -1215,7 +1303,10 @@ function renderInspector(contract) {
       value: spotTime,
       detail: aligned
         ? `Matched to the futures' last trade at ${clockBeside(aligned.alignedTo, aligned.spotTime)} TRT`
-        : undefined,
+        : lag
+          ? `${formatMinutes(lag.minutes)} after the futures' last trade at ` +
+            `${clockBeside(lag.clock, lag.spotTime)} TRT`
+          : undefined,
     },
     ...aligned
       ? [{
@@ -1438,6 +1529,9 @@ function renderInspectorComparison(contract) {
   const group = elements.inspectorCompareGroup;
   group.hidden = !contract || !state.compareSnapshot || !state.compareDate;
   const table = elements.inspectorCompareTable;
+  const spotNote = elements.inspectorCompareSpotNote;
+  spotNote.hidden = true;
+  spotNote.textContent = "";
   if (group.hidden) {
     elements.inspectorCompareHead.replaceChildren();
     elements.inspectorCompareRows.replaceChildren();
@@ -1556,6 +1650,17 @@ function renderInspectorComparison(contract) {
       change: { value: formatYieldDelta(yieldDelta), className: signedClass(yieldDelta) },
     },
   ].map(comparisonRow));
+
+  // When the two spots were taken differently against their futures' last
+  // trade, say so: the values above stay as each close stored them.
+  if (spotTimingDiffers(data, market)) {
+    spotNote.hidden = false;
+    spotNote.textContent =
+      `Spot timing differs. ${state.renderedDate ? "Close" : "Live"} · ` +
+      `${formatDay(currentDay)}: ${spotTimingText(data)}. Close · ${comparedDay}: ` +
+      `${spotTimingText(market)}. Part of the premium and yield change comes from ` +
+      "when each spot was taken, not from the futures' prices.";
+  }
 }
 
 // Archived closes in the selected contract's history: every one up to and
@@ -2405,6 +2510,13 @@ function boardCsvColumns(data, { carry, compareDate, compareMarket }) {
     { name: "spot_time", value: () => isoTime(data.spot.updated_at), gap: () => "no spot time" },
     // Set only when the spot was matched to the futures' last trade.
     { name: "spot_aligned_to", value: () => spotAlignmentField("aligned_to"), context: true },
+    // Set only when the spot was taken more than 15 minutes after the futures'
+    // last trade and not matched to it.
+    {
+      name: "spot_after_futures_minutes",
+      value: () => spotLag(data)?.minutes ?? null,
+      context: true,
+    },
     { name: "latest_spot", value: () => spotAlignmentField("last"), context: true },
     { name: "latest_spot_time", value: () => spotAlignmentField("updated_at"), context: true },
     { name: "spot_source", value: () => data.spot.source, gap: () => "no spot source" },
@@ -3242,7 +3354,7 @@ function selectMarket(marketKey, updateUrl = false) {
 
   renderMarketIdentity(market);
   elements.downloadCsv.disabled = false;
-  renderSpot(market.spot);
+  renderSpot(market);
   renderStats(market);
   renderRows(market.contracts);
   renderCarry(market);
