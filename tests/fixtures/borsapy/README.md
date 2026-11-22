@@ -9,12 +9,17 @@ updater's clock to 22:30 Istanbul time that day.
 
 | File | borsapy call | Kept |
 | --- | --- | --- |
-| `fx_history_15m.json` | `bp.FX(a).history(period="1g", interval="15m")` for `USD`, `EUR`, `XAU` | The last 2 bars of 19 Nov, the first 3 and last 3 bars of 20 Nov. Index name, time zone and every column as returned. |
+| `fx_history_15m.json` | `bp.FX(a).history(period="1g", interval="15m")` for `USD`, `EUR`, `XAU` | The last 2 bars of 19 Nov, the first 3 and last 3 bars of 20 Nov, and the bars that hold the futures' last trades: 17:45–18:15 for every asset (USD/TRY and gold last traded at 18:09) and 15:30 for `EUR` (EUR/TRY last traded at 15:35). Index name, time zone and every column as returned. |
 | `fx_history_daily.json` | `bp.FX("USD").history(start="2026-05-10", end="2026-05-25")` | Every row. That is the window the updater asks for on 20 Nov (180 days back is 24 May, minus 14 days, plus 1). The index is tz-naive, as returned. |
 | `fx_current.json` | `bp.FX(a).current` for `USD`, `EUR`, `gram-altin` | Every key. `update_time` is a naive `pandas.Timestamp` upstream, stored as its ISO string. |
 | `viop_futures.json` | `bp.VIOP().futures` | Columns, dtypes, and every USDTRY, EURTRY and XAUTRYM row, including the weekly `TM_F_USDTRY261126` that the updater must ignore, plus two unrelated stock rows (`F_ENJSA1226`, `F_PETKM1226`). 150 other stock and index rows dropped. |
 | `viop_contracts.json` | `bp.viop_contracts(s, full_info=True)` for `USDTRY`, `EURTRY`, `XAUTRY` | Every record, including the continuous `…1!` and `…2!` entries. |
 | `stream_quotes.json` | `bp.TradingViewStream()`: `connect`, `subscribe` each dated contract, `wait_for_quote(s, 10)` | One quote per contract. Every key except `_raw`, the raw TradingView payload the updater never reads. |
+
+The 15:30–18:15 bars were fetched with the same call on 22 Nov 2026, when it
+still returned 20 Nov: the capture had trimmed them away. Completed bars don't
+change upstream: every completed bar in the original capture matched that
+later fetch, and only the 22:15 bar still in progress at capture had moved.
 
 Quirks in the real data that the tests rely on:
 

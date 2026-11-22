@@ -10,11 +10,14 @@ import pandas as pd
 
 from scripts.update_data import (
     MARKETS,
+    TROY_OUNCE_GRAMS,
+    align_spot,
     build_snapshot,
     compounded_yield_percent,
     daily_yield_factor,
     fetch_spot_trend,
     fetch_stream_quotes,
+    futures_clock,
     gold_try_per_gram,
     main,
     maturity_date,
@@ -105,6 +108,172 @@ class YieldCalculationTests(unittest.TestCase):
             places=12,
         )
         self.assertIsNone(gold_try_per_gram(None, 47.18152))
+
+
+ISTANBUL_TZ = ZoneInfo("Europe/Istanbul")
+
+
+def bars(rows):
+    """A borsapy-shaped 15-minute frame from ``(start, open, high, low, close)`` rows."""
+    return pd.DataFrame(
+        [row[1:] for row in rows],
+        columns=["Open", "High", "Low", "Close"],
+        index=pd.DatetimeIndex(
+            [pd.Timestamp(row[0], tz="Europe/Istanbul") for row in rows], name="Date"
+        ),
+    )
+
+
+def at(text):
+    return datetime.fromisoformat(text).replace(tzinfo=ISTANBUL_TZ)
+
+
+class FuturesClockTests(unittest.TestCase):
+    def test_newest_trade_among_priced_contracts(self):
+        contracts = [
+            {"last": 52.0, "updated_at": "2026-11-20T18:09:00+03:00"},
+            {"last": 53.0, "updated_at": "2026-11-20T17:59:00+03:00"},
+            {"last": 54.0, "updated_at": None},
+            # A trade time without a price never sets the clock.
+            {"last": None, "updated_at": "2026-11-20T22:20:00+03:00"},
+        ]
+        self.assertEqual(futures_clock(contracts), at("2026-11-20T18:09"))
+
+    def test_no_trade_time_is_unknown(self):
+        self.assertIsNone(futures_clock([{"last": 52.0, "updated_at": None}]))
+        self.assertIsNone(futures_clock([]))
+
+
+class SpotAlignmentTests(unittest.TestCase):
+    """align_spot() against small hand-made frames; the replay tests use real bars."""
+
+    USD = bars([
+        ("2026-11-19 23:45", 50.40, 50.41, 50.39, 50.40),
+        ("2026-11-20 00:00", 50.44, 50.45, 50.43, 50.44),
+        ("2026-11-20 18:00", 50.44, 50.60, 50.44, 50.57),
+        ("2026-11-20 18:15", 50.57, 50.70, 50.50, 50.58),
+        ("2026-11-20 23:15", 50.58, 50.59, 50.30, 50.55),
+    ])
+    XAU = bars([
+        ("2026-11-20 00:00", 3600.0, 3610.0, 3590.0, 3605.0),
+        ("2026-11-20 18:00", 3605.0, 3620.0, 3550.0, 3558.0),
+        ("2026-11-20 23:15", 3558.0, 3560.0, 3500.0, 3515.0),
+    ])
+    LATEST_USD = {
+        "symbol": "USD/TRY",
+        "last": 50.55,
+        "open": 50.44,
+        "high": 50.70,
+        "low": 50.30,
+        "change": 0.11,
+        "change_percent": 0.2,
+        "updated_at": "2026-11-20T23:15:00+03:00",
+        "source": "TradingView intraday via borsapy FX",
+    }
+
+    def align(self, spot, clock, frames, market="USDTRY"):
+        with patch("builtins.print") as mock_print:
+            result = align_spot(MARKETS[market], dict(spot), clock, frames)
+        self.printed = [call.args[0] for call in mock_print.call_args_list]
+        return result
+
+    def test_fresh_spot_is_unchanged(self):
+        spot = self.align(self.LATEST_USD, at("2026-11-20T23:05"), {"USD": self.USD})
+        self.assertEqual(spot, self.LATEST_USD)
+        self.assertEqual(self.printed, [])
+
+    def test_stale_spot_uses_the_bar_that_holds_the_trade(self):
+        spot = self.align(self.LATEST_USD, at("2026-11-20T18:09"), {"USD": self.USD})
+
+        self.assertEqual(spot["last"], 50.57)
+        self.assertEqual(spot["open"], 50.44)  # the day's first bar, not 19 Nov's
+        self.assertEqual(spot["high"], 50.60)  # up to 18:00 only
+        self.assertEqual(spot["low"], 50.43)
+        self.assertAlmostEqual(spot["change"], 50.57 - 50.44)
+        self.assertAlmostEqual(spot["change_percent"], (50.57 - 50.44) / 50.44 * 100)
+        self.assertEqual(spot["updated_at"], "2026-11-20T18:00:00+03:00")
+        self.assertEqual(spot["source"], self.LATEST_USD["source"])
+        self.assertEqual(spot["aligned_to"], "2026-11-20T18:09:00+03:00")
+        self.assertEqual(
+            spot["latest"], {"last": 50.55, "updated_at": "2026-11-20T23:15:00+03:00"}
+        )
+        self.assertEqual(self.printed, [])
+
+    def test_trade_on_a_bar_boundary_uses_the_bar_it_starts(self):
+        spot = self.align(self.LATEST_USD, at("2026-11-20T18:15"), {"USD": self.USD})
+        self.assertEqual(spot["updated_at"], "2026-11-20T18:15:00+03:00")
+        self.assertEqual(spot["last"], 50.58)
+
+    def test_no_bar_holds_the_trade(self):
+        # 17:30 falls in the gap between the 00:00 and 18:00 bars.
+        spot = self.align(self.LATEST_USD, at("2026-11-20T17:30"), {"USD": self.USD})
+        self.assertEqual(spot, self.LATEST_USD)
+        self.assertEqual(
+            self.printed,
+            ["Warning: no 15-minute USD/TRY spot bar holds the futures' last trade "
+             "at 2026-11-20T17:30:00+03:00; keeping the latest spot"],
+        )
+
+    def test_trade_before_the_first_bar(self):
+        spot = self.align(self.LATEST_USD, at("2026-11-19T12:00"), {"USD": self.USD})
+        self.assertEqual(spot, self.LATEST_USD)
+        self.assertEqual(len(self.printed), 1)
+
+    def test_no_frame_for_the_market(self):
+        spot = self.align(self.LATEST_USD, at("2026-11-20T18:09"), {})
+        self.assertEqual(spot, self.LATEST_USD)
+        self.assertIn("no 15-minute USD/TRY spot bar", self.printed[0])
+
+    def test_unknown_clock(self):
+        spot = self.align(self.LATEST_USD, None, {"USD": self.USD})
+        self.assertEqual(spot, self.LATEST_USD)
+        self.assertEqual(
+            self.printed,
+            ["Warning: USD/TRY futures have no last-trade time; keeping the latest spot"],
+        )
+
+    def test_gold_combines_both_legs_at_the_same_time(self):
+        latest = {
+            "symbol": "XAU/TRY",
+            "last": 3515.0 * 50.55 / TROY_OUNCE_GRAMS,
+            "updated_at": "2026-11-20T23:15:00+03:00",
+            "source": "Synthetic XAUUSD × USDTRY via borsapy FX",
+        }
+        spot = self.align(
+            latest, at("2026-11-20T18:09"), {"USD": self.USD, "XAU": self.XAU}, "XAUTRY"
+        )
+
+        self.assertAlmostEqual(spot["last"], 3558.0 * 50.57 / TROY_OUNCE_GRAMS)
+        self.assertAlmostEqual(spot["open"], 3600.0 * 50.44 / TROY_OUNCE_GRAMS)
+        self.assertAlmostEqual(spot["high"], 3620.0 * 50.60 / TROY_OUNCE_GRAMS)
+        self.assertAlmostEqual(spot["low"], 3550.0 * 50.43 / TROY_OUNCE_GRAMS)
+        self.assertEqual(spot["updated_at"], "2026-11-20T18:00:00+03:00")
+        self.assertEqual(spot["aligned_to"], "2026-11-20T18:09:00+03:00")
+        self.assertEqual(spot["latest"]["last"], latest["last"])
+
+    def test_gold_without_its_usd_leg_keeps_the_latest_spot(self):
+        latest = {
+            "symbol": "XAU/TRY",
+            "last": 5711.0,
+            "updated_at": "2026-11-20T23:15:00+03:00",
+            "source": "Synthetic XAUUSD × USDTRY via borsapy FX",
+        }
+        spot = self.align(latest, at("2026-11-20T18:09"), {"XAU": self.XAU}, "XAUTRY")
+        self.assertEqual(spot, latest)
+        self.assertIn("XAU/TRY spot bar", self.printed[0])
+
+    def test_after_midnight_the_trade_day_still_has_its_bar(self):
+        frame = bars([
+            ("2026-11-20 00:00", 50.44, 50.45, 50.43, 50.44),
+            ("2026-11-20 18:00", 50.44, 50.60, 50.44, 50.57),
+            ("2026-11-21 00:30", 50.60, 50.61, 50.59, 50.60),
+        ])
+        latest = dict(self.LATEST_USD, last=50.60, updated_at="2026-11-21T00:30:00+03:00")
+        spot = self.align(latest, at("2026-11-20T18:09"), {"USD": frame})
+
+        self.assertEqual(spot["last"], 50.57)
+        self.assertEqual(spot["open"], 50.44)  # Friday's open, not Saturday's bar
+        self.assertEqual(spot["latest"]["updated_at"], "2026-11-21T00:30:00+03:00")
 
 
 class SpotTrendTests(unittest.TestCase):
@@ -331,7 +500,7 @@ class FakeSourcesMixin:
         now = now or datetime(2026, 7, 20, 12, tzinfo=ZoneInfo("Europe/Istanbul"))
         spot_values = {"USDTRY": 47.0, "EURTRY": 54.0, "XAUTRY": 6_100.0}
 
-        def fake_spot(market, _usd_spot=None):
+        def fake_spot(market, _usd_spot=None, frames=None):
             return {"symbol": market.pair, "last": spot_values[market.key]}
 
         def fake_discovery(market, _table_rows):

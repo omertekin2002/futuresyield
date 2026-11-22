@@ -515,6 +515,10 @@ button:hover {
 .change-value {
   font-weight: 700;
 }
+.spot-note {
+  font-size: 11px;
+  line-height: 1.35;
+}
 .spot-range {
   display: grid;
   grid-template-columns: 1fr 1fr;
