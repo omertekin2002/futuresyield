@@ -90,6 +90,13 @@ class YieldCalculationTests(unittest.TestCase):
     def test_mature_contract_has_no_daily_yield(self):
         self.assertIsNone(daily_yield_factor(48.0, 47.0, 0))
 
+    def test_compounding_that_overflows_has_no_yield(self):
+        # Past about 7x spot at 1 day left, factor ** 365 overflows a float.
+        factor = daily_yield_factor(8 * 47.0, 47.0, 1)
+        self.assertIsNone(compounded_yield_percent(factor, 365))
+        self.assertAlmostEqual(compounded_yield_percent(factor, 30), (8.0**30 - 1) * 100)
+        self.assertAlmostEqual(compounded_yield_percent(factor, 1), 700.0)
+
     def test_converts_ounce_gold_and_usdtry_to_try_per_gram(self):
         expected = 4_027.445 * 47.18152 / 31.1034768
         self.assertAlmostEqual(
@@ -319,7 +326,8 @@ class StreamQuoteTests(unittest.TestCase):
 class FakeSourcesMixin:
     """Build a snapshot from one faked Aug 2026 contract per market."""
 
-    def build_with_fakes(self, trend, now=None):
+    def build_with_fakes(self, trend, now=None, scale=1.0):
+        """scale multiplies every faked futures quote, as a mis-scaled feed would."""
         now = now or datetime(2026, 7, 20, 12, tzinfo=ZoneInfo("Europe/Istanbul"))
         spot_values = {"USDTRY": 47.0, "EURTRY": 54.0, "XAUTRY": 6_100.0}
 
@@ -341,6 +349,7 @@ class FakeSourcesMixin:
                 last = next(
                     value for key, value in values.items() if symbol.startswith(key)
                 )
+                last *= scale
                 quotes[symbol] = {"last": last, "bid": last - 0.01}
             return quotes
 
@@ -394,6 +403,23 @@ class SnapshotTests(FakeSourcesMixin, unittest.TestCase):
             raise RuntimeError("history down")
 
         validate_snapshot(self.build_with_fakes(failing_trend))
+
+    def test_a_quote_whose_yield_overflows_still_publishes_the_snapshot(self):
+        # Friday 28 Aug 2026 leaves the Aug 2026 contracts 3 days; a quote at
+        # 1,000x spot then overflows the 365-day compounding.
+        now = datetime(2026, 8, 28, 12, tzinfo=ZoneInfo("Europe/Istanbul"))
+        snapshot = self.build_with_fakes(
+            lambda *_args: {"daily_factor": 1.0005}, now, scale=1_000.0,
+        )
+        validate_snapshot(snapshot)
+        usd = snapshot["markets"]["USDTRY"]["contracts"][0]
+        self.assertEqual(usd["days_to_maturity"], 3)
+        self.assertEqual(usd["last"], 48_000.0)
+        self.assertAlmostEqual(usd["premium_percent"], (48_000.0 / 47.0 - 1) * 100)
+        self.assertIsNone(usd["annualized_yield_percent"])
+        self.assertAlmostEqual(
+            usd["daily_yield_percent"], ((48_000.0 / 47.0) ** (1 / 3) - 1) * 100,
+        )
 
     def test_spot_trend_failure_keeps_snapshot(self):
         def failing_trend(*_args):
