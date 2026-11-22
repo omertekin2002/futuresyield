@@ -1580,12 +1580,16 @@ function bundleClose(entry, marketKey) {
 }
 
 // Fetch a market's History bundle once, then redraw the History table if that
-// market is still on screen. A bundle that fails to load, or isn't one, covers
-// no close, and an entry that fails the snapshot check leaves out only its
-// close; each close left out is then fetched on its own. Nothing is shown.
+// market is still on screen. It covers only the closes the index listed when
+// it was requested, as the build that wrote it did; one a later read of the
+// index adds is fetched on its own. A bundle that fails to load, or isn't
+// one, covers no close, and an entry that fails the snapshot check leaves out
+// only its close; each close left out is then fetched on its own. Nothing is
+// shown either way.
 async function fetchHistoryBundle(marketKey) {
   const bundle = { status: "loading", days: new Map() };
   state.historyBundles.set(marketKey, bundle);
+  const listed = new Set(state.historyDays);
   try {
     const response = await fetch(
       `${HISTORY_URL}/markets/${encodeURIComponent(marketKey)}.json?v=${historyIndexKey()}`,
@@ -1600,7 +1604,7 @@ async function fetchHistoryBundle(marketKey) {
       throw new Error("Invalid History bundle");
     }
     data.days.forEach((entry) => {
-      if (typeof entry?.date !== "string" || !HISTORY_DATE.test(entry.date)) return;
+      if (!listed.has(entry?.date)) return;
       try {
         bundle.days.set(entry.date, { snapshot: bundleClose(entry, marketKey) });
       } catch (error) {
