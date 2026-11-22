@@ -173,7 +173,13 @@ table gives each side's spot time against its futures' last trade and says that
 part of the premium and yield change comes from when each spot was taken, not
 from the futures' prices. No value changes. A spot within 15 minutes of the
 futures, or one whose times are unknown, shows none of this, and a comparison
-with a side whose timing is unknown says nothing about timing.
+with a side whose timing is unknown says nothing about timing. The inspector's
+History marks such closes too: the Last trade cell adds, for example, `spot
+23:15 · 5 h 6 min later`, the chart rings the point with dashes and names the
+gap in its accessible name, and when the table mixes these closes with ones
+whose spot was matched, taken within 15 minutes or taken before the futures'
+last trade, the note says part of a change across them comes from when the
+spot was taken. Closes whose timing is unknown never count either way.
 
 The yield curve starts with the gross daily factor
 `(contract price / spot rate)^(1 / days left)`. The chart converts the selected
