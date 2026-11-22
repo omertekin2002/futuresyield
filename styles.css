@@ -757,6 +757,10 @@ h2 {
 .inspector .stale-tag {
   font: 700 10px/1.2 var(--sans);
 }
+.yield-readouts .expiry-tag {
+  display: inline-block;
+  vertical-align: middle;
+}
 /* Both days and the change side by side, across the inspector's full width.
    It stays a real table at every width, so screen readers keep its row and
    column headers; long values wrap inside their cells instead. */
@@ -936,6 +940,17 @@ h2 {
 .history-marker.is-stale {
   fill: var(--paper);
   stroke-dasharray: 2.5 2.5;
+}
+.history-marker.is-near-expiry {
+  fill: var(--paper);
+  stroke-linejoin: round;
+}
+.history-marker.is-near-expiry.is-stale {
+  stroke-dasharray: 2.5 2.5;
+}
+.history-off-scale {
+  fill: var(--ink);
+  stroke: none;
 }
 .history-halo {
   fill: var(--yellow);
@@ -1131,6 +1146,13 @@ canvas:focus-visible {
 }
 .chart-key strong {
   font: 700 12px/1.4 var(--sans);
+}
+.expiry-swatch {
+  margin-right: 6px;
+  vertical-align: -1px;
+  fill: var(--paper);
+  stroke: var(--ink);
+  stroke-width: 1.5;
 }
 .stale-swatch {
   display: inline-block;
@@ -1440,6 +1462,16 @@ td:first-child {
   background: var(--paper);
   font-weight: 700;
   text-transform: uppercase;
+}
+/* Near expiry: worded and dashed, so it differs from the stale tag and never
+   relies on colour. */
+.expiry-tag {
+  padding: 0 3px;
+  border: 1px dashed var(--ink);
+  background: var(--paper);
+  font: 700 10px/1.2 var(--sans);
+  text-transform: uppercase;
+  white-space: nowrap;
 }
 .days-badge {
   display: inline-block;
