@@ -180,6 +180,15 @@
         "EURTRY",
         "XAUTRY"
       ]
+    },
+    {
+      "date": "2026-11-24",
+      "generated_at": "2026-11-24T23:20:59+03:00",
+      "markets": [
+        "USDTRY",
+        "EURTRY",
+        "XAUTRY"
+      ]
     }
   ]
 }
