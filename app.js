@@ -12,10 +12,8 @@ const ISTANBUL_TIMEZONE = "Europe/Istanbul";
 
 const elements = {
   metaDescription: document.querySelector('meta[name="description"]'),
-  wordmarkPair: document.querySelector("#wordmark-pair"),
   marketButtons: document.querySelectorAll(".market-options [data-market]"),
   marketCounts: document.querySelectorAll("[data-market-count]"),
-  heroMarketLabel: document.querySelector("#hero-market-label"),
   dataState: document.querySelector("#data-state"),
   refreshButton: document.querySelector("#refresh-button"),
   historyControl: document.querySelector("#history-control"),
@@ -742,7 +740,6 @@ function renderMarketRail(snapshot) {
 }
 
 function renderMarketIdentity(market) {
-  const spacedPair = market.pair.replace("/", " · ");
   const closeOf = state.renderedDate ? ` · close of ${formatDay(state.renderedDate)}` : "";
 
   document.body.dataset.market = market.key;
@@ -750,8 +747,6 @@ function renderMarketIdentity(market) {
   elements.metaDescription.content =
     `The latest ${market.pair} spot reference and VİOP futures curve, ` +
     "refreshed hourly during VİOP trading hours on weekdays.";
-  elements.wordmarkPair.textContent = spacedPair;
-  elements.heroMarketLabel.textContent = `${market.pair},`;
   elements.spotUnit.textContent = market.spot_unit;
   elements.curveUnit.textContent = market.curve_unit;
   elements.contractsCaption.textContent =
@@ -3648,8 +3643,7 @@ function shareUrl() {
   return url.href;
 }
 
-// Say what the copied link will show: the newest data, which changes, or one
-// close's stored values, which don't. The button waits while the view is
+// Label the link for the current view. The button waits while the view is
 // still changing, and a copy made for another view is cleared.
 function renderShareLink() {
   const date = state.renderedDate;
@@ -3659,10 +3653,10 @@ function renderShareLink() {
   elements.shareButton.textContent = date
     ? `Copy link to the close of ${formatDay(date)}`
     : "Copy live link";
+  elements.shareNote.hidden = !date;
   elements.shareNote.textContent = date
     ? `This link always shows the stored values of the close of ${formatDay(date)}.`
-    : "This link shows the latest data when opened; prices and yields will differ later." +
-      (state.historyDays.length ? " For a link that stays fixed, open a close from View first." : "");
+    : "";
   if (state.sharedHref !== null && (pending || shareUrl() !== state.sharedHref)) {
     state.sharedHref = null;
     elements.shareStatus.textContent = "";

@@ -454,16 +454,13 @@ be overwritten.
 
 ### Sharing a view
 
-The **Copy link** button under the data status copies the address of the view
-on screen, and the note beside it says what the recipient will see. Only an
-archived close is reproducible; a live link is not.
+The **Copy link** button beside the data status copies the address of the view
+on screen.
 
 - **Live link.** On the live view the button reads **Copy live link**. The
   link carries the market, comparison, maturity and yield period, but never a
   `?date=`, so it opens whatever the newest snapshot is when it is followed:
-  prices, days left and yields will differ from what you saw. When the site
-  has archived closes, the note points to the **View** menu for a link that
-  stays fixed.
+  prices, days left and yields will differ from what you saw.
 - **Link to a close.** On an archived close the button reads **Copy link to
   the close of …**. The link adds `?date=` for that close, so it always opens
   the same stored end-of-day values, since archived closes are written once

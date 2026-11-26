@@ -5,7 +5,6 @@
   --primary: #e91d2a;
   --yellow: #fcc20f;
   --link: #0000ee;
-  --olive: #8e8a25;
   --sage: #b3bd95;
   --salmon: #d77a7a;
   --peach: #e6915d;
@@ -99,41 +98,32 @@ button:hover {
 .site-header {
   display: flex;
   align-items: center;
-  gap: 24px;
-  padding: 12px 16px 20px;
+  gap: 20px;
+  padding: 12px 16px;
   background: var(--ink);
   color: var(--paper);
 }
 .wordmark {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 12px;
+  padding-inline-end: 20px;
+  border-inline-end: 1px solid var(--paper);
   color: var(--paper);
   font: 900 36px/1 var(--display);
   text-decoration: none;
 }
-.wordmark-sub {
-  font: 700 12px/1.2 var(--sans);
-  white-space: nowrap;
+.site-header :is(a, button, select, summary):focus-visible {
+  outline: 3px solid var(--sky);
+  outline-offset: 2px;
 }
-.masthead-copy {
-  padding-left: 24px;
-  border-left: 1px solid var(--paper);
-}
-.masthead-copy strong {
-  display: block;
-  font: 700 16px/1.2 var(--sans);
-}
-.masthead-copy span {
-  display: block;
-  margin-top: 4px;
-}
-.header-meta {
-  margin-left: auto;
+.share-button {
+  min-height: 36px;
+  padding: 6px 10px;
+  border: 1px solid #888;
+  background: transparent;
+  color: var(--paper);
 }
 .refresh-button {
   min-height: 44px;
+  margin-inline-start: auto;
   padding: 8px 16px;
   border: 3px outset var(--yellow);
   background: var(--yellow);
@@ -158,14 +148,21 @@ button:hover {
   }
 }
 .service-band {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  min-height: 36px;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--ink);
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 6px;
   font: 700 11px/1.3 var(--sans);
+}
+.header-actions,
+.service-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+}
+.service-tools {
+  color: #ccc;
 }
 .data-state {
   display: inline-flex;
@@ -195,12 +192,6 @@ button:hover {
 .is-historical .status-dot {
   background: var(--periwinkle);
 }
-.service-tools {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 16px;
-}
 .history-control {
   display: inline-flex;
   align-items: center;
@@ -208,18 +199,16 @@ button:hover {
   text-transform: uppercase;
 }
 .history-control select {
-  min-height: 28px;
-  padding: 2px 6px;
-  border: 2px inset var(--steel);
+  min-width: 0;
+  min-height: 36px;
+  padding: 2px 8px;
+  border: 1px solid #888;
   border-radius: 0;
-  background: var(--paper);
-  color: var(--ink);
+  color-scheme: dark;
+  background: var(--ink);
+  color: var(--paper);
   font: 700 12px/1.2 var(--sans);
   cursor: pointer;
-}
-.history-control select:focus-visible {
-  outline: 3px solid var(--link);
-  outline-offset: 2px;
 }
 /* The archive's coverage beside the View menu: plain text, with the
    uncaptured weekdays in a disclosure that opens in place. */
@@ -250,16 +239,12 @@ button:hover {
 .history-coverage-gaps[open] summary::after {
   content: " ▾" / "";
 }
-.history-coverage-gaps summary:focus-visible {
-  outline: 3px solid var(--link);
-  outline-offset: 2px;
-}
 /* The list drops below the line, over the page, without moving the band
    around it; Escape, a click elsewhere or leaving it closes it. */
 .history-coverage-list {
   position: absolute;
   top: calc(100% + 6px);
-  right: 0;
+  left: 0;
   z-index: 20;
   width: max-content;
   max-width: min(360px, calc(100vw - 32px));
@@ -288,20 +273,11 @@ button:hover {
   flex-wrap: wrap;
   align-items: center;
   gap: 6px 12px;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--ink);
+  min-width: 0;
   font: 12px/1.4 var(--serif);
 }
 .share-button {
-  min-height: 36px;
-  padding: 6px 12px;
-  border: 3px outset var(--paper);
-  background: var(--paper);
-  text-transform: uppercase;
   text-align: left;
-}
-.share-button:active {
-  border-style: inset;
 }
 .share-button[aria-disabled="true"] {
   cursor: wait;
@@ -310,10 +286,6 @@ button:hover {
 .share-note,
 .share-status {
   margin: 0;
-}
-.share-note {
-  flex: 1 1 280px;
-  min-width: 0;
 }
 .share-status:empty {
   display: none;
@@ -411,15 +383,7 @@ button:hover {
   padding: 12px;
   background: var(--ink);
   color: var(--paper);
-}
-.market-rail-label span {
-  display: block;
   font: 700 14px/1.2 var(--sans);
-}
-.market-rail-label strong {
-  display: block;
-  margin-top: 4px;
-  font: 14px/1.4 var(--serif);
 }
 .market-options {
   display: grid;
@@ -429,7 +393,7 @@ button:hover {
 .market-options button {
   position: relative;
   display: grid;
-  grid-template-columns: 30px 1fr;
+  grid-template-columns: minmax(0, 1fr);
   width: 100%;
   padding: 0;
   border: 1px solid var(--ink);
@@ -442,30 +406,20 @@ button:hover {
 .market-options button[data-market="XAUTRY"] {
   background: var(--peach);
 }
-.market-number {
-  display: grid;
-  place-items: center;
-  background: var(--paper);
-  border-bottom: 1px solid var(--ink);
-  font-size: 11px;
-}
 .market-code {
-  padding: 6px 8px;
+  padding: 6px 12px;
   background: var(--paper);
   border-bottom: 1px solid var(--ink);
   font-size: 14px;
 }
 .market-description {
-  grid-column: 1 / -1;
   padding: 8px 12px 0;
   font: 700 16px/1.2 var(--sans);
 }
 .market-options small {
-  grid-column: 1 / -1;
   padding: 2px 12px 10px;
   font: 14px/1.4 var(--serif);
 }
-.market-options button[aria-pressed="true"] .market-number,
 .market-options button[aria-pressed="true"] .market-code {
   background: var(--ink);
   color: var(--paper);
@@ -565,32 +519,10 @@ button:hover {
 .catalog-note p {
   margin: 8px 0;
 }
-.hero {
-  border: 1px solid var(--ink);
-  background: var(--olive);
-}
-.hero-copy {
-  padding: 20px 16px;
-}
 .eyebrow {
   margin: 0 0 8px;
   font: 700 12px/1.2 var(--sans);
   text-transform: uppercase;
-}
-h1 {
-  margin: 0;
-  font: 900 36px/1 var(--display);
-  text-transform: uppercase;
-}
-h1 br {
-  display: none;
-}
-.hero-market {
-  display: block;
-}
-.hero-intro {
-  max-width: 440px;
-  margin: 12px 0 0;
 }
 .curve-section,
 .yield-section {
@@ -1570,9 +1502,6 @@ footer p {
     grid-template-columns: 204px minmax(0, 1fr);
     gap: 16px;
   }
-  .masthead-copy {
-    padding-left: 16px;
-  }
 }
 @media (max-width: 800px) {
   .page-frame {
@@ -1581,16 +1510,6 @@ footer p {
   }
   .site-header {
     gap: 16px;
-  }
-  .masthead-copy strong {
-    font-size: 12px;
-  }
-  .masthead-copy span {
-    font-size: 12px;
-  }
-  .wordmark {
-    gap: 4px;
-    flex-direction: column;
   }
   .catalog-layout {
     grid-template-columns: 180px minmax(0, 1fr);
@@ -1605,9 +1524,6 @@ footer p {
   }
   .spot-range > div {
     padding: 8px;
-  }
-  h1 {
-    font-size: 30px;
   }
   .stat-strip {
     grid-template-columns: 1fr 1fr;
@@ -1634,33 +1550,20 @@ footer p {
     margin: 8px;
   }
   .site-header {
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: max-content 1fr;
     gap: 12px;
     padding: 12px;
   }
   .wordmark {
-    flex-direction: row;
-    align-items: baseline;
-    gap: 8px;
-  }
-  .masthead-copy {
-    order: 3;
-    flex-basis: 100%;
-    padding: 8px 0 0;
-    border: 0;
-    border-top: 1px solid var(--paper);
-  }
-  .masthead-copy span {
-    display: none;
+    padding-inline-end: 12px;
   }
   .refresh-button {
+    grid-area: 1 / 2;
     padding: 8px;
   }
   .service-band {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 4px;
-    padding: 8px 12px;
+    grid-column: 1 / -1;
   }
   .history-control select,
   .compare-control select {
@@ -1675,7 +1578,12 @@ footer p {
     margin-top: 4px;
     padding: 0;
     border: 0;
+    background: transparent;
+    color: inherit;
     box-shadow: none;
+  }
+  .history-coverage-list:focus-visible {
+    outline-color: var(--sky);
   }
   .compare-control,
   .selection-line {
@@ -1704,7 +1612,6 @@ footer p {
     flex-direction: column;
     padding: 10px 12px;
   }
-  .share-link,
   .history-notice,
   .days-note {
     padding: 8px 12px;
@@ -1722,23 +1629,12 @@ footer p {
   }
   .market-rail-label {
     padding: 8px;
-  }
-  .market-rail-label span {
     font-size: 12px;
-  }
-  .market-rail-label strong {
-    display: none;
   }
   .market-options {
     grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 6px;
     padding: 6px;
-  }
-  .market-options button {
-    grid-template-columns: 1fr;
-  }
-  .market-number {
-    display: none;
   }
   .market-code {
     padding: 6px;
@@ -1777,18 +1673,6 @@ footer p {
   }
   .catalog-note {
     display: none;
-  }
-  .hero-copy {
-    padding: 16px;
-  }
-  h1 {
-    font-size: 32px;
-  }
-  .hero-market {
-    display: inline;
-  }
-  .hero-intro {
-    margin-top: 8px;
   }
   .curve-section,
   .yield-section {
@@ -1983,9 +1867,6 @@ footer p {
   .wordmark {
     font-size: 30px;
   }
-  .wordmark-sub {
-    font-size: 10px;
-  }
   .catalog-sidebar {
     grid-template-columns: 1fr;
   }
@@ -2000,9 +1881,6 @@ footer p {
   }
   .date-stamp small {
     flex-basis: 100%;
-  }
-  h1 {
-    font-size: 28px;
   }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -2036,7 +1914,8 @@ footer p {
     print-color-adjust: exact;
   }
   .skip-link,
-  .header-meta,
+  .header-actions,
+  .refresh-button,
   .history-control,
   .history-coverage,
   .share-link,
@@ -2100,6 +1979,9 @@ footer p {
   .site-header {
     padding: 8px 12px 10px;
   }
+  .service-tools {
+    color: var(--paper);
+  }
   .catalog-layout {
     display: block;
     padding: 12px 0 0;
@@ -2116,9 +1998,6 @@ footer p {
   }
   .market-options button {
     cursor: auto;
-  }
-  h1 {
-    font-size: 28px;
   }
   .section-heading,
   .inspector-heading,

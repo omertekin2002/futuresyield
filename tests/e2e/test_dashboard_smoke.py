@@ -187,10 +187,6 @@ PRINT_VISIBLE = (
 )
 # The Copy link control: what it says on a live view, with and without
 # archived closes to point to, and after copying.
-SHARE_LIVE_NOTE = (
-    "This link shows the latest data when opened; prices and yields will differ later."
-)
-SHARE_VIEW_POINTER = " For a link that stays fixed, open a close from View first."
 SHARE_LIVE_COPIED = "Copied a live link. It will show newer data when opened later."
 SHARE_FALLBACK_STATUS = (
     "The link could not be copied automatically. It is selected below; copy it from there."
@@ -4282,7 +4278,7 @@ class DashboardSmokeTests(unittest.TestCase):
         expect(list_).to_be_visible()
         coverage.locator(".history-coverage-list p").click()
         expect(list_).to_be_visible()
-        self.page.locator(".wordmark-sub").click()
+        self.page.locator(".market-rail-label").click()
         expect(list_).to_be_hidden()
         self.assert_live()
 
@@ -4898,7 +4894,7 @@ class DashboardSmokeTests(unittest.TestCase):
             reopen=True, permissions=CLIPBOARD_PERMISSIONS,
         )
         self.assert_waiting_live(date=day, compare=compare)
-        self.assert_share_live(pointer=False)
+        self.assert_share_live()
         copied = self.copy_link(SHARE_LIVE_COPIED)
         self.assertEqual(self.query(copied), {"market": "USDTRY", "maturity": "2028-01"})
         # Copying leaves the waiting dates in the address.
@@ -6864,12 +6860,10 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assertEqual(parts.fragment, "")
         return dict(parse_qsl(parts.query))
 
-    def assert_share_live(self, pointer=True):
+    def assert_share_live(self):
         expect(self.share_button()).to_have_text("Copy live link")
         expect(self.share_button()).to_have_attribute("aria-disabled", "false")
-        expect(self.page.locator("#share-note")).to_have_text(
-            SHARE_LIVE_NOTE + (SHARE_VIEW_POINTER if pointer else "")
-        )
+        expect(self.page.locator("#share-note")).to_be_hidden()
 
     def assert_share_close(self, day):
         label = HISTORY_LABELS[day]
@@ -7037,18 +7031,18 @@ class DashboardSmokeTests(unittest.TestCase):
     def test_copy_link_without_history_copies_the_live_link(self):
         self.open_with_clipboard()
         self.open_dashboard("?market=EURTRY&period=monthly", base_url=self.no_history_url)
-        self.assert_share_live(pointer=False)
+        self.assert_share_live()
         copied = self.copy_link(SHARE_LIVE_COPIED)
         self.assertEqual(self.query(copied), {"market": "EURTRY", "period": "monthly"})
         self.assertTrue(copied.startswith(self.no_history_url))
 
-    def test_copy_link_note_follows_a_later_history_index_read(self):
+    def test_copy_live_link_stays_available_after_a_later_history_index_read(self):
         control = self.route_history_index()
         control["mode"] = "500"
         self.page.clock.install(time=FIXTURE_DAY_TIME)
         self.open_dashboard("?market=USDTRY")
         self.index_read_settled()
-        self.assert_share_live(pointer=False)
+        self.assert_share_live()
         control["mode"] = "pass"
         self.page.clock.run_for("01:01")
         expect(self.page.locator("#history-control")).to_be_visible()

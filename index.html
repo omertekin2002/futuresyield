@@ -74,57 +74,49 @@
         </dl>
       </div>
       <header class="site-header">
-        <a class="wordmark" href="./" aria-label="Vade home">
-          <span>VADE</span>
-          <span class="wordmark-sub" id="wordmark-pair">USD · TRY</span>
-        </a>
-        <div class="masthead-copy">
-          <strong>THE FUTURES MARKET. ONLINE.</strong
-          ><span>Your window into the Turkish lira.</span>
-        </div>
-        <div class="header-meta">
-          <button class="refresh-button" id="refresh-button" type="button">
-            <span aria-hidden="true">↻</span> Refresh
-          </button>
-        </div>
-      </header>
-      <div class="service-band">
-        <span>BORSA İSTANBUL / VİOP MARKET MONITOR</span>
-        <div class="service-tools">
-          <div class="history-control" id="history-control" hidden>
-            <label for="history-select">View</label>
-            <select id="history-select">
-              <option value="">Live</option>
-            </select>
+        <a class="wordmark" href="./" aria-label="Vade home">VADE</a>
+        <div class="service-band">
+          <div class="header-actions">
+            <div class="share-link" id="share-link" hidden>
+              <button
+                class="share-button"
+                id="share-button"
+                type="button"
+                aria-describedby="share-note"
+              >
+                Copy live link
+              </button>
+              <p class="share-note" id="share-note" hidden></p>
+              <p class="share-status" id="share-status" role="status"></p>
+              <div class="share-fallback" id="share-fallback" hidden>
+                <label for="share-field">Copy this link by hand</label>
+                <input id="share-field" type="text" readonly spellcheck="false" />
+              </div>
+            </div>
+            <div class="history-control" id="history-control" hidden>
+              <label for="history-select">View</label>
+              <select id="history-select">
+                <option value="">Live</option>
+              </select>
+            </div>
           </div>
-          <div class="history-coverage" id="history-coverage" hidden></div>
-          <span
-            class="data-state"
-            id="data-state"
-            role="status"
-            aria-live="polite"
-          >
-            <span class="status-dot" aria-hidden="true"></span>
-            Loading market data
-          </span>
+          <div class="service-tools">
+            <div class="history-coverage" id="history-coverage" hidden></div>
+            <span
+              class="data-state"
+              id="data-state"
+              role="status"
+              aria-live="polite"
+            >
+              <span class="status-dot" aria-hidden="true"></span>
+              Loading market data
+            </span>
+          </div>
         </div>
-      </div>
-      <div class="share-link" id="share-link" hidden>
-        <button
-          class="share-button"
-          id="share-button"
-          type="button"
-          aria-describedby="share-note"
-        >
-          Copy live link
+        <button class="refresh-button" id="refresh-button" type="button">
+          <span aria-hidden="true">↻</span> Refresh
         </button>
-        <p class="share-note" id="share-note"></p>
-        <p class="share-status" id="share-status" role="status"></p>
-        <div class="share-fallback" id="share-fallback" hidden>
-          <label for="share-field">Copy this link by hand</label>
-          <input id="share-field" type="text" readonly spellcheck="false" />
-        </div>
-      </div>
+      </header>
       <div class="history-banner" id="history-banner" hidden>
         <p>
           <strong>Past close</strong> You are viewing the end-of-day snapshot
@@ -139,30 +131,25 @@
       <p class="days-note" id="days-note" role="status" hidden></p>
 
       <main id="dashboard-content">
+        <h1 class="sr-only">Vade futures dashboard</h1>
         <div class="catalog-layout">
           <div class="catalog-sidebar">
             <nav class="market-rail" aria-label="Select futures market">
-              <div class="market-rail-label" aria-hidden="true">
-                <span>SELECT A MARKET</span>
-                <strong>TRY-quoted futures</strong>
-              </div>
+              <div class="market-rail-label" aria-hidden="true">SELECT A MARKET</div>
               <div class="market-options">
                 <button type="button" data-market="USDTRY" aria-pressed="true">
-                  <span class="market-number">01</span>
-                  <span class="market-code">USD/TRY</span
-                  ><span class="market-description">U.S. Dollar</span>
+                  <span class="market-code">USD/TRY</span>
+                  <span class="market-description">U.S. Dollar</span>
                   <small data-market-count="USDTRY">Loading</small>
                 </button>
                 <button type="button" data-market="EURTRY" aria-pressed="false">
-                  <span class="market-number">02</span>
-                  <span class="market-code">EUR/TRY</span
-                  ><span class="market-description">Euro</span>
+                  <span class="market-code">EUR/TRY</span>
+                  <span class="market-description">Euro</span>
                   <small data-market-count="EURTRY">Loading</small>
                 </button>
                 <button type="button" data-market="XAUTRY" aria-pressed="false">
-                  <span class="market-number">03</span>
-                  <span class="market-code">XAU/TRY</span
-                  ><span class="market-description">Gold · per gram</span>
+                  <span class="market-code">XAU/TRY</span>
+                  <span class="market-description">Gold · per gram</span>
                   <small data-market-count="XAUTRY">Loading</small>
                 </button>
               </div>
@@ -211,22 +198,6 @@
             </div>
           </div>
           <div class="catalog-main">
-            <section class="hero" aria-labelledby="page-title">
-              <div class="hero-copy">
-                <p class="eyebrow">Borsa İstanbul · VİOP</p>
-                <h1 id="page-title">
-                  <span class="hero-market" id="hero-market-label"
-                    >USD/TRY,</span
-                  ><br />
-                  <span class="hero-outline">across time.</span>
-                </h1>
-                <p class="hero-intro">
-                  The live shape of the Turkish lira futures curve—from today’s
-                  spot rate to every listed maturity.
-                </p>
-              </div>
-            </section>
-
             <div class="compare-control" id="compare-control" hidden>
               <label for="compare-select">Compare with</label>
               <select id="compare-select" aria-describedby="compare-hint">
