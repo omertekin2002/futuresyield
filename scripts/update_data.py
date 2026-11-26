@@ -29,6 +29,8 @@ else:  # run as `python scripts/update_data.py`
 
 TROY_OUNCE_GRAMS = 31.1034768
 SPOT_TREND_LOOKBACK_DAYS = 180
+# borsapy's intraday spot bars, each stamped with its start.
+SPOT_BAR = timedelta(minutes=15)
 
 
 @dataclass(frozen=True)
@@ -194,10 +196,19 @@ def daily_yield_factor(
 
 
 def compounded_yield_percent(factor: float | None, period_days: int) -> float | None:
-    """Compound a gross daily factor and express the net result as a percentage."""
+    """Compound a gross daily factor and express the net result as a percentage.
+
+    A factor too large to compound, such as a mis-scaled quote a day or two
+    before expiry, gives None: one absurd quote must not stop the snapshot.
+    """
     if factor is None or factor <= 0 or period_days <= 0:
         return None
-    return (factor**period_days - 1) * 100
+    try:
+        percent = (factor**period_days - 1) * 100
+    except OverflowError:
+        return None
+    # Just under the overflow, the multiplication by 100 can still reach inf.
+    return percent if math.isfinite(percent) else None
 
 
 def projected_spot(
@@ -234,32 +245,65 @@ def gold_try_per_gram(
     return gold * currency / TROY_OUNCE_GRAMS
 
 
-def fetch_gold_try_intraday(
+def bar_reading(frame: Any, position: int) -> dict[str, Any]:
+    """Read one 15-minute bar with its day's open, high and low up to that bar.
+
+    The day is the bar's own Istanbul date, so a bar read after midnight or at a
+    weekend still opens and ranges over its own session's bars.
+    """
+    bar_at = frame.index[position]
+    upto = frame.iloc[: position + 1]
+    day = upto[upto.index.date == bar_at.date()]
+    return {
+        "at": bar_at,
+        "close": finite_number(frame.iloc[position]["Close"]),
+        "open": finite_number(day.iloc[0]["Open"]),
+        "high": finite_number(day["High"].max()),
+        "low": finite_number(day["Low"].min()),
+    }
+
+
+def spot_from_reading(
     market: MarketConfig,
+    reading: dict[str, Any],
+    source: str,
+) -> dict[str, Any] | None:
+    """Build a spot reference from one bar reading, or None without a close."""
+    last = reading["close"]
+    if last is None:
+        return None
+    open_price = reading["open"]
+    change = last - open_price if open_price is not None else None
+    change_percent = (
+        change / open_price * 100 if change is not None and open_price else None
+    )
+    return {
+        "symbol": market.pair,
+        "last": last,
+        "open": open_price,
+        "high": reading["high"],
+        "low": reading["low"],
+        "change": change,
+        "change_percent": change_percent,
+        "updated_at": iso_timestamp(reading["at"]),
+        "source": source,
+    }
+
+
+def gold_spot_from_reading(
+    market: MarketConfig,
+    gold: dict[str, Any],
     usd_spot: dict[str, Any],
 ) -> dict[str, Any]:
-    """Build a fresh TRY-per-gram gold reference from XAUUSD and USDTRY."""
-    frame = bp.FX("XAU").history(period="1g", interval="15m")
-    if frame.empty:
-        raise RuntimeError("borsapy returned no XAUUSD history")
-
-    latest_at = frame.index[-1]
-    latest_day = latest_at.date()
-    day_frame = frame[frame.index.date == latest_day]
-    latest = day_frame.iloc[-1]
-    first = day_frame.iloc[0]
+    """Combine an XAUUSD bar reading with a USD/TRY spot into TRY per gram."""
     usd_last = finite_number(usd_spot.get("last"))
     usd_open = finite_number(usd_spot.get("open")) or usd_last
     usd_high = finite_number(usd_spot.get("high")) or usd_last
     usd_low = finite_number(usd_spot.get("low")) or usd_last
-    last = gold_try_per_gram(latest["Close"], usd_last)
-    open_price = gold_try_per_gram(first["Open"], usd_open)
-    high = finite_number(
-        day_frame["High"].max() * usd_high / TROY_OUNCE_GRAMS
-    )
-    low = finite_number(
-        day_frame["Low"].min() * usd_low / TROY_OUNCE_GRAMS
-    )
+    last = gold_try_per_gram(gold["close"], usd_last)
+    open_price = gold_try_per_gram(gold["open"], usd_open)
+    high = gold_try_per_gram(gold["high"], usd_high)
+    low = gold_try_per_gram(gold["low"], usd_low)
     if last is None:
         raise RuntimeError("borsapy returned no usable intraday gold reference")
 
@@ -269,7 +313,7 @@ def fetch_gold_try_intraday(
     )
     updated_candidates = [
         value
-        for value in (iso_timestamp(latest_at), usd_spot.get("updated_at"))
+        for value in (iso_timestamp(gold["at"]), usd_spot.get("updated_at"))
         if value
     ]
     return {
@@ -285,14 +329,38 @@ def fetch_gold_try_intraday(
     }
 
 
+def fetch_gold_try_intraday(
+    market: MarketConfig,
+    usd_spot: dict[str, Any],
+    frames: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a fresh TRY-per-gram gold reference from XAUUSD and USDTRY.
+
+    ``frames`` collects the XAUUSD 15-minute frame, so the spot can be re-read
+    at the futures' last trade without another request.
+    """
+    frame = bp.FX("XAU").history(period="1g", interval="15m")
+    if frame.empty:
+        raise RuntimeError("borsapy returned no XAUUSD history")
+
+    spot = gold_spot_from_reading(market, bar_reading(frame, len(frame) - 1), usd_spot)
+    if frames is not None:
+        frames["XAU"] = frame
+    return spot
+
+
 def fetch_spot(
     market: MarketConfig = DEFAULT_MARKET,
     usd_spot: dict[str, Any] | None = None,
+    frames: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Fetch the spot reference that matches one futures underlying."""
+    """Fetch the spot reference that matches one futures underlying.
+
+    ``frames`` collects, by FX asset, each 15-minute frame a spot was read from.
+    """
     if market.key == "XAUTRY" and usd_spot:
         try:
-            return fetch_gold_try_intraday(market, usd_spot)
+            return fetch_gold_try_intraday(market, usd_spot, frames)
         except Exception as exc:
             print(f"Warning: intraday {market.pair} spot unavailable: {exc}")
 
@@ -301,31 +369,15 @@ def fetch_spot(
         try:
             frame = fx.history(period="1g", interval="15m")
             if not frame.empty:
-                latest_at = frame.index[-1]
-                latest_day = latest_at.date()
-                day_frame = frame[frame.index.date == latest_day]
-                last = finite_number(day_frame.iloc[-1]["Close"])
-                open_price = finite_number(day_frame.iloc[0]["Open"])
-                high = finite_number(day_frame["High"].max())
-                low = finite_number(day_frame["Low"].min())
-                if last is not None:
-                    change = last - open_price if open_price is not None else None
-                    change_percent = (
-                        change / open_price * 100
-                        if change is not None and open_price
-                        else None
-                    )
-                    return {
-                        "symbol": market.pair,
-                        "last": last,
-                        "open": open_price,
-                        "high": high,
-                        "low": low,
-                        "change": change,
-                        "change_percent": change_percent,
-                        "updated_at": iso_timestamp(latest_at),
-                        "source": "TradingView intraday via borsapy FX",
-                    }
+                spot = spot_from_reading(
+                    market,
+                    bar_reading(frame, len(frame) - 1),
+                    "TradingView intraday via borsapy FX",
+                )
+                if spot is not None:
+                    if frames is not None:
+                        frames[market.spot_asset] = frame
+                    return spot
         except Exception as exc:
             print(f"Warning: intraday {market.pair} spot unavailable: {exc}")
 
@@ -350,6 +402,95 @@ def fetch_spot(
         "updated_at": iso_timestamp(raw.get("update_time")),
         "source": raw.get("source") or "borsapy FX current fallback",
     }
+
+
+def futures_clock(contracts: list[dict[str, Any]]) -> datetime | None:
+    """Return the newest last-trade time among a market's priced contracts."""
+    times = [
+        datetime.fromisoformat(item["updated_at"])
+        for item in contracts
+        if item.get("last") is not None and item.get("updated_at")
+    ]
+    return max(times) if times else None
+
+
+def bar_containing(frame: Any, moment: datetime) -> dict[str, Any] | None:
+    """Read the 15-minute bar whose span holds ``moment``, or None if none does."""
+    position = None
+    for index, start in enumerate(frame.index):
+        if start > moment:
+            break
+        position = index
+    if position is None or moment >= frame.index[position] + SPOT_BAR:
+        return None
+    reading = bar_reading(frame, position)
+    return reading if reading["close"] is not None else None
+
+
+def spot_at(
+    market: MarketConfig,
+    clock: datetime,
+    frames: dict[str, Any],
+    source: str,
+) -> dict[str, Any] | None:
+    """Re-read a market's spot from the 15-minute bar that holds ``clock``."""
+    if market.key == "XAUTRY":
+        gold_frame, usd_frame = frames.get("XAU"), frames.get("USD")
+        if gold_frame is None or usd_frame is None:
+            return None
+        gold, usd = bar_containing(gold_frame, clock), bar_containing(usd_frame, clock)
+        if gold is None or usd is None:
+            return None
+        # Both legs come from the bars that hold the gold futures' own clock.
+        usd_spot = {
+            "last": usd["close"],
+            "open": usd["open"],
+            "high": usd["high"],
+            "low": usd["low"],
+            "updated_at": iso_timestamp(usd["at"]),
+        }
+        return gold_spot_from_reading(market, gold, usd_spot)
+
+    frame = frames.get(market.spot_asset)
+    reading = bar_containing(frame, clock) if frame is not None else None
+    return spot_from_reading(market, reading, source) if reading else None
+
+
+def align_spot(
+    market: MarketConfig,
+    spot: dict[str, Any],
+    clock: datetime | None,
+    frames: dict[str, Any],
+) -> dict[str, Any]:
+    """Match a spot taken well after the futures' last trade to that trade's bar.
+
+    A spot bar that starts more than 15 minutes after ``clock`` is replaced by
+    the bar that holds ``clock``, and the result records ``aligned_to`` and the
+    newest bar as ``latest``. Otherwise, or when ``clock`` is unknown or no bar
+    holds it, the spot is returned unchanged; a rate is never invented.
+    """
+    if clock is None:
+        print(f"Warning: {market.pair} futures have no last-trade time; keeping the latest spot")
+        return spot
+    updated_at = spot.get("updated_at")
+    if not updated_at or datetime.fromisoformat(updated_at) - clock <= SPOT_BAR:
+        return spot
+
+    aligned_to = iso_timestamp(clock)
+    try:
+        aligned = spot_at(market, clock, frames, spot["source"])
+    except Exception as exc:
+        print(f"Warning: {market.pair} spot could not be read at {aligned_to}: {exc}")
+        return spot
+    if aligned is None:
+        print(
+            f"Warning: no 15-minute {market.pair} spot bar holds the futures' "
+            f"last trade at {aligned_to}; keeping the latest spot"
+        )
+        return spot
+    aligned["aligned_to"] = aligned_to
+    aligned["latest"] = {"last": spot["last"], "updated_at": updated_at}
+    return aligned
 
 
 def fetch_spot_trend(
@@ -625,12 +766,14 @@ def build_snapshot(now: datetime | None = None) -> dict[str, Any]:
     # 09:20 open that is the session that last closed, not the calendar day.
     market_day = session_date(generated_at)
     spots: dict[str, dict[str, Any]] = {}
+    # The 15-minute frames the spots were read from, kept to re-read them later.
+    frames: dict[str, Any] = {}
     currency_markets = tuple(
         market for market in MARKET_CONFIGS if market.key != "XAUTRY"
     )
     with ThreadPoolExecutor(max_workers=len(currency_markets)) as executor:
         futures = {
-            executor.submit(fetch_spot, market): market
+            executor.submit(fetch_spot, market, frames=frames): market
             for market in currency_markets
         }
         for future in as_completed(futures):
@@ -640,7 +783,7 @@ def build_snapshot(now: datetime | None = None) -> dict[str, Any]:
             except Exception as exc:
                 raise RuntimeError(f"Could not fetch {market.pair} spot: {exc}") from exc
     try:
-        spots["XAUTRY"] = fetch_spot(MARKETS["XAUTRY"], spots["USDTRY"])
+        spots["XAUTRY"] = fetch_spot(MARKETS["XAUTRY"], spots["USDTRY"], frames=frames)
     except Exception as exc:
         raise RuntimeError(f"Could not fetch XAU/TRY spot: {exc}") from exc
 
@@ -658,7 +801,29 @@ def build_snapshot(now: datetime | None = None) -> dict[str, Any]:
 
     market_snapshots: dict[str, dict[str, Any]] = {}
     for market in MARKET_CONFIGS:
-        spot = spots[market.key]
+
+        def market_contracts(
+            spot_last: float, trend_factor: float | None, market: MarketConfig = market
+        ) -> list[dict[str, Any]]:
+            contracts = [
+                normalize_contract(
+                    item,
+                    quotes.get(item["symbol"]),
+                    table_rows[market.key].get(item["symbol"]),
+                    spot_last,
+                    market_day,
+                    market,
+                    trend_factor,
+                )
+                for item in metadata_by_market[market.key]
+            ]
+            return [item for item in contracts if item["days_to_maturity"] >= 0]
+
+        # Price the futures against the spot from when they last traded, not
+        # one taken hours after the session ended. The first pass only finds
+        # that time; nothing in it depends on the spot.
+        clock = futures_clock(market_contracts(spots[market.key]["last"], None))
+        spot = align_spot(market, spots[market.key], clock, frames)
         spot_trend = None
         if market.contract_size is not None:
             # The projection is supplementary; never fail the snapshot over it.
@@ -667,19 +832,9 @@ def build_snapshot(now: datetime | None = None) -> dict[str, Any]:
                 spot_trend = fetch_spot_trend(market, spot, generated_at.date())
             except Exception as exc:
                 print(f"Warning: {market.pair} spot trend unavailable: {exc}")
-        contracts = [
-            normalize_contract(
-                item,
-                quotes.get(item["symbol"]),
-                table_rows[market.key].get(item["symbol"]),
-                spot["last"],
-                market_day,
-                market,
-                spot_trend["daily_factor"] if spot_trend else None,
-            )
-            for item in metadata_by_market[market.key]
-        ]
-        contracts = [item for item in contracts if item["days_to_maturity"] >= 0]
+        contracts = market_contracts(
+            spot["last"], spot_trend["daily_factor"] if spot_trend else None
+        )
         if not contracts or not any(item["last"] is not None for item in contracts):
             raise RuntimeError(
                 f"borsapy returned no usable {market.pair} futures prices"

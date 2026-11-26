@@ -86,6 +86,30 @@ The workflow only replaces the live site after a complete, valid snapshot
 is produced. If upstream market data is temporarily unavailable, the job fails
 and the previous successful Pages deployment stays online.
 
+`pages.yml` runs four jobs:
+
+```mermaid
+flowchart LR
+  R["refresh · tests, update_data.py, upload market-snapshot"] --> B["build · fetch data-history, build_site.sh, Pages artifact"]
+  B --> D["deploy · GitHub Pages"]
+  R --> A["archive · end-of-day close to data-history"]
+```
+
+- **refresh** runs the updater tests, refreshes `data/market.json` and uploads
+  it as the `market-snapshot` artifact. If the tests or the updater fail,
+  nothing else runs: no deploy and no archive.
+- **build** assembles the site from that artifact plus the archived history
+  and uploads the Pages artifact; **deploy** publishes it.
+- **archive** needs only `refresh`, so a failed history fetch or Pages step
+  never skips the day's close, and a failed archive never blocks the deploy.
+
+Every job has a `timeout-minutes` several times its usual run, so a hung
+upstream call or Pages step fails within minutes instead of holding a runner
+for six hours. A newer run may cancel an older run's refresh, build or deploy,
+each in its own concurrency group; the archive's group never cancels a push in
+progress. Only `archive` gets `contents: write`, and only `deploy` gets
+`pages: write` and `id-token: write`.
+
 Every snapshot is checked against an explicit schema before it is written.
 `scripts/snapshot_schema.py` encodes schema version 4: the top-level fields,
 each market's units and spot, and every contract's keys, ISO dates, numeric
@@ -94,7 +118,10 @@ days to maturity, a `status` that matches `last`, sorted contracts without
 duplicate symbols, and at least one priced contract per market. A contract's
 `updated_at` is the time of its last trade, as an ISO timestamp with an offset,
 or null when the quote carried no time; the updater never fills in the
-snapshot time. The strings
+snapshot time. A spot matched to the futures' last trade (below) carries
+`aligned_to`, an ISO timestamp, and `latest`, a positive `last` with an ISO
+`updated_at`; both are optional but come together, so earlier closes still
+validate. The strings
 the dashboard renders must keep the updater's formats: VİOP symbols like
 `USDTRYV2026`, table codes like `F_USDTRY1026`, and labels like `Oct 2026`, so
 markup in upstream data is rejected before it is published. It lists every
@@ -102,10 +129,92 @@ problem it finds by path. A snapshot that fails counts as a failed attempt, so
 it is never published. Check a file by hand with
 `python -m scripts.snapshot_schema data/market.json`.
 
+**Spot matched to the futures' last trade.** The spot reference is the
+latest 15-minute bar of `bp.FX(...).history(period="1g", interval="15m")`
+(XAU/TRY's is XAU/USD × USD/TRY per gram). After VİOP's last futures trade of
+the day, that bar keeps moving for hours, so the updater matches it to the
+futures before pricing them:
+
+- A market's futures clock is the newest last-trade time (`updated_at`) among
+  its priced contracts.
+- If the spot bar starts more than 15 minutes after that clock, the updater
+  re-reads the spot from the 15-minute bar that holds the clock, from the
+  frames it already downloaded: `last` is that bar's close, `updated_at` its
+  start, `open` the day's first bar, `high` and `low` the day up to that bar,
+  and the change is recomputed against that open. XAU/TRY combines the
+  XAU/USD and USD/TRY bars that hold the gold futures' own clock.
+- The spot then records `aligned_to`, the futures clock it was matched to, and
+  `latest`, `{ "last", "updated_at" }` of the newest bar it replaced. The
+  header, the inspector and the CSV (`spot_aligned_to`, `latest_spot`,
+  `latest_spot_time`) say so and show the latest spot.
+- During the session the spot is already within 15 minutes of the futures, so
+  it is kept as it is, without either field. So is a spot when the clock is
+  unknown (no priced contract has a trade time) or no recorded bar holds it,
+  with a `Warning:` line; a rate is never interpolated or filled in.
+- Every value built on the spot uses the matched one: premium, daily factor,
+  yields, and the USD/TRY spot trend's `end_spot` and projection.
+
+Each market keeps one clock: a contract that last traded earlier in the day
+still uses its market's newest trade. Closes archived before this rule were
+captured without it and stay as published, with no `aligned_to`.
+
+**A spot taken after the futures' last trade.** The page applies the updater's
+rule itself: a spot with no `aligned_to` whose `updated_at` is more than 15
+minutes after its market's futures clock is **unmatched**. That covers every
+close archived before the rule (an 18:09 trade against a 23:15 spot) and a live
+spot the updater could not match. The header then says, for example, `Spot at
+23:15 TRT, 5 h 6 min after the futures' last trade at 18:09. Premiums and
+yields include the spot's move in between.`, the inspector's Spot time shows the
+same gap, and the CSV's `spot_after_futures_minutes` gives it in whole minutes
+(empty for any other spot). When a comparison's two sides were timed
+differently, one unmatched and the other matched or within 15 minutes, or both
+unmatched with gaps more than 15 minutes apart, a note under the Comparison
+table gives each side's spot time against its futures' last trade and says that
+part of the premium and yield change comes from when each spot was taken, not
+from the futures' prices. No value changes. A spot within 15 minutes of the
+futures, or one whose times are unknown, shows none of this, and a comparison
+with a side whose timing is unknown says nothing about timing. The inspector's
+History marks such closes too: the Last trade cell adds, for example, `spot
+23:15 · 5 h 6 min later`, the chart rings the point with dashes and names the
+gap in its accessible name, and when the table mixes these closes with ones
+whose spot was matched, taken within 15 minutes or taken before the futures'
+last trade, the note says part of a change across them comes from when the
+spot was taken. Closes whose timing is unknown never count either way.
+
 The yield curve starts with the gross daily factor
 `(contract price / spot rate)^(1 / days left)`. The chart converts the selected
 1-, 30-, or 365-day compounded factor to net percentage yield by subtracting
 one and multiplying by 100.
+
+**Near expiry.** A contract with fewer than 7 days left (`NEAR_EXPIRY_DAYS` in
+`app.js`), counted after any recount below, is **near expiry**. Its yields
+annualize the premium over only a few days, so any noise in `price / spot` is
+magnified. Even with the spot matched to the futures' last trade (above), the
+two are up to 15 minutes and one bar apart, and closes archived before that
+rule paired a last trade around 18:09 with spot around 23:15, a gap of roughly
+±0.1–0.6%. Compounded over `365 / days left`, a 0.3% gap is worth about 17
+annualized points at 7 days left, 20 at 6, and from −67 to +198 at 1 day, so
+the 365D figure stops reading as a rate. The dashboard
+keeps every value as published and only changes how it presents them:
+
+- The board's contract cell, the inspector, and its Comparison and History tables
+  carry a worded **near expiry** tag. The inspector adds one sentence on why
+  the yield is unreliable, naming the days left.
+- The yield chart and the History chart draw near-expiry points as triangles.
+  While any other maturity (or close) has a yield, near-expiry values don't
+  set the y-axis range; one that falls outside it is drawn at the chart's edge
+  with an arrow, and its tooltip and accessible label give the true value. A
+  key under the chart counts them.
+- **Highest** (the peak tag) and the curve **Average** leave near-expiry
+  maturities out while another maturity has a yield, and the summary under
+  the chart names those left out. **Front** still shows the nearest contract,
+  tagged. If every maturity with a yield is near expiry, all of them count,
+  and the peak tag, Front and Average are tagged instead.
+- The CSV columns and the comparison values are unchanged.
+
+The updater never fails a snapshot over a yield it can't compound: a factor so
+large that `factor ** 365` overflows (a mis-scaled quote a day before expiry)
+publishes that yield as null, and the contract keeps its price and premium.
 
 Days left are counted from the snapshot's `market_date`: the VİOP session
 whose quotes it holds, by the same calendar the archive uses
@@ -245,11 +354,19 @@ board) from that day's snapshot, for every market.
   to the previous view, not the previous tweak. An entry whose close can no
   longer be loaded shows the "could not be loaded" notice and falls back to
   live.
-- **Published with the site.** The Pages `build` job checks out `data-history`,
-  if it exists, and `scripts/build_site.sh` copies its `history/` into
-  `_site/data/history/`, so the files are served from the same origin. A close
-  archived by a run appears in the next run's deploy. Without the branch the
-  site ships an empty manifest and the menu stays hidden.
+- **Published with the site.** The Pages `build` job checks out `data-history`
+  with `scripts/fetch_history.sh`, and `scripts/build_site.sh` copies its
+  `history/` into `_site/data/history/`, so the files are served from the same
+  origin. It then derives one History file per market from those closes
+  into `_site/data/history/markets/` (see **History file** under
+  **Inspector**). A close archived by a run appears in the next run's deploy. Only a
+  missing branch (`git ls-remote` exits 2) builds without history: the site
+  then ships an empty manifest and the menu stays hidden. Any other failure to
+  read origin, such as a network, auth or rate-limit error, fails the run
+  before anything is deployed, so a site with its history missing never
+  replaces the live one. CI's smoke and archive-audit jobs fetch the branch
+  with the same script and rule; `tests/test_fetch_history.py` covers it
+  against a local origin.
 - **Re-read while open.** An open page reads `history/index.json` again on
   the one-minute poll once its last read is 10 minutes old, and at once when
   the tab becomes visible again; a read that failed, such as the one at
@@ -321,8 +438,10 @@ To try it locally, put a copy of the branch's `history/` directory at the repo
 root (it's ignored by git) or point `HISTORY_DIR` at one, then run
 `bash scripts/build_site.sh` and serve `_site/`.
 
-The `archive` job runs after `build`, alongside `deploy`, so a failed archive
-never blocks or undoes the Pages deploy. It is the only job with
+The `archive` job needs only `refresh` and runs alongside `build` and
+`deploy`, so a failed archive never blocks or undoes the Pages deploy, and a
+failed history fetch or Pages step never costs the day's close. It is the only
+job with
 `contents: write` and pushes only to `data-history`, never with force. The
 logic lives in `scripts/archive_snapshot.py`, and
 `scripts/archive_history.sh SNAPSHOT [WORKTREE]` runs it against a checkout of
@@ -479,13 +598,35 @@ Python 3.10 or newer is required (the workflow uses Python 3.12).
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements.txt
+python -m pip install -r requirements.txt -c constraints.txt
 python -m unittest discover -s tests -v
 python scripts/update_data.py
 python -m http.server 8000
 ```
 
 Then open <http://localhost:8000>.
+
+**Pinned dependencies.** `requirements.txt` and `requirements-dev.txt` pin the
+direct dependencies. `constraints.txt` pins everything they pull in as well,
+for Python 3.10 and newer, with environment markers where versions differ
+(numpy and pandas do). Every `pip install` in the Pages and CI workflows passes
+`--constraint constraints.txt`, so a new upstream release can't change the
+hourly refresh without a commit here; `tests/test_workflows.py` fails if an
+install leaves it out.
+
+**Updating dependencies.** Edit the pin in `requirements.txt` (or
+`requirements-dev.txt`), then regenerate the constraints with
+[uv](https://docs.astral.sh/uv/) and network access:
+
+```bash
+bash scripts/lock_dependencies.sh            # keeps every other pin that still fits
+bash scripts/lock_dependencies.sh --upgrade  # resolves everything afresh
+```
+
+If borsapy changed, re-record the responses as the
+[fixtures README](tests/fixtures/borsapy/README.md) describes. Then reinstall
+with `-c constraints.txt` and run the tests. `tests/test_constraints.py` fails,
+offline, while a direct pin and `constraints.txt` disagree.
 
 **Recorded-response tests.** `tests/test_update_data_replay.py` runs the
 updater end to end, offline, against real borsapy 0.10.2 responses recorded in
@@ -507,7 +648,7 @@ To run the headless browser smoke test of the dashboard, install the dev
 requirements and a Playwright Chromium, then run the test directly:
 
 ```bash
-python -m pip install -r requirements-dev.txt
+python -m pip install -r requirements-dev.txt -c constraints.txt
 python -m playwright install chromium
 python -m unittest tests/e2e/test_dashboard_smoke.py -v
 ```
@@ -612,9 +753,29 @@ unusual point can be checked without reading across the board:
   every archived close up to and including the day on screen, newest first,
   so one contract, such as `USDTRYZ2026`, can be followed across the archive.
   Nothing is fetched until you press **Load history**, which names how many
-  closes it will load. They are then fetched a few at a time and kept in
-  memory, so switching the yield period, the selection or the market never
-  fetches them again, and opening a close from the table reuses its file.
+  closes it will load. It then reads the market's History file (see
+  **History file** below) in one request and keeps it in memory, so
+  switching the yield period or the selection never fetches anything again,
+  and switching the market fetches that market's file once. A close the file
+  doesn't cover is fetched on its own, a few at a time. Opening a close from
+  the table always loads that close's full file.
+  - **History file.** The Pages build writes one file per market,
+    `data/history/markets/<KEY>.json` (`USDTRY`, `EURTRY`, `XAUTRY`), with
+    `scripts/build_history_series.py`. It holds one entry per close in
+    `history/index.json`, in index order: the close's date, `schema_version`,
+    `generated_at` and `market_date`, and that market's object from the
+    close unchanged, or null when the close has none. It is derived at build
+    time from the `data-history` closes the site serves, so it is never
+    stored on that branch, and the build fails if the index lists a close
+    that is missing or unreadable. The page fetches it with a key that
+    changes whenever the index does, and runs each entry through the same
+    check and legacy recount as a close's own file, so the rows are the
+    same. If the file is missing, can't be read or fails that check, the
+    page quietly fetches each close instead, as it would without it; an
+    entry that fails, or a close a re-read of the index adds after the file
+    loaded, is fetched on its own. An entry is never shown as a full
+    dashboard: **View**, **Compare**, Back and Forward and History's links
+    always load the close's own file.
   - **Identity.** Rows are matched by the selected contract's exact VİOP
     symbol in the market on screen. Another contract, such as the next
     front month, is never stitched into the series.
@@ -685,10 +846,27 @@ offline on Python 3.10 and 3.12, checks `app.js` syntax with `node --check`,
 checks that `data/market.json` parses, validates it and
 `tests/fixtures/market.json` with `scripts/snapshot_schema.py`, and assembles
 the site with `scripts/build_site.sh`, which fails if any file the site needs
-is missing.
+is missing, and lints both workflows with a pinned, checksum-verified
+`actionlint` release. `tests/test_workflows.py` checks the workflows' design:
+every job has a timeout, `archive` doesn't wait on the Pages build, write
+permissions stay per job, every action is on its Node 24 major, and every
+`data-history` fetch goes through `scripts/fetch_history.sh`, and every
+`pip install` passes `--constraint constraints.txt`.
 A separate `smoke` job installs `requirements-dev.txt` and Chromium and runs
 `python -m unittest tests/e2e/test_dashboard_smoke.py -v`, including the
 accessibility audit.
+
+The page locks itself to its own origin with a Content Security Policy, set by
+a `<meta http-equiv="Content-Security-Policy">` tag right after `charset` in
+`index.html` (GitHub Pages can't send response headers, so `frame-ancestors`
+can't be set). Scripts, styles, images and `fetch` may come only from the
+site itself, with no inline script or style and no `eval`; everything else,
+including plugins, `<base>` and form submissions, is refused. So markup that
+ever slipped past `escapeHtml` or the snapshot schema still couldn't run
+script. `tests/test_build_site.py` fails if the built page loses or loosens the
+policy; the smoke tests fail on any CSP violation in any test and check that
+an injected inline script is blocked. A new external resource, or a new kind
+of resource, must be added to the policy deliberately.
 
 ## Data notes
 

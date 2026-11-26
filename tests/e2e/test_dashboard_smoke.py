@@ -24,6 +24,8 @@ import threading
 import unittest
 from urllib.parse import parse_qsl, urlsplit
 
+from scripts import build_history_series
+
 try:
     from playwright.sync_api import expect, sync_playwright
 except ImportError:  # pragma: no cover - exercised only without Playwright
@@ -64,6 +66,9 @@ LIVE_LABEL = "07 Oct 2026"
 FIXTURE_DAY_TIME = datetime.fromisoformat("2026-10-07T23:00:00+03:00")
 # The next Istanbul day, when days left move on by one.
 NEXT_DAY_TIME = datetime.fromisoformat("2026-10-08T10:00:00+03:00")
+# A live market date when every market's Oct 2026 contract, maturing on 30 Oct,
+# has 2 days left: near expiry, under the dashboard's 7-day threshold.
+NEAR_EXPIRY_DAY = "2026-10-28"
 # The contract table's yield columns: label, stored field, period in days, digits.
 YIELD_COLUMNS = (
     ("Daily yield · 1D", "daily_yield_percent", 1, 4),
@@ -134,7 +139,8 @@ STALE_CHARTS = (
 # loaded comparison. "missing" always comes last.
 CSV_COLUMNS = [
     "market", "view", "market_date", "snapshot_generated_at", "days_rolled_forward_from",
-    "published_market_date", "spot", "spot_unit", "spot_time", "spot_source",
+    "published_market_date", "spot", "spot_unit", "spot_time", "spot_aligned_to",
+    "spot_after_futures_minutes", "latest_spot", "latest_spot_time", "spot_source",
     "maturity_month", "label", "symbol", "code", "maturity_date", "days_left",
     "last", "change_percent", "bid", "ask", "volume", "last_trade_at", "stale",
     "premium_percent", "yield_1d_percent", "yield_30d_percent", "yield_365d_percent",
@@ -155,7 +161,10 @@ CSV_YIELDS = (
     ("365d", "annualized_yield_percent", 365, "annualized"),
 )
 # Columns that are never a missing value: context, and the reasons themselves.
-CSV_CONTEXT_COLUMNS = ("days_rolled_forward_from", "published_market_date", "missing")
+CSV_CONTEXT_COLUMNS = (
+    "days_rolled_forward_from", "published_market_date", "spot_aligned_to",
+    "spot_after_futures_minutes", "latest_spot", "latest_spot_time", "missing",
+)
 # Printing. The content width of an A4 portrait page with the stylesheet's
 # 15 mm margins (210 mm - 30 mm, at 96 px per inch), and of US Letter's.
 A4_CONTENT_WIDTH = 680
@@ -196,6 +205,19 @@ NO_PRICE_MESSAGE = "No priced maturities to plot."
 NO_YIELD_MESSAGE = (
     "No maturities with a yield to plot: every listed contract matures today or has no price."
 )
+# Reports each Content Security Policy violation on a page to the test through
+# the reportCspViolation binding, so every test can assert there were none.
+CSP_LISTENER = """
+document.addEventListener('securitypolicyviolation', (event) => {
+  window.reportCspViolation({
+    directive: event.effectiveDirective,
+    blocked: event.blockedURI,
+    source: `${event.sourceFile}:${event.lineNumber}`,
+  });
+});
+"""
+# How Chromium reports a CSP violation on the console.
+CSP_CONSOLE_ERROR = re.compile(r"violates the following Content Security Policy directive")
 
 
 def set_yields(contract, spot):
@@ -229,6 +251,9 @@ def derive_day(snapshot, day, factor):
         for key in SPOT_PRICES:
             if isinstance(market["spot"].get(key), (int, float)):
                 market["spot"][key] *= factor
+        # The spot moves back with the trades, so it stays within their session.
+        spot_time = datetime.fromisoformat(market["spot"]["updated_at"]) - timedelta(days=gap)
+        market["spot"]["updated_at"] = spot_time.isoformat()
         for contract in market["contracts"]:
             for key in CONTRACT_PRICES:
                 if isinstance(contract.get(key), (int, float)):
@@ -252,6 +277,35 @@ def derive_day(snapshot, day, factor):
                     contract[key] = None
             set_yields(contract, market["spot"]["last"])
     return derived
+
+
+def shift_snapshot(snapshot, day):
+    """Return a test-only copy of snapshot counted from day, as the updater would
+    count it: matured contracts dropped, days left and yields recomputed. Prices,
+    spot and trade times stay as they are."""
+    shifted = copy.deepcopy(snapshot)
+    shifted["test_fixture"] = f"Test fixture: {FIXTURE.name} counted from {day}. Not market data."
+    shifted["generated_at"] = f"{day}T14:06:12+03:00"
+    shifted["market_date"] = day
+    for market in shifted["markets"].values():
+        market["contracts"] = [c for c in market["contracts"] if c["maturity_date"] >= day]
+        for contract in market["contracts"]:
+            days = (date.fromisoformat(contract["maturity_date"]) - date.fromisoformat(day)).days
+            contract["days_to_maturity"] = days
+            premium = contract.get("premium_percent")
+            contract["annualized_premium_percent"] = (
+                premium * 365 / days if premium is not None and days > 0 else None
+            )
+            set_yields(contract, market["spot"]["last"])
+    return shifted
+
+
+def watch_csp(context, violations):
+    """Append every CSP violation on any page of context to violations."""
+    context.expose_binding(
+        "reportCspViolation", lambda source, violation: violations.append(violation)
+    )
+    context.add_init_script(CSP_LISTENER)
 
 
 def build_site(destination, history_dir):
@@ -333,6 +387,7 @@ class DashboardSmokeTests(unittest.TestCase):
     def setUp(self):
         self.errors = []
         self.external_requests = []
+        self.csp_violations = []
         self.open_context()
 
     def open_context(self, timezone_id=None, now=FIXTURE_DAY_TIME, **options):
@@ -344,6 +399,7 @@ class DashboardSmokeTests(unittest.TestCase):
                 **options,
             }
         )
+        watch_csp(self.context, self.csp_violations)
         self.page = self.context.new_page()
         # A test that installs fake timers passes its time again: install()
         # without one starts from the real clock.
@@ -360,6 +416,7 @@ class DashboardSmokeTests(unittest.TestCase):
     def tearDown(self):
         self.context.close()
         self.assertEqual(self.external_requests, [], "page requested a non-local URL")
+        self.assertEqual(self.csp_violations, [], "page broke its Content Security Policy")
         self.assertEqual(self.errors, [], "page logged errors")
 
     def block_external(self, route):
@@ -1791,6 +1848,8 @@ class DashboardSmokeTests(unittest.TestCase):
         )
 
     def test_history_shows_a_recounted_close_from_its_session(self):
+        # The close's own file, as the bundle doesn't cover it.
+        self.serve_bundles_without(MISDATED_DAY)
         self.serve_misdated()
         self.open_dashboard("?market=USDTRY")
         self.select_button("Jan 2028").click()
@@ -2548,6 +2607,552 @@ class DashboardSmokeTests(unittest.TestCase):
                     digits=market["price_digits"],
                 ))
 
+    def aligned_snapshot(self):
+        """The fixture with its USD/TRY spot matched to an earlier futures trade."""
+        aligned = copy.deepcopy(self.snapshot)
+        spot = aligned["markets"]["USDTRY"]["spot"]
+        spot["latest"] = {"last": 49.25, "updated_at": spot["updated_at"]}
+        spot["updated_at"] = "2026-10-07T13:45:00+03:00"
+        spot["aligned_to"] = "2026-10-07T13:49:00+03:00"
+        return aligned
+
+    def test_spot_matched_to_the_futures_last_trade_says_so(self):
+        aligned = self.aligned_snapshot()
+        self.serve_snapshot(re.compile(r"/data/market\.json"), aligned)
+        self.open_dashboard("?market=USDTRY")
+
+        note = self.page.locator("#spot-note")
+        expect(note).to_be_visible()
+        expect(note).to_have_text(
+            "Spot at 13:45 TRT, matched to the futures' last trade at 13:49; "
+            "latest spot 14:00 TRT: 49.2500"
+        )
+
+        self.select_button("Oct 2026").click()
+        self.assert_selected("Oct 2026")
+        rows = self.inspector()
+        self.assertEqual(rows["spot-time"]["value"], "07 Oct, 13:45 TRT")
+        self.assertEqual(
+            rows["spot-time"]["detail"], "Matched to the futures' last trade at 13:49 TRT"
+        )
+        self.assertEqual(rows["latest-spot"]["term"], "Latest spot")
+        self.assertEqual(rows["latest-spot"]["value"], "49.2500")
+        self.assertEqual(
+            rows["latest-spot"]["detail"], "07 Oct, 14:00 TRT; not used for premiums or yields"
+        )
+        # Premiums and yields stay the published ones, on the matched spot.
+        market = aligned["markets"]["USDTRY"]
+        contract = self.contract("Oct 2026")
+        self.assert_inspector(*self.expected_inspector(
+            contract, market["spot"]["last"], contract["days_to_maturity"],
+            market["spot_trend"], market["contract_size"],
+        ))
+
+        _, raw, table = self.download_csv()
+        self.assert_csv_format(raw, table)
+        csv_rows = self.csv_rows(table)
+        self.assert_missing_is_explained(csv_rows)
+        for row in csv_rows:
+            self.assertEqual(row["spot_time"], "2026-10-07T13:45:00+03:00")
+            self.assertEqual(row["spot_aligned_to"], "2026-10-07T13:49:00+03:00")
+            self.assertEqual(row["spot_after_futures_minutes"], "")
+            self.assertEqual(float(row["latest_spot"]), 49.25)
+            self.assertEqual(row["latest_spot_time"], "2026-10-07T14:00:00+03:00")
+
+        # Another market's spot wasn't matched, so it says nothing more.
+        self.page.locator('.market-options [data-market="EURTRY"]').click()
+        expect(note).to_be_hidden()
+
+    def test_spot_taken_as_it_was_shows_no_matching_note(self):
+        self.open_dashboard("?market=USDTRY")
+        expect(self.page.locator("#spot-note")).to_be_hidden()
+        self.select_button("Oct 2026").click()
+        self.assert_selected("Oct 2026")
+        rows = self.inspector()
+        self.assertEqual(rows["spot-time"]["detail"], "")
+        self.assertNotIn("latest-spot", rows)
+
+        _, _, table = self.download_csv()
+        for row in self.csv_rows(table):
+            self.assertEqual(
+                (row["spot_aligned_to"], row["latest_spot"], row["latest_spot_time"],
+                 row["spot_after_futures_minutes"]),
+                ("", "", "", ""),
+            )
+            self.assertNotIn("latest", row["missing"])
+            self.assertNotIn("aligned", row["missing"])
+
+    def late_spot_close(self, day, spot_time="23:15", trade_time="18:09", key="USDTRY"):
+        """day's close shaped like one archived before #97: the futures last
+        traded at trade_time and the spot was taken at spot_time, unmatched."""
+        close = copy.deepcopy(self.history[day])
+        market = close["markets"][key]
+        for index, contract in enumerate(market["contracts"]):
+            if contract.get("updated_at"):
+                # The newest trade is trade_time; some contracts traded earlier.
+                at = trade_time if index % 2 == 0 else "12:30"
+                contract["updated_at"] = f"{day}T{at}:00+03:00"
+        market["spot"]["updated_at"] = f"{day}T{spot_time}:00+03:00"
+        return close
+
+    def serve_close(self, day, close):
+        self.serve_snapshot(re.compile(rf"/data/history/{day}\.json"), close)
+
+    def test_spot_taken_after_the_futures_last_trade_says_how_long(self):
+        day = "2026-10-05"
+        close = self.late_spot_close(day)
+        self.serve_close(day, close)
+        self.open_day(day, "&market=USDTRY")
+
+        note = self.page.locator("#spot-note")
+        expect(note).to_be_visible()
+        expect(note).to_have_text(
+            "Spot at 23:15 TRT, 5 h 6 min after the futures' last trade at 18:09. "
+            "Premiums and yields include the spot's move in between."
+        )
+
+        self.select_button("Oct 2026").click()
+        self.assert_selected("Oct 2026")
+        rows = self.inspector()
+        self.assertEqual(rows["spot-time"]["value"], "05 Oct, 23:15 TRT")
+        self.assertEqual(
+            rows["spot-time"]["detail"], "5 h 6 min after the futures' last trade at 18:09 TRT"
+        )
+        self.assertNotIn("latest-spot", rows)
+        # Nothing is recomputed: the inspector shows the close's own spot and premium.
+        market = close["markets"]["USDTRY"]
+        contract = next(c for c in market["contracts"] if c["label"] == "Oct 2026")
+        self.assertEqual(rows["spot"]["value"], f"{market['spot']['last']:,.4f}")
+        premium = (contract["last"] / market["spot"]["last"] - 1) * 100
+        self.assertEqual(rows["premium"]["value"], f"{premium:+.2f}%")
+
+        _, raw, table = self.download_csv()
+        self.assert_csv_format(raw, table)
+        csv_rows = self.csv_rows(table)
+        self.assert_missing_is_explained(csv_rows)
+        for row in csv_rows:
+            self.assertEqual(row["spot_time"], f"{day}T23:15:00+03:00")
+            self.assertEqual(row["spot_after_futures_minutes"], "306")
+            self.assertEqual(row["spot_aligned_to"], "")
+            self.assertNotIn("futures", row["missing"])
+
+        # Another market's spot was taken within its session.
+        self.page.locator('.market-options [data-market="EURTRY"]').click()
+        expect(note).to_be_hidden()
+
+    def test_a_stand_in_trade_time_does_not_set_the_futures_clock(self):
+        # Snapshots written before updated_at could be null filled a missing
+        # trade time with generated_at, here 23:30, after the 23:15 spot. That
+        # is no trade, so the spot still came 5 h 6 min after the last one.
+        day = "2026-10-05"
+        close = self.late_spot_close(day)
+        contract = next(
+            c for c in close["markets"]["USDTRY"]["contracts"] if c.get("last") is not None
+        )
+        contract["updated_at"] = close["generated_at"]
+        self.serve_close(day, close)
+        self.open_day(day, "&market=USDTRY")
+        expect(self.page.locator("#spot-note")).to_have_text(
+            "Spot at 23:15 TRT, 5 h 6 min after the futures' last trade at 18:09. "
+            "Premiums and yields include the spot's move in between."
+        )
+
+    def test_live_spot_the_updater_could_not_match_says_how_long(self):
+        live = copy.deepcopy(self.snapshot)
+        # The futures last traded at 13:49; the fixture's 14:06:12 times are
+        # generated_at stand-ins, not trades. No bar held that trade.
+        live["markets"]["USDTRY"]["spot"]["updated_at"] = "2026-10-07T16:00:00+03:00"
+        self.serve_snapshot(re.compile(r"/data/market\.json"), live)
+        self.open_dashboard("?market=USDTRY")
+        expect(self.page.locator("#spot-note")).to_have_text(
+            "Spot at 16:00 TRT, 2 h 11 min after the futures' last trade at 13:49. "
+            "Premiums and yields include the spot's move in between."
+        )
+        _, _, table = self.download_csv()
+        for row in self.csv_rows(table):
+            self.assertEqual(row["spot_after_futures_minutes"], "131")
+
+    def test_spot_within_a_bar_or_without_trade_times_is_not_flagged(self):
+        day = "2026-10-05"
+        within = self.late_spot_close(day, spot_time="18:24")
+        no_times = self.late_spot_close(day)
+        for contract in no_times["markets"]["USDTRY"]["contracts"]:
+            contract["updated_at"] = None
+        # Only priced contracts set the clock: an unpriced one's later trade
+        # time would put the spot within a bar of it.
+        unpriced = self.late_spot_close(NO_PRICE_DAY, spot_time="18:25")
+        listed = unpriced["markets"]["USDTRY"]["contracts"]
+        unpriced_contract = next(c for c in listed if c["symbol"] == HISTORY_SYMBOL)
+        self.assertIsNone(unpriced_contract["last"])
+        unpriced_contract["updated_at"] = f"{NO_PRICE_DAY}T18:20:00+03:00"
+        cases = (
+            ("15 minutes after", day, within, ""),
+            ("no trade times", day, no_times, ""),
+            ("16 minutes after a priced trade", NO_PRICE_DAY, unpriced, "16"),
+        )
+        for name, close_day, close, minutes in cases:
+            with self.subTest(case=name):
+                self.serve_close(close_day, close)
+                self.open_day(close_day, "&market=USDTRY")
+                note = self.page.locator("#spot-note")
+                if minutes:
+                    expect(note).to_have_text(
+                        f"Spot at 18:25 TRT, {minutes} min after the futures' last trade at "
+                        "18:09. Premiums and yields include the spot's move in between."
+                    )
+                else:
+                    expect(note).to_be_hidden()
+                _, _, table = self.download_csv()
+                for row in self.csv_rows(table):
+                    self.assertEqual(row["spot_after_futures_minutes"], minutes)
+
+    def test_rolling_past_an_expiry_keeps_the_published_futures_clock(self):
+        live = copy.deepcopy(self.snapshot)
+        market = live["markets"]["USDTRY"]
+        # Oct 2026 held the newest trade; the spot came 6 minutes after it.
+        for contract in market["contracts"]:
+            traded = "18:09" if contract["label"] == "Oct 2026" else "17:00"
+            contract["updated_at"] = f"2026-10-07T{traded}:00+03:00"
+        market["spot"]["updated_at"] = "2026-10-07T18:15:00+03:00"
+        # After 30 Oct the board drops Oct 2026, but the spot's timing is unchanged.
+        self.reopen_at(datetime.fromisoformat("2026-10-31T10:00:00+03:00"))
+        self.serve_snapshot(re.compile(r"/data/market\.json"), live)
+        self.open_dashboard("?market=USDTRY")
+        self.assert_note("31 Oct 2026")
+        self.assertEqual(self.page.locator("#contract-rows strong", has_text="Oct 2026").count(), 0)
+        expect(self.page.locator("#spot-note")).to_be_hidden()
+        _, _, table = self.download_csv()
+        for row in self.csv_rows(table):
+            self.assertEqual(row["spot_after_futures_minutes"], "")
+
+    def test_comparison_says_when_the_two_spots_were_timed_differently(self):
+        compared = "2026-10-05"
+        late = self.late_spot_close(compared)
+        self.serve_snapshot(re.compile(r"/data/market\.json"), self.aligned_snapshot())
+        self.serve_close(compared, late)
+        self.open_dashboard("?market=USDTRY")
+        self.select_button("Oct 2026").click()
+        self.assert_selected("Oct 2026")
+        self.choose_compare(compared)
+
+        note = self.page.locator("#inspector-compare-spot-note")
+        expect(note).to_be_visible()
+        expect(note).to_have_text(
+            f"Spot timing differs. Live · {LIVE_LABEL}: spot at 13:45 TRT, matched to the "
+            f"futures' last trade at 13:49. Close · {HISTORY_LABELS[compared]}: spot at "
+            "23:15 TRT, 5 h 6 min after the futures' last trade at 18:09. Part of the "
+            "premium and yield change comes from when each spot was taken, not from the "
+            "futures' prices."
+        )
+        # The note changes no value.
+        live = self.aligned_snapshot()["markets"]["USDTRY"]
+        past = late["markets"]["USDTRY"]
+        self.assert_comparison(self.expected_comparison(
+            (live, self.contract("Oct 2026")),
+            (past, next(c for c in past["contracts"] if c["label"] == "Oct 2026")),
+        ))
+
+        # Another maturity of the same pair carries the same note.
+        self.select_button("Dec 2026").click()
+        self.assert_selected("Dec 2026")
+        expect(note).to_be_visible()
+
+        # Clearing the comparison hides it with the table.
+        self.compare_select().select_option("")
+        self.assert_not_comparing()
+        expect(note).to_be_hidden()
+
+    def test_comparison_of_two_late_spots_names_the_gap_only_when_it_differs(self):
+        view, similar, different = "2026-10-05", "2026-09-30", "2026-09-07"
+        self.serve_close(view, self.late_spot_close(view))
+        # 5 h 10 min against 5 h 6 min: the same timing.
+        self.serve_close(similar, self.late_spot_close(similar, "23:20", "18:10"))
+        # 2 h 51 min against 5 h 6 min.
+        self.serve_close(different, self.late_spot_close(different, "21:00"))
+        self.open_day(view, "&market=USDTRY")
+        self.select_button("Oct 2026").click()
+        self.assert_selected("Oct 2026")
+        note = self.page.locator("#inspector-compare-spot-note")
+
+        current = HISTORY_LABELS[view]
+        self.compare_select().select_option(similar)
+        self.assert_comparing(similar, current)
+        expect(self.page.locator("#inspector-compare-table")).to_be_visible()
+        expect(note).to_be_hidden()
+
+        self.compare_select().select_option(different)
+        self.assert_comparing(different, current)
+        expect(note).to_have_text(
+            f"Spot timing differs. Close · {HISTORY_LABELS[view]}: spot at 23:15 TRT, "
+            "5 h 6 min after the futures' last trade at 18:09. "
+            f"Close · {HISTORY_LABELS[different]}: spot at 21:00 TRT, 2 h 51 min after "
+            "the futures' last trade at 18:09. Part of the premium and yield change comes "
+            "from when each spot was taken, not from the futures' prices."
+        )
+
+        # A spot taken well before the futures' last trade is not "within" it.
+        before = self.late_spot_close(ROLLED_DAY, "17:00")
+        self.serve_close(ROLLED_DAY, before)
+        self.compare_select().select_option(ROLLED_DAY)
+        self.assert_comparing(ROLLED_DAY, current)
+        expect(note).to_have_text(
+            f"Spot timing differs. Close · {HISTORY_LABELS[view]}: spot at 23:15 TRT, "
+            "5 h 6 min after the futures' last trade at 18:09. "
+            f"Close · {HISTORY_LABELS[ROLLED_DAY]}: spot at 17:00 TRT, 1 h 9 min before "
+            "the futures' last trade at 18:09. Part of the premium and yield change comes "
+            "from when each spot was taken, not from the futures' prices."
+        )
+
+    def test_comparison_claims_nothing_when_a_sides_spot_timing_is_unknown(self):
+        view, compared = "2026-10-05", "2026-09-30"
+        self.serve_close(view, self.late_spot_close(view))
+        no_times = self.late_spot_close(compared)
+        for contract in no_times["markets"]["USDTRY"]["contracts"]:
+            contract["updated_at"] = None
+        self.serve_close(compared, no_times)
+        self.open_day(view, "&market=USDTRY")
+        self.select_button("Oct 2026").click()
+        self.assert_selected("Oct 2026")
+        self.compare_select().select_option(compared)
+        self.assert_comparing(compared, HISTORY_LABELS[view])
+        expect(self.page.locator("#inspector-compare-table")).to_be_visible()
+        expect(self.page.locator("#inspector-compare-spot-note")).to_be_hidden()
+
+    # History marks the closes whose spot was taken after the futures' last trade
+
+    LATE_TAG = "spot 23:15 · 5 h 6 min later"
+    LATE_NAME = ", spot taken 5 h 6 min after the futures' last trade"
+    LATE_NOTE = (
+        " Closes tagged “spot … later”, ringed with dashes in the chart, price the futures "
+        "against a spot taken more than 15 min after their last trade, so part of a change "
+        "across them comes from when the spot was taken."
+    )
+
+    def history_spot_marks(self):
+        """By date, each History row's late-spot tag (visible text, full text)
+        and each chart point's late-spot mark, name, value and position."""
+        return self.page.evaluate(
+            """() => ({
+                rows: Object.fromEntries(
+                    [...document.querySelectorAll('#inspector-history-rows tr[data-history-row]')]
+                    .map((row) => {
+                        const tag = row.querySelector('.spot-late-tag');
+                        return [row.dataset.historyRow, tag
+                            ? { text: tag.firstChild.textContent, full: tag.textContent }
+                            : null];
+                    })),
+                points: Object.fromEntries(
+                    [...document.querySelectorAll('#history-chart-svg .history-point')]
+                    .map((node) => [node.dataset.historyDay, {
+                        late: node.dataset.spotLate ?? null,
+                        ring: Boolean(node.querySelector('.history-spot-late')),
+                        name: node.getAttribute('aria-label'),
+                        value: node.dataset.value,
+                        y: node.querySelector('.history-marker').getBBox().y,
+                    }])),
+            })"""
+        )
+
+    def late_spot_history(self, spot_time="23:15"):
+        """The fixture archive with 05 and 06 Oct (and the closes where the
+        history contract has no price or isn't listed) taken like closes
+        archived before #97, their futures last trading at 18:09 and their
+        spot taken at spot_time, and 30 Sep's spot within a bar of its trade."""
+        closes = copy.deepcopy(self.history)
+        for day in ("2026-10-05", "2026-10-06", NO_PRICE_DAY, ROLLED_DAY):
+            closes[day] = self.late_spot_close(day, spot_time)
+        closes["2026-09-30"] = self.late_spot_close("2026-09-30", spot_time="18:24")
+        return closes
+
+    def serve_history(self, closes, bundled=True):
+        """Serve closes as each close's own file, and as the USD/TRY bundle or
+        with no bundle, so each close is fetched on its own."""
+        for day, close in closes.items():
+            self.serve_close(day, close)
+        if bundled:
+            self.serve_bundle("USDTRY", self.history_bundle("USDTRY", closes))
+        else:
+            self.serve_bundle("USDTRY", "", 404)
+
+    def test_history_marks_closes_whose_spot_was_taken_after_the_last_trade(self):
+        query = "?market=USDTRY&maturity=2028-01"
+        # The same closes with each spot taken within a bar of its futures'
+        # last trade: the same prices, trades and spots, only timed apart.
+        self.serve_snapshot(re.compile(r"/data/market\.json"), self.aligned_snapshot())
+        self.serve_history(self.late_spot_history(spot_time="18:20"))
+        self.open_dashboard(query)
+        self.load_history(len(HISTORY_FIXTURE))
+        plain = self.history_view()
+        plain_marks = self.history_spot_marks()
+        self.assertEqual(set(plain_marks["rows"].values()), {None})
+        self.assertFalse(any(p["late"] or p["ring"] for p in plain_marks["points"].values()))
+        expect(self.page.locator("#history-chart-key")).not_to_contain_text("Dashed ring")
+
+        # The live spot is matched; 05 and 06 Oct paired an 18:09 trade with a
+        # 23:15 spot; 30 Sep's spot came within a bar of its trade.
+        self.reopen_at(FIXTURE_DAY_TIME)
+        self.page.clock.install(time=FIXTURE_DAY_TIME)
+        self.serve_snapshot(re.compile(r"/data/market\.json"), self.aligned_snapshot())
+        self.serve_history(self.late_spot_history())
+        self.open_dashboard(query)
+        self.load_history(len(HISTORY_FIXTURE))
+        late_days = ("2026-10-05", "2026-10-06")
+
+        def assert_marked():
+            marks = self.history_spot_marks()
+            self.assertEqual(marks["rows"], {
+                "2026-10-07": None,
+                "2026-10-06": {
+                    "text": self.LATE_TAG,
+                    "full": f"{self.LATE_TAG} than the futures' last trade at 18:09 TRT",
+                },
+                "2026-10-05": {
+                    "text": self.LATE_TAG,
+                    "full": f"{self.LATE_TAG} than the futures' last trade at 18:09 TRT",
+                },
+                "2026-09-30": None,
+                # No price, and not listed: no premium or yield rests on the spot.
+                NO_PRICE_DAY: None,
+                ROLLED_DAY: None,
+            })
+            # Table and chart agree on every point.
+            for day, point in marks["points"].items():
+                late = day in late_days
+                self.assertEqual(point["late"], "306" if late else None, day)
+                self.assertEqual(point["ring"], late, day)
+                self.assertEqual(point["name"].endswith(self.LATE_NAME), late, day)
+                self.assertEqual(bool(marks["rows"][day]), late, day)
+            key = self.page.locator("#history-chart-key")
+            expect(key).to_contain_text(
+                "Dashed ring: spot taken more than 15 min after the futures’ last trade"
+            )
+            expect(self.page.locator("#inspector-history-note")).to_have_text(
+                re.compile(re.escape(self.LATE_NOTE) + "$")
+            )
+            return marks
+
+        marks = assert_marked()
+        # No value changes: every cell, point value and point height is the same.
+        view = self.history_view()
+        self.assertEqual(
+            [(r["cells"], r["stale"]) for r in view["rows"]],
+            [(r["cells"], r["stale"]) for r in plain["rows"]],
+        )
+        self.assertEqual(view["note"], plain["note"] + self.LATE_NOTE)
+        self.assertEqual(
+            {day: (p["value"], p["y"]) for day, p in marks["points"].items()},
+            {day: (p["value"], p["y"]) for day, p in plain_marks["points"].items()},
+        )
+        self.assertEqual(
+            marks["points"]["2026-10-05"]["name"],
+            plain_marks["points"]["2026-10-05"]["name"] + self.LATE_NAME,
+        )
+
+        # It survives a period change, the one-minute redraw and a market switch.
+        self.page.locator('[data-yield-period="annualized"]').click()
+        expect(self.page.locator("#inspector-history-head th").nth(3)).to_have_text(
+            "Annualized yield · 365D"
+        )
+        assert_marked()
+        self.page.evaluate(
+            "() => { document.querySelector('#inspector-history-rows tr').__old = true; }"
+        )
+        self.page.clock.run_for("01:01")
+        self.page.wait_for_function(
+            "() => !document.querySelector('#inspector-history-rows tr').__old"
+        )
+        assert_marked()
+        # EUR/TRY's spots were all taken within their sessions.
+        self.page.locator('.market-options [data-market="EURTRY"]').click()
+        self.assert_market("EURTRY")
+        self.select_button("Dec 2026", "EURTRY").click()
+        expect(self.page.locator("#inspector-history-scroll")).to_be_visible()
+        expect(self.page.locator("#inspector-history-status")).to_have_text(
+            re.compile(r"^History loaded")
+        )
+        self.assertEqual(set(self.history_spot_marks()["rows"].values()), {None})
+        expect(self.page.locator("#inspector-history-note")).not_to_contain_text("spot … later")
+        expect(self.page.locator("#history-chart-key")).not_to_contain_text("Dashed ring")
+        self.page.locator('.market-options [data-market="USDTRY"]').click()
+        self.assert_market("USDTRY")
+        self.select_button("Jan 2028").click()
+        expect(self.page.locator("#inspector-history-scroll")).to_be_visible()
+        assert_marked()
+
+    def test_history_spot_marks_are_the_same_from_the_bundle_and_each_close(self):
+        closes = self.late_spot_history()
+        views = {}
+        for bundled in (True, False):
+            with self.subTest(bundled=bundled):
+                self.reopen_at(FIXTURE_DAY_TIME)
+                self.serve_snapshot(re.compile(r"/data/market\.json"), self.aligned_snapshot())
+                self.serve_history(closes, bundled)
+                bundles = self.watch_bundle_fetches()
+                fetched = self.watch_history_fetches()
+                self.open_dashboard("?market=USDTRY&maturity=2028-01")
+                self.load_history(len(HISTORY_FIXTURE))
+                views[bundled] = (self.history_view(), self.history_spot_marks())
+                self.assertEqual(bundles, ["USDTRY"])
+                self.assertEqual(sorted(fetched), [] if bundled else sorted(closes))
+                marks = views[bundled][1]
+                self.assertEqual(
+                    sorted(day for day, tag in marks["rows"].items() if tag),
+                    ["2026-10-05", "2026-10-06"],
+                )
+                if not bundled:
+                    # The browser's own report of the bundle's 404.
+                    self.assertEqual(len(self.errors), 1, self.errors)
+                    self.errors = []
+        self.assertEqual(views[True], views[False])
+
+    def test_history_note_on_spot_timing_needs_two_known_kinds(self):
+        view = "2026-10-05"
+        late = self.late_spot_close(view)
+        no_times = self.late_spot_close("2026-09-30")
+        for contract in no_times["markets"]["USDTRY"]["contracts"]:
+            contract["updated_at"] = None
+        cases = {
+            # Every priced close late: each is tagged, and nothing is mixed.
+            "all late": (
+                {"2026-09-30": self.late_spot_close("2026-09-30", "21:00")},
+                {"2026-09-30": "spot 21:00 · 2 h 51 min later", view: self.LATE_TAG},
+            ),
+            # The only other close's timing is unknown.
+            "late beside unknown": ({"2026-09-30": no_times}, {view: self.LATE_TAG}),
+        }
+        for name, (others, tags) in cases.items():
+            with self.subTest(case=name):
+                self.reopen_at(FIXTURE_DAY_TIME)
+                closes = {**self.history, view: late, **others}
+                self.serve_history(closes)
+                self.open_day(view, "&market=USDTRY&maturity=2028-01")
+                self.load_history(4)
+                marks = self.history_spot_marks()
+                self.assertEqual(
+                    {day: tag["text"] for day, tag in marks["rows"].items() if tag}, tags
+                )
+                self.assertEqual(
+                    {day for day, point in marks["points"].items() if point["ring"]}, set(tags)
+                )
+                expect(self.page.locator("#inspector-history-note")).not_to_contain_text(
+                    "spot … later"
+                )
+                expect(self.page.locator("#history-chart-key")).to_contain_text("Dashed ring")
+
+    @unittest.skipIf(Axe is None, "axe-playwright-python is not installed")
+    def test_history_spot_marks_fit_a_phone(self):
+        for width in (320, 360):
+            with self.subTest(width=width):
+                self.reopen_at(FIXTURE_DAY_TIME, viewport={"width": width, "height": 800})
+                self.serve_snapshot(re.compile(r"/data/market\.json"), self.aligned_snapshot())
+                self.serve_history(self.late_spot_history())
+                self.open_dashboard("?market=USDTRY&maturity=2028-01")
+                self.load_history(len(HISTORY_FIXTURE))
+                expect(self.page.locator(".spot-late-tag")).to_have_count(2)
+                expect(self.page.locator("#history-chart .history-spot-late")).to_have_count(3)
+                self.assert_no_sideways_scroll()
+                self.assert_accessible(f"history spot marks at {width} px")
+
     # The inspector's comparison with an archived close
 
     def comparison(self):
@@ -2681,9 +3286,11 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assertEqual(rows["last-trade"]["current"]["value"], "13:49")
         self.assertEqual(rows["last-trade"]["compared"]["value"], "13:49")
         self.assertFalse(rows["last-trade"]["compared"]["stale"])
-        # derive_day() keeps each spot's time, so both read 07 Oct.
+        # derive_day() moves each spot back with its trades.
         self.assertEqual(rows["spot-time"]["current"]["value"], "07 Oct, 14:00 TRT")
-        self.assertEqual(rows["spot-time"]["compared"]["value"], "07 Oct, 14:00 TRT")
+        self.assertEqual(rows["spot-time"]["compared"]["value"], "30 Sept, 14:00 TRT")
+        # Both spots were taken within the session, so nothing more is said.
+        expect(self.page.locator("#inspector-compare-spot-note")).to_be_hidden()
         self.assertEqual(rows["yield"]["term"], "Daily yield · 1D")
         self.assertEqual(rows["yield"]["tag"], "In chart")
         expect(self.page.locator("#inspector-compare-note")).to_have_text(
@@ -2952,6 +3559,7 @@ class DashboardSmokeTests(unittest.TestCase):
         return market, next(c for c in market["contracts"] if c["symbol"] == HISTORY_SYMBOL)
 
     def test_history_loads_on_demand_and_lists_each_close(self):
+        bundles = self.watch_bundle_fetches()
         fetched = self.watch_history_fetches()
         self.open_dashboard("?market=USDTRY&maturity=2028-01")
         self.assert_selected("Jan 2028")
@@ -2961,7 +3569,8 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assertEqual(fetched, [], "fetched archived closes before Load history")
 
         self.load_history(len(HISTORY_FIXTURE))
-        self.assertEqual(sorted(fetched), sorted(HISTORY_FIXTURE))
+        # One request: the market's bundle, and no close on its own.
+        self.assertEqual((bundles, fetched), (["USDTRY"], []))
         expect(self.page.locator("#inspector-history-status")).to_have_text(
             "History loaded: 5 archived closes."
         )
@@ -3036,11 +3645,11 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assertEqual(self.errors, [])
 
     def test_history_reuses_its_closes_across_periods_selections_and_markets(self):
+        bundles = self.watch_bundle_fetches()
         fetched = self.watch_history_fetches()
         self.open_dashboard("?market=USDTRY&maturity=2028-01")
         self.load_history(len(HISTORY_FIXTURE))
-        self.assertEqual(len(fetched), len(HISTORY_FIXTURE))
-        fetched.clear()
+        self.assertEqual((bundles, fetched), (["USDTRY"], []))
 
         # The period switch changes only the yield column.
         self.page.locator('[data-yield-period="monthly"]').click()
@@ -3052,7 +3661,8 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assertEqual(row["cells"][:4], self.expected_history_row(market, contract, "monthly"))
         self.assertIn("period=monthly", row["href"])
 
-        # Another maturity and another market load straight from the cache.
+        # Another maturity loads straight from the cache, and another market
+        # from its own bundle.
         self.select_button("Dec 2026").click()
         self.assert_selected("Dec 2026")
         expect(self.page.locator("#inspector-history-scroll")).to_be_visible()
@@ -3070,6 +3680,7 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assertEqual(row["cells"][:4], self.expected_history_row(market, contract, "monthly"))
         self.assertIn("market=EURTRY", row["href"])
         self.assertEqual(fetched, [], "refetched cached closes")
+        self.assertEqual(bundles, ["USDTRY", "EURTRY"])
 
     def test_history_date_opens_that_close_with_the_same_maturity(self):
         fetched = self.watch_history_fetches()
@@ -3096,7 +3707,8 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assertEqual([row["day"] for row in rows], [day, NO_PRICE_DAY, ROLLED_DAY])
         self.assertEqual((rows[0]["tag"], rows[0]["href"]), ("On screen", None))
         self.assertTrue(rows[0]["onScreen"])
-        self.assertEqual(fetched, [], "refetched cached closes")
+        # The close opens from its own full file, never from the History bundle.
+        self.assertEqual(fetched, [day])
         # The board agrees with the History row on screen.
         market, contract = self.history_symbol_on(day)
         self.assertEqual(
@@ -3173,13 +3785,15 @@ class DashboardSmokeTests(unittest.TestCase):
             )
         self.assertEqual(self.history_length(), length)
         self.expect_load_errors(1)
-        # The browser's own reports of the two 404s are the only other errors.
-        self.assertEqual(len(self.errors), 2, self.errors)
-        self.assertTrue(all("404" in error for error in self.errors), self.errors)
+        # History read the close from the bundle; opening it fetched its own
+        # file, whose 404 the browser reports as the only other error.
+        self.assertEqual(len(self.errors), 1, self.errors)
+        self.assertIn("404", self.errors[0])
         self.errors = []
 
     def test_history_says_which_close_could_not_be_loaded(self):
         failed = "2026-10-05"
+        self.serve_bundles_without(failed)
         self.page.route(f"**/data/history/{failed}.json", lambda route: route.fulfill(status=404))
         self.open_dashboard("?market=USDTRY&maturity=2028-01")
         self.load_history(len(HISTORY_FIXTURE))
@@ -3231,6 +3845,7 @@ class DashboardSmokeTests(unittest.TestCase):
 
     def test_history_retries_only_the_closes_that_failed(self):
         failed = "2026-10-05"
+        self.serve_bundles_without(failed)
         modes, _ = self.route_history_close(failed)
         fetched = self.watch_history_fetches()
         self.open_dashboard("?market=USDTRY&maturity=2028-01")
@@ -3242,7 +3857,8 @@ class DashboardSmokeTests(unittest.TestCase):
             "History loaded: 5 archived closes. 1 close could not be loaded."
         )
         expect(self.page.locator(f'.history-missing-mark[data-history-day="{failed}"]')).to_have_count(1)
-        self.assertEqual(sorted(fetched), sorted(HISTORY_FIXTURE))
+        # Only the close the bundle doesn't cover was fetched on its own.
+        self.assertEqual(fetched, [failed])
 
         # Once the close can be fetched, Retry asks for it alone, once.
         fetched.clear()
@@ -3283,6 +3899,7 @@ class DashboardSmokeTests(unittest.TestCase):
             lambda request: "data/market.json" in request.url and live_requests.append(request.url),
         )
         self.page.clock.install(time=FIXTURE_DAY_TIME)
+        self.serve_bundles_without(failed)
         modes, held = self.route_history_close(failed)
         fetched = self.watch_history_fetches()
         self.open_dashboard("?market=USDTRY&maturity=2028-01")
@@ -3367,6 +3984,7 @@ class DashboardSmokeTests(unittest.TestCase):
 
     def test_history_retry_is_keyboard_operable_and_keeps_focus(self):
         failed = "2026-10-05"
+        self.serve_bundles_without(failed)
         modes, _ = self.route_history_close(failed)
         self.open_dashboard("?market=USDTRY&maturity=2028-01")
         self.load_history(len(HISTORY_FIXTURE))
@@ -3398,6 +4016,7 @@ class DashboardSmokeTests(unittest.TestCase):
             with self.subTest(viewport=viewport):
                 if viewport:
                     self.reopen_at(FIXTURE_DAY_TIME, viewport=viewport)
+                self.serve_bundles_without(failed)
                 self.route_history_close(failed)
                 self.open_dashboard("?market=USDTRY&maturity=2028-01")
                 self.load_history(len(HISTORY_FIXTURE))
@@ -4396,7 +5015,8 @@ class DashboardSmokeTests(unittest.TestCase):
         fetched = self.watch_history_fetches()
         self.open_dashboard("?market=USDTRY&maturity=2028-01")
         self.load_history(len(HISTORY_FIXTURE) - 1)
-        self.assertEqual(sorted(fetched), sorted(day for day in HISTORY_FIXTURE if day != added))
+        # From the bundle, which covers only the closes the index listed.
+        self.assertEqual(fetched, [])
         status = self.page.locator("#inspector-history-status")
         coverage = self.page.locator("#inspector-history-coverage")
         expect(status).to_have_text("History loaded: 4 archived closes.")
@@ -4641,10 +5261,9 @@ class DashboardSmokeTests(unittest.TestCase):
             "USDTRYF2028 · Daily yield · 1D on each close, oldest to newest. "
             "Each point opens its close; the table below lists every value."
         )
-        self.assertEqual(sorted(fetched), sorted(HISTORY_FIXTURE))
-        fetched.clear()
+        self.assertEqual(fetched, [], "fetched a close the bundle covers")
 
-        # Period, selection and market switches redraw from the cache.
+        # Period, selection and market switches fetch no close.
         self.page.locator('[data-yield-period="monthly"]').click()
         expect(self.page.locator("#history-chart-caption")).to_contain_text("Monthly yield · 30D")
         self.select_button("Dec 2026").click()
@@ -4693,6 +5312,7 @@ class DashboardSmokeTests(unittest.TestCase):
 
     def test_history_chart_breaks_at_every_missing_close_and_gap(self):
         failed = "2026-10-06"
+        self.serve_bundles_without(failed)
         self.page.route(f"**/data/history/{failed}.json", lambda route: route.fulfill(status=404))
         self.open_dashboard("?market=USDTRY&maturity=2028-01")
         self.load_history(len(HISTORY_FIXTURE))
@@ -4804,7 +5424,8 @@ class DashboardSmokeTests(unittest.TestCase):
         points = self.history_chart()["points"]
         self.assertEqual(points[-1]["day"], day)
         self.assertTrue(points[-1]["onScreen"])
-        self.assertEqual(fetched, [], "refetched cached closes")
+        # The close opens from its own full file, never from the History bundle.
+        self.assertEqual(fetched, [day])
 
     def test_history_chart_point_opens_its_close_from_the_keyboard_and_a_tap(self):
         self.open_dashboard("?market=USDTRY&maturity=2028-01")
@@ -5184,7 +5805,8 @@ class DashboardSmokeTests(unittest.TestCase):
                 on_screen = [row for row in self.history_rows() if row["onScreen"]]
                 self.assertEqual([row["day"] for row in on_screen], [day or self.snapshot["market_date"]])
                 self.assert_focus_not_lost()
-        self.assertEqual(fetched, [], "refetched cached closes")
+        # Each close opened from its own full file once; Back and Forward reuse it.
+        self.assertEqual(fetched, [first, second])
         self.assertEqual(self.history_length(), length + 2)
 
     def test_back_restores_the_previous_market_and_its_maturity(self):
@@ -6476,6 +7098,571 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assert_no_sideways_scroll()
         self.assert_accessible("copy link fallback at 320px")
 
+    # Near expiry: fewer than 7 days left, after any recount
+
+    def open_near_expiry(self, snapshot, query, now=None, **options):
+        """Serve snapshot as the live data and open query with the clock at now,
+        late on the snapshot's own market date unless given."""
+        now = now or datetime.fromisoformat(f"{snapshot['market_date']}T23:00:00+03:00")
+        self.reopen_at(now, **options)
+        self.record_canvas_text()
+        self.serve_snapshot(re.compile(r"/data/market\.json"), snapshot)
+        self.open_dashboard(query)
+
+    def yield_points(self):
+        return self.page.evaluate(
+            """() => state.yieldChartPoints.map((point) => ({
+                label: point.label,
+                y: point.y,
+                value: point.current.value,
+                near: point.nearExpiry,
+                offScale: point.offScale,
+                peak: point.isPeak,
+            }))"""
+        )
+
+    def tick_labels(self):
+        """The yield chart's last drawn y-axis labels, top to bottom."""
+        return self.page.evaluate(
+            "() => window.__canvasText.filter((text) => /^-?\\d+\\.\\d+%$/.test(text)).slice(-5)"
+        )
+
+    def test_near_expiry_contract_sets_no_scale_peak_or_average(self):
+        snapshot = shift_snapshot(self.snapshot, NEAR_EXPIRY_DAY)
+        market = snapshot["markets"]["USDTRY"]
+        october, others = market["contracts"][0], market["contracts"][1:]
+        self.assertEqual((october["label"], october["days_to_maturity"]), ("Oct 2026", 2))
+        self.open_near_expiry(snapshot, "?market=USDTRY&period=annualized")
+        page = self.page
+
+        for period, field, digits in (
+            ("annualized", "annualized_yield_percent", 2),
+            ("daily", "daily_yield_percent", 4),
+        ):
+            with self.subTest(period=period):
+                page.locator(f'[data-yield-period="{period}"]').click()
+                true_value = f"{october[field]:+,.{digits}f}%"
+                values = [c[field] for c in others]
+                # Oct 2026 is drawn at the top edge; the others set the scale.
+                points = self.yield_points()
+                self.assertEqual(
+                    (points[0]["label"], points[0]["near"], points[0]["offScale"], points[0]["y"]),
+                    ("Oct 2026", True, "above", 24),
+                )
+                self.assertAlmostEqual(points[0]["value"], october[field], places=9)
+                self.assertTrue(all(not p["near"] and p["offScale"] is None for p in points[1:]))
+                self.assertGreater(min(p["y"] for p in points[1:]), 24)
+                top, bottom = max(0, *values), min(0, *values)
+                padding = max((top - bottom) * 0.12, 0.001 if period == "daily" else 0.05)
+                ticks = self.tick_labels()
+                self.assertEqual(
+                    ticks[0], f"{top + padding:.{3 if period == 'daily' else 1}f}%", ticks,
+                )
+
+                # Highest and Average skip it, and the summary says so.
+                peak = max(others, key=lambda c: c[field])
+                label = YIELD_PERIOD_LABELS[period].split(" ")[0]
+                peak_text = f"{peak[field]:+,.{digits}f}%"
+                stale = " · STALE" if peak["symbol"] in STALE_TRADES else ""
+                self.assertEqual(self.peak_tag(), f"HIGHEST {label.upper()} · {peak_text}{stale}")
+                self.assertEqual([p["label"] for p in points if p["peak"]], [peak["label"]])
+                expect(page.locator("#yield-average-value")).to_have_text(
+                    f"{sum(values) / len(values):+,.{digits}f}%"
+                )
+                note = (
+                    "The highest yield, the average and this range leave out 1 maturity "
+                    f"near expiry, with fewer than 7 days left: Oct 2026 at {true_value}, "
+                    "2 days left."
+                )
+                summary = page.locator("#yield-summary")
+                expect(summary).to_contain_text(
+                    f"Highest {label.lower()} yield is {peak_text} at {peak['label']}"
+                )
+                expect(summary).to_contain_text(note)
+                expect(summary).to_contain_text(
+                    f"ranges from {min(values):+,.{digits}f}% to {max(values):+,.{digits}f}%."
+                )
+                canvas_label = page.locator("#yield-chart").get_attribute("aria-label")
+                self.assertIn(note, canvas_label)
+                self.assertIn("Oct 2026 is off the scale, drawn at its top edge.", canvas_label)
+
+                # Front keeps the nearest contract, tagged.
+                front = page.locator("#yield-front-value")
+                expect(front).to_contain_text(true_value)
+                expect(front.locator(".expiry-tag")).to_be_visible()
+                expect(front.locator(".expiry-tag")).to_contain_text("near expiry")
+
+                key = page.locator("#yield-key")
+                expect(key).to_be_visible()
+                expect(key.locator('[data-key-entry="near-expiry"]')).to_contain_text(
+                    "Near expiry: 1 with fewer than 7 days left, drawn as a triangle; "
+                    "annualizing a few days’ premium magnifies noise"
+                )
+
+                # The tooltip gives the true value.
+                self.hover_label("#yield-chart", "Oct 2026", "yieldChartPoints")
+                tooltip = page.locator("#yield-tooltip")
+                expect(tooltip).to_contain_text(true_value)
+                expect(tooltip).to_contain_text("2 days left")
+                expect(tooltip).to_contain_text(
+                    "Near expiry: annualizing a few days’ premium magnifies noise"
+                )
+                expect(tooltip).to_contain_text("Off the scale, drawn at the chart’s top edge")
+                page.mouse.move(0, 0)
+
+        # The board tags only that row, in words; its values are as published.
+        tags = page.locator("#contract-rows .expiry-tag")
+        expect(tags).to_have_count(1)
+        first = page.locator("#contract-rows > tr").first
+        expect(first.locator(".contract-name small .expiry-tag")).to_be_visible()
+        expect(first.locator(".contract-name small .expiry-tag")).to_contain_text(
+            "near expiry, 2 days to maturity"
+        )
+        self.assertEqual(self.column("#contract-rows", "Days left")[0], "2")
+        self.assertEqual(
+            self.column("#contract-rows", "Annualized · 365D")[0],
+            f"{october['annualized_yield_percent']:+,.2f}%",
+        )
+
+    def test_near_expiry_in_the_inspector_comparison_and_history(self):
+        snapshot = shift_snapshot(self.snapshot, NEAR_EXPIRY_DAY)
+        october = snapshot["markets"]["USDTRY"]["contracts"][0]
+        self.open_near_expiry(
+            snapshot, "?market=USDTRY&maturity=2026-10&period=annualized&compare=2026-10-06",
+        )
+        page = self.page
+        expect(page.locator("#inspector")).to_be_visible()
+        rows = self.inspector()
+        self.assertEqual(rows["days"]["value"], "2")
+        expect(page.locator('#inspector [data-item="days"] .expiry-tag')).to_be_visible()
+        self.assertEqual(rows["near-expiry"]["term"], "Near expiry")
+        self.assertEqual(rows["near-expiry"]["value"], "2 days left")
+        self.assertEqual(
+            rows["near-expiry"]["detail"],
+            "These yields annualize a premium over only 2 days, so the gap between the "
+            "futures last-trade time and the spot reference time (both shown above) is "
+            "magnified, and the 365D figure should not be read as a rate.",
+        )
+        # Values are shown unchanged.
+        self.assertEqual(
+            rows["yield-annualized"]["value"], f"{october['annualized_yield_percent']:+,.2f}%"
+        )
+
+        # The comparison tags the side that is near expiry, the day on screen.
+        days = page.locator('#inspector-compare-rows tr[data-compare-item="days"] td')
+        expect(days.nth(0).locator(".expiry-tag")).to_have_count(1)
+        expect(days.nth(1).locator(".expiry-tag")).to_have_count(0)
+        self.assertEqual(self.comparison()["days"]["current"]["value"], "2")
+
+        # History: the live point is a triangle at the top edge and sets no scale.
+        self.load_history(len(HISTORY_FIXTURE))
+        live = page.locator(f'#history-chart-svg [data-history-day="{NEAR_EXPIRY_DAY}"]')
+        expect(live).to_have_attribute("data-near-expiry", "2")
+        expect(live).to_have_attribute("data-off-scale", "above")
+        name = live.get_attribute("aria-label")
+        true_value = f"{october['annualized_yield_percent']:+,.2f}%"
+        self.assertIn(true_value, name)
+        self.assertIn("near expiry with 2 days left, off the scale, drawn at its top edge", name)
+        expect(live.locator("path.history-marker.is-near-expiry")).to_have_count(1)
+        expect(live.locator(".history-off-scale")).to_have_count(1)
+        others = page.locator("#history-chart-svg .history-point:not([data-near-expiry])")
+        expect(others).to_have_count(len(HISTORY_FIXTURE))
+        self.assertEqual(
+            page.locator("#history-chart-svg [data-off-scale]").count(), 1,
+        )
+        ticks = page.locator("#history-chart-svg .history-tick-y").all_text_contents()
+        self.assertTrue(ticks)
+        self.assertNotIn(true_value, ticks)
+        self.assertTrue(all(self.number(tick) < 100 for tick in ticks), ticks)
+        key = page.locator("#history-chart-key")
+        expect(key).to_contain_text(
+            "Triangle: fewer than 7 days left; annualizing a few days’ premium magnifies "
+            "noise, so it sets no scale"
+        )
+        expect(key).to_contain_text("Arrow: off the scale, drawn at its edge")
+        live_row = page.locator(f'#inspector-history-rows tr[data-history-row="{NEAR_EXPIRY_DAY}"]')
+        expect(live_row.locator(".expiry-tag")).to_have_count(1)
+        expect(page.locator("#inspector-history-rows .expiry-tag")).to_have_count(1)
+
+    def test_only_near_expiry_maturities_still_render_tagged(self):
+        snapshot = shift_snapshot(self.snapshot, NEAR_EXPIRY_DAY)
+        market = snapshot["markets"]["XAUTRY"]
+        market["contracts"] = market["contracts"][:1]
+        october = market["contracts"][0]
+        self.assertEqual(october["days_to_maturity"], 2)
+        self.open_near_expiry(snapshot, "?market=XAUTRY&period=annualized")
+        page = self.page
+        true_value = f"{october['annualized_yield_percent']:+,.2f}%"
+        expect(page.locator("#yield-empty")).to_be_hidden()
+        points = self.yield_points()
+        self.assertEqual(
+            [(p["label"], p["near"], p["offScale"], p["peak"]) for p in points],
+            [("Oct 2026", True, None, True)],
+        )
+        self.assertEqual(self.peak_tag(), f"HIGHEST ANNUALIZED · {true_value} · NEAR EXPIRY")
+        expect(page.locator("#yield-front-value")).to_contain_text(true_value)
+        expect(page.locator("#yield-front-value .expiry-tag")).to_be_visible()
+        average = page.locator("#yield-average-value")
+        expect(average).to_contain_text(true_value)
+        expect(average.locator(".expiry-tag")).to_be_visible()
+        summary = page.locator("#yield-summary")
+        expect(summary).to_contain_text(
+            f"Highest annualized yield is {true_value} at Oct 2026. Annualized net yield "
+            f"ranges from {true_value} to {true_value}. Every maturity with a yield is near "
+            "expiry, with fewer than 7 days left, and annualizing a few days’ premium "
+            "magnifies noise."
+        )
+        for locator in (summary, page.locator(".yield-readouts"), page.locator("#yield-key")):
+            expect(locator).not_to_contain_text("NaN")
+        expect(page.locator("#yield-key")).to_contain_text(
+            "Near expiry: every maturity plotted has fewer than 7 days left"
+        )
+
+    def test_weekend_roll_forward_makes_the_front_contract_near_expiry(self):
+        # A Friday close of 27 Nov 2026 viewed on Sunday 29 Nov: the Nov 2026
+        # contract, maturing Monday, recounts from 3 days to 1.
+        snapshot = shift_snapshot(self.snapshot, "2026-11-27")
+        november = snapshot["markets"]["USDTRY"]["contracts"][0]
+        self.assertEqual((november["label"], november["days_to_maturity"]), ("Nov 2026", 3))
+        self.open_near_expiry(
+            snapshot, "?market=USDTRY&period=annualized",
+            now=datetime.fromisoformat("2026-11-29T12:00:00+03:00"),
+        )
+        page = self.page
+        expect(page.locator("#days-note")).to_have_text(
+            "Days left and yields adjusted to 29 Nov 2026; prices are from the "
+            "27 Nov 2026 session."
+        )
+        self.assertEqual(self.column("#contract-rows", "Days left")[0], "1")
+        first = page.locator("#contract-rows > tr").first
+        expect(first.locator(".expiry-tag")).to_contain_text("near expiry, 1 day to maturity")
+        expect(page.locator("#contract-rows .expiry-tag")).to_have_count(1)
+        spot = snapshot["markets"]["USDTRY"]["spot"]["last"]
+        recounted = ((november["last"] / spot) ** 365 - 1) * 100
+        points = self.yield_points()
+        self.assertEqual(
+            (points[0]["label"], points[0]["near"], points[0]["offScale"], points[0]["y"]),
+            ("Nov 2026", True, "above", 24),
+        )
+        self.assertAlmostEqual(points[0]["value"] / recounted, 1, places=9)
+        self.assertNotEqual(self.peak_tag().split(" · ")[1], f"{recounted:+,.2f}%")
+        expect(page.locator("#yield-summary")).to_contain_text(
+            "leave out 1 maturity near expiry, with fewer than 7 days left: Nov 2026 at "
+        )
+        expect(page.locator("#yield-summary")).to_contain_text("1 day left.")
+
+    @unittest.skipIf(Axe is None, "axe-playwright-python is not installed")
+    def test_accessibility_and_layout_with_a_near_expiry_contract(self):
+        snapshot = shift_snapshot(self.snapshot, NEAR_EXPIRY_DAY)
+        query = "?market=USDTRY&maturity=2026-10&period=annualized&compare=2026-10-06"
+        for viewport in (None,) + NARROW_VIEWPORTS:
+            with self.subTest(viewport=viewport):
+                self.open_near_expiry(
+                    snapshot, query, **({"viewport": viewport} if viewport else {}),
+                )
+                expect(self.page.locator('#inspector [data-item="near-expiry"]')).to_be_visible()
+                expect(self.page.locator("#yield-key")).to_be_visible()
+                self.load_history(len(HISTORY_FIXTURE))
+                self.assert_no_sideways_scroll()
+                self.assert_accessible(f"near expiry at {viewport or 'desktop'}")
+
+    # The History bundle: one file per market, built with the site.
+
+    BUNDLE_URL = re.compile(r"/data/history/markets/([A-Z]+)\.json(\?|$)")
+
+    def watch_bundle_fetches(self):
+        """Record each market's History bundle the page requests, by key."""
+        fetched = []
+        def record(request):
+            match = self.BUNDLE_URL.search(request.url)
+            if match:
+                fetched.append(match.group(1))
+        self.page.on("request", record)
+        return fetched
+
+    def history_bundle(self, key, closes):
+        """The bundle the build writes for key from closes ({day: snapshot})."""
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            for day, snapshot in closes.items():
+                (directory / f"{day}.json").write_text(json.dumps(snapshot), encoding="utf-8")
+            (directory / "index.json").write_text(
+                json.dumps(self.history_manifest(closes)), encoding="utf-8"
+            )
+            return build_history_series.build_bundles(directory)[key]
+
+    def serve_bundles_without(self, *days):
+        """Serve each market's bundle without days, so History fetches those
+        closes on their own, as when the bundle predates them."""
+        closes = {day: snapshot for day, snapshot in self.history.items() if day not in days}
+        bundles = {
+            key: self.history_bundle(key, closes) for key in self.snapshot["market_order"]
+        }
+        self.page.route(
+            self.BUNDLE_URL,
+            lambda route: route.fulfill(
+                status=200, content_type="application/json",
+                body=json.dumps(bundles[self.BUNDLE_URL.search(route.request.url).group(1)]),
+            ),
+        )
+
+    def serve_bundle(self, key, body, status=200):
+        self.page.route(
+            re.compile(rf"/data/history/markets/{key}\.json(\?|$)"),
+            lambda route: route.fulfill(
+                status=status, content_type="application/json",
+                body=body if isinstance(body, str) else json.dumps(body),
+            ),
+        )
+
+    def history_view(self):
+        """Everything History shows once loaded: rows, coverage, note and chart."""
+        expect(self.page.locator("#inspector-history-status")).to_have_text(
+            re.compile(r"^History loaded")
+        )
+        return {
+            "rows": self.history_rows(),
+            "status": self.page.locator("#inspector-history-status").text_content(),
+            "coverage": self.page.locator("#inspector-history-coverage").text_content(),
+            "note": self.page.locator("#inspector-history-note").text_content(),
+            "retry": self.page.locator("#history-retry").is_visible(),
+            "chart": self.page.locator("#history-chart").evaluate("(node) => node.outerHTML"),
+            "chart_rows": self.page.evaluate("() => state.historyChart.rows"),
+        }
+
+    def test_history_reads_one_bundle_per_market(self):
+        bundles = self.watch_bundle_fetches()
+        fetched = self.watch_history_fetches()
+        keys = []
+        self.page.on(
+            "request",
+            lambda request: self.BUNDLE_URL.search(request.url)
+            and keys.append(parse_qsl(urlsplit(request.url).query)),
+        )
+        self.open_dashboard("?market=USDTRY&maturity=2028-01")
+        self.load_history(len(HISTORY_FIXTURE))
+        status = self.page.locator("#inspector-history-status")
+        expect(status).to_have_text("History loaded: 5 archived closes.")
+        self.assertEqual((bundles, fetched), (["USDTRY"], []))
+        # Its cache key follows the index.
+        self.assertEqual([[name for name, _ in query] for query in keys], [["v"]])
+
+        # Another market reads its own bundle, once.
+        self.page.locator('.market-options [data-market="EURTRY"]').click()
+        self.assert_market("EURTRY")
+        self.select_button("Dec 2026", "EURTRY").click()
+        expect(self.page.locator("#inspector-history-scroll")).to_be_visible()
+        expect(status).to_have_text("History loaded: 5 archived closes.")
+        self.assertEqual(
+            [r["state"] for r in self.history_rows() if r["state"] != "gap"], ["listed"] * 6
+        )
+        self.assertEqual((bundles, fetched), (["USDTRY", "EURTRY"], []))
+
+        # Switching back reuses the bundle already loaded.
+        self.page.locator('.market-options [data-market="USDTRY"]').click()
+        self.assert_market("USDTRY")
+        self.select_button("Jan 2028").click()
+        expect(self.page.locator("#inspector-history-scroll")).to_be_visible()
+        expect(status).to_have_text("History loaded: 5 archived closes.")
+        self.page.locator('.market-options [data-market="EURTRY"]').click()
+        self.assert_market("EURTRY")
+        self.assertEqual((bundles, fetched), (["USDTRY", "EURTRY"], []))
+        self.assertEqual(len(set(map(tuple, keys))), 1)
+
+    def test_history_from_the_bundle_matches_each_close_and_falls_back_quietly(self):
+        # The fixture archive with a legacy close recounted from its session,
+        # a close where the contract is listed with no price and one where it
+        # isn't listed.
+        closes = {**self.history, MISDATED_DAY: self.misdated_close()}
+        bundle = self.history_bundle("USDTRY", closes)
+        query = "?market=USDTRY&maturity=2028-01&period=annualized"
+
+        def open_history(body, status=200):
+            self.serve_misdated(closes[MISDATED_DAY])
+            if body is not None:
+                self.serve_bundle("USDTRY", body, status)
+            bundles = self.watch_bundle_fetches()
+            fetched = self.watch_history_fetches()
+            self.open_dashboard(query)
+            self.load_history(len(HISTORY_FIXTURE))
+            view = self.history_view()
+            expect(self.page.locator("#history-notice")).to_be_hidden()
+            return view, bundles, fetched
+
+        expected, bundles, fetched = open_history(bundle)
+        self.assertEqual((bundles, fetched), (["USDTRY"], []))
+        self.assertIn("recounted from its session", expected["note"])
+        states = {row["day"]: row["state"] for row in expected["rows"] if row["day"]}
+        self.assertEqual(states[ROLLED_DAY], "not-listed")
+        self.assertEqual(
+            next(r for r in expected["rows"] if r["day"] == NO_PRICE_DAY)["cells"][0],
+            "Listed, no price",
+        )
+        market, contract = self.history_symbol_on(MISDATED_DAY)
+        self.assertEqual(
+            next(r for r in expected["rows"] if r["day"] == MISDATED_DAY)["cells"][:4],
+            self.expected_history_row(market, contract, "annualized", 4),
+        )
+
+        invalid_entry = copy.deepcopy(bundle)
+        invalid_entry["days"][2]["market"]["contracts"][0].pop("days_to_maturity")
+        cases = {
+            "missing": (None, 404),
+            "not JSON": ("{", 200),
+            "another schema": ({**bundle, "schema_version": 2}, 200),
+            "another market": ({**bundle, "market": "EURTRY"}, 200),
+            "entries failing the snapshot check": (
+                {**bundle, "days": [{**day, "schema_version": 3} for day in bundle["days"]]},
+                200,
+            ),
+        }
+        for case, (body, status) in cases.items():
+            with self.subTest(case=case):
+                self.context.close()
+                self.open_context()
+                view, bundles, fetched = open_history(
+                    body if status == 200 else "", status
+                )
+                self.assertEqual(view, expected)
+                self.assertEqual(bundles, ["USDTRY"])
+                self.assertEqual(sorted(fetched), sorted(HISTORY_FIXTURE))
+                if status == 404:
+                    # The browser's own report of the 404 is the only error.
+                    self.assertEqual(len(self.errors), 1, self.errors)
+                    self.assertIn("404", self.errors[0])
+                    self.errors = []
+
+        # One entry failing the check costs only its own close.
+        self.context.close()
+        self.open_context()
+        view, bundles, fetched = open_history(invalid_entry)
+        self.assertEqual(view, expected)
+        self.assertEqual((bundles, fetched), (["USDTRY"], [bundle["days"][2]["date"]]))
+
+    def test_closes_opened_from_history_load_their_own_full_file(self):
+        bundles = self.watch_bundle_fetches()
+        fetched = self.watch_history_fetches()
+        self.open_dashboard("?market=USDTRY&maturity=2028-01")
+        self.load_history(len(HISTORY_FIXTURE))
+        self.assertEqual((bundles, fetched), (["USDTRY"], []))
+
+        def assert_full_close(day):
+            self.assert_historical(day)
+            # Every market of the close is on screen, not just the bundle's.
+            self.assertEqual(
+                self.page.evaluate("() => Object.keys(state.snapshot.markets)"),
+                ["USDTRY", "EURTRY", "XAUTRY"],
+            )
+            for key in ("USDTRY", "EURTRY", "XAUTRY"):
+                expect(self.page.locator(f'.market-options [data-market="{key}"]')).to_be_enabled()
+            self.assert_market("USDTRY", self.history[day])
+
+        # A History date.
+        self.page.locator('#inspector-history-rows a[data-history-day="2026-10-05"]').click()
+        assert_full_close("2026-10-05")
+        self.assertEqual(fetched, ["2026-10-05"])
+        # Back and Forward reuse the close loaded in full.
+        self.page.go_back()
+        expect(self.page.locator("#data-state")).to_have_class(re.compile(r"\bis-delayed\b"))
+        self.page.go_forward()
+        assert_full_close("2026-10-05")
+        # A History chart point.
+        self.page.locator('#history-chart-svg a[data-history-day="2026-09-30"]').click()
+        assert_full_close("2026-09-30")
+        # The View menu and Compare.
+        self.page.locator("#history-select").select_option(NO_PRICE_DAY)
+        assert_full_close(NO_PRICE_DAY)
+        self.compare_select().select_option(ROLLED_DAY)
+        self.assert_comparing(ROLLED_DAY, HISTORY_LABELS[NO_PRICE_DAY])
+        self.assertEqual(fetched, ["2026-10-05", "2026-09-30", NO_PRICE_DAY, ROLLED_DAY])
+        self.assertEqual(bundles, ["USDTRY"])
+
+    def settle_csp_reports(self):
+        """Wait until violations already raised have reached the test.
+
+        A violation event is queued as a task and its report crosses the
+        binding asynchronously; two animation frames and a round trip cover both.
+        """
+        self.page.evaluate(
+            "() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))"
+        )
+
+    def test_every_major_flow_keeps_to_the_content_security_policy(self):
+        # The live view, a History chart, Copy link, the CSV and print, then
+        # an archived close compared with an older one, its History, Copy
+        # link, CSV and print. tearDown checks the same for every other test.
+        self.open_with_clipboard()
+        self.open_dashboard("?market=USDTRY&maturity=2028-01")
+        self.load_history(len(HISTORY_FIXTURE))
+        expect(self.page.locator("#history-chart")).to_be_visible()
+        self.copy_link(SHARE_LIVE_COPIED)
+        self.download_csv()
+        self.print_media()
+        self.page.emulate_media(media="screen")
+
+        day, older = "2026-10-05", ROLLED_DAY
+        self.open_day(day, "&market=USDTRY&maturity=2028-01")
+        self.compare_select().select_option(older)
+        self.assert_comparing(older, HISTORY_LABELS[day])
+        # An archived view lists the closes up to its own.
+        self.load_history(sum(close <= day for close in HISTORY_FIXTURE))
+        expect(self.page.locator("#history-chart")).to_be_visible()
+        self.copy_link(f"Copied a link to the close of {HISTORY_LABELS[day]}.")
+        self.download_csv()
+        self.print_media()
+        self.page.emulate_media(media="screen")
+        self.settle_csp_reports()
+        self.assertEqual(self.csp_violations, [])
+
+    def test_content_security_policy_blocks_injected_inline_script(self):
+        # Markup that got past escapeHtml or the snapshot schema: neither a
+        # <script> added to the DOM nor an inline event handler may run.
+        self.open_dashboard()
+        result = self.page.evaluate(
+            """() => new Promise((resolve) => {
+                const seen = [];
+                // Without a policy no violation comes, so stop waiting after 2 s.
+                const finish = () => resolve({
+                    seen,
+                    scriptRan: window.injectedScriptRan === true,
+                    handlerRan: window.injectedHandlerRan === true,
+                });
+                const timer = setTimeout(finish, 2000);
+                document.addEventListener('securitypolicyviolation', (event) => {
+                    seen.push(event.effectiveDirective);
+                    if (seen.length === 2) {
+                        clearTimeout(timer);
+                        finish();
+                    }
+                });
+                const script = document.createElement('script');
+                script.textContent = 'window.injectedScriptRan = true;';
+                document.head.append(script);
+                const row = document.querySelector('#contract-rows td');
+                row.insertAdjacentHTML(
+                    'beforeend',
+                    '<svg><rect onclick="window.injectedHandlerRan = true"></rect></svg>',
+                );
+                row.querySelector('rect').dispatchEvent(new MouseEvent('click'));
+            })"""
+        )
+        self.assertEqual(
+            result,
+            {"seen": ["script-src-elem", "script-src-attr"], "scriptRan": False, "handlerRan": False},
+        )
+        # The test's own listener saw both too; and Chromium logged each.
+        self.settle_csp_reports()
+        self.assertEqual(
+            [violation["directive"] for violation in self.csp_violations],
+            ["script-src-elem", "script-src-attr"],
+        )
+        self.assertTrue(all(violation["blocked"] == "inline" for violation in self.csp_violations))
+        self.assertEqual(len(self.errors), 2, self.errors)
+        self.assertTrue(all(CSP_CONSOLE_ERROR.search(error) for error in self.errors), self.errors)
+        self.csp_violations.clear()
+        self.errors.clear()
+
+
 # A real history/ directory, laid out like the data-history branch. CI points
 # this at a read-only checkout of that branch; without it the class is skipped.
 ARCHIVE_DIR = os.environ.get("VADE_ARCHIVE_DIR")
@@ -6526,7 +7713,9 @@ class RealArchiveSmokeTests(unittest.TestCase):
     def setUp(self):
         self.errors = []
         self.external_requests = []
+        self.csp_violations = []
         self.context = self.browser.new_context(viewport={"width": 1280, "height": 900})
+        watch_csp(self.context, self.csp_violations)
         self.page = self.context.new_page()
         self.page.clock.set_fixed_time(self.now)
         self.page.on(
@@ -6540,6 +7729,7 @@ class RealArchiveSmokeTests(unittest.TestCase):
     def tearDown(self):
         self.context.close()
         self.assertEqual(self.external_requests, [], "page requested a non-local URL")
+        self.assertEqual(self.csp_violations, [], "page broke its Content Security Policy")
 
     def block_external(self, route):
         self.external_requests.append(route.request.url)
@@ -6597,6 +7787,142 @@ class RealArchiveSmokeTests(unittest.TestCase):
                     )
         self.assertEqual(self.errors, [], "page logged errors")
 
+    def test_history_from_the_bundles_matches_each_close(self):
+        # For a contract of each market, History read from the market's
+        # bundle shows exactly what it shows from each close's own file.
+        newest = max(self.days)
+        for key in self.days[newest]["market_order"]:
+            contracts = self.days[newest]["markets"][key]["contracts"]
+            maturity = contracts[min(1, len(contracts) - 1)]["maturity_date"][:7]
+            views = {}
+            for bundled in (True, False):
+                with self.subTest(market=key, bundled=bundled):
+                    # A fresh page, with nothing cached.
+                    self.context.close()
+                    self.setUp()
+                    page = self.page
+                    requested = []
+                    page.on(
+                        "request",
+                        lambda request: "/data/history/" in request.url
+                        and "index.json" not in request.url
+                        and requested.append(urlsplit(request.url).path.rsplit("/", 2)[-2:]),
+                    )
+                    if not bundled:
+                        page.route(
+                            re.compile(r"/data/history/markets/"),
+                            lambda route: route.fulfill(status=404),
+                        )
+                    page.goto(f"{self.base_url}?market={key}&maturity={maturity}&period=annualized")
+                    load = page.locator("#history-load")
+                    expect(load).to_be_visible()
+                    load.click()
+                    status = page.locator("#inspector-history-status")
+                    expect(status).to_have_text(re.compile(r"^History loaded"))
+                    views[bundled] = {
+                        "status": status.text_content(),
+                        "note": page.locator("#inspector-history-note").text_content(),
+                        "coverage": page.locator("#inspector-history-coverage").text_content(),
+                        "rows": page.locator("#inspector-history-rows").inner_text(),
+                        "chart": page.evaluate("() => JSON.stringify(state.historyChart.rows)"),
+                    }
+                    if bundled:
+                        self.assertEqual(requested, [["markets", f"{key}.json"]])
+                        self.assertEqual(self.errors, [], "page logged errors")
+                    else:
+                        self.assertEqual(
+                            sorted(name for folder, name in requested if folder == "history"),
+                            sorted(f"{day}.json" for day in self.days),
+                        )
+            with self.subTest(market=key):
+                self.assertEqual(views[True], views[False])
+
+    @staticmethod
+    def spot_lag_minutes(market, generated_at):
+        """The page's rule for a spot taken after its futures' last trade:
+        whole minutes from the newest priced trade to an unmatched spot taken
+        more than 15 minutes after it, else None. A trade time equal to
+        generated_at is an older snapshot's stand-in, not a trade."""
+        spot = market.get("spot") or {}
+        if spot.get("aligned_to") is not None or not isinstance(spot.get("updated_at"), str):
+            return None
+        stand_in = datetime.fromisoformat(generated_at)
+        trades = [
+            time
+            for contract in market["contracts"]
+            if isinstance(contract.get("last"), (int, float))
+            and isinstance(contract.get("updated_at"), str)
+            for time in [datetime.fromisoformat(contract["updated_at"])]
+            if time != stand_in
+        ]
+        if not trades:
+            return None
+        spot_time, clock = datetime.fromisoformat(spot["updated_at"]), max(trades)
+        if spot_time - clock <= timedelta(minutes=15):
+            return None
+        return int(spot_time.timestamp() // 60) - int(clock.timestamp() // 60)
+
+    def test_history_marks_every_close_whose_spot_came_after_its_last_trade(self):
+        # Each History row is tagged exactly when its close's spot was taken
+        # more than 15 minutes after its futures' last trade, and its chart
+        # point agrees.
+        newest = max(self.days)
+        marked = 0
+        for key in self.days[newest]["market_order"]:
+            contracts = self.days[newest]["markets"][key]["contracts"]
+            contract = contracts[min(1, len(contracts) - 1)]
+            with self.subTest(market=key):
+                page = self.page
+                page.goto(
+                    f"{self.base_url}?market={key}&maturity={contract['maturity_date'][:7]}"
+                )
+                load = page.locator("#history-load")
+                expect(load).to_be_visible()
+                load.click()
+                expect(page.locator("#inspector-history-status")).to_have_text(
+                    re.compile(r"^History loaded")
+                )
+                marks = page.evaluate(
+                    """() => ({
+                        rows: Object.fromEntries(
+                            [...document.querySelectorAll('#inspector-history-rows tr[data-history-row]')]
+                            .map((row) => [row.dataset.historyRow,
+                                row.querySelector('.spot-late-tag')?.firstChild.textContent ?? null])),
+                        points: Object.fromEntries(
+                            [...document.querySelectorAll('#history-chart-svg .history-point')]
+                            .map((node) => [node.dataset.historyDay, node.dataset.spotLate ?? null])),
+                    })"""
+                )
+                for day, tag in marks["rows"].items():
+                    market = self.days[day]["markets"].get(key)
+                    listed = next(
+                        (c for c in (market or {}).get("contracts", [])
+                         if c["symbol"] == contract["symbol"]),
+                        None,
+                    )
+                    priced = listed is not None and isinstance(listed.get("last"), (int, float))
+                    minutes = (
+                        self.spot_lag_minutes(market, self.days[day]["generated_at"])
+                        if priced
+                        else None
+                    )
+                    if minutes is None:
+                        self.assertIsNone(tag, day)
+                    else:
+                        marked += 1
+                        hours, rest = divmod(minutes, 60)
+                        gap = f"{hours} h {rest} min" if hours and rest else (
+                            f"{hours} h" if hours else f"{rest} min"
+                        )
+                        self.assertRegex(tag, rf"^spot \S.* · {re.escape(gap)} later$", day)
+                    if day in marks["points"]:
+                        self.assertEqual(
+                            marks["points"][day], None if minutes is None else str(minutes), day
+                        )
+        self.assertEqual(self.errors, [], "page logged errors")
+        # Every close archived before the spot matching paired the futures
+        # with a later spot.
+        self.assertGreater(marked, 0)
 
 if __name__ == "__main__":
     unittest.main()

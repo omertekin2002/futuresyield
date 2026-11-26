@@ -17,6 +17,7 @@ jobs:
   tests:
     name: Updater tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -30,9 +31,12 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            constraints.txt
 
       - name: Install data dependencies
-        run: python -m pip install --requirement requirements.txt
+        run: python -m pip install --requirement requirements.txt --constraint constraints.txt
 
       - name: Run updater tests
         run: python -m unittest discover -s tests -v
@@ -40,6 +44,7 @@ jobs:
   static:
     name: Static checks
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -56,9 +61,24 @@ jobs:
       - name: Assemble static site
         run: bash scripts/build_site.sh
 
+      # A pinned release, checked against its published SHA-256. It runs
+      # shellcheck, preinstalled on the runner, over every run: script.
+      - name: Lint workflows with actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl --fail --silent --show-error --location --output "$RUNNER_TEMP/$archive" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/$archive"
+          echo "$ACTIONLINT_SHA256  $RUNNER_TEMP/$archive" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color
+
   smoke:
     name: Dashboard smoke test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -68,28 +88,24 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: requirements-dev.txt
+          cache-dependency-path: |
+            requirements-dev.txt
+            constraints.txt
 
       - name: Install smoke-test dependencies
-        run: python -m pip install --requirement requirements-dev.txt
+        run: python -m pip install --requirement requirements-dev.txt --constraint constraints.txt
 
       - name: Install headless Chromium
         run: python -m playwright install --with-deps chromium
 
-      # Read-only checkout of the data-history branch, as pages.yml makes. Only a
-      # missing branch is skipped (ls-remote exits 2); any other error fails.
+      # Read-only checkout of the data-history branch by the script pages.yml
+      # uses. Only a missing branch is skipped (ls-remote exits 2, and the
+      # script prints no directory); any other error fails.
       - name: Fetch archived end-of-day snapshots
         id: archive
         run: |
-          if git ls-remote --exit-code --heads origin data-history > /dev/null; then
-            git fetch --no-tags --depth=1 origin data-history
-            git worktree add --detach "$RUNNER_TEMP/data-history" FETCH_HEAD
-            echo "dir=$RUNNER_TEMP/data-history/history" >> "$GITHUB_OUTPUT"
-          else
-            status=$?
-            if [[ $status -ne 2 ]]; then exit "$status"; fi
-            echo "No data-history branch; skipping the real-archive check"
-          fi
+          dir=$(bash scripts/fetch_history.sh "$RUNNER_TEMP/data-history")
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
 
       - name: Run dashboard smoke test
         env:
@@ -99,6 +115,7 @@ jobs:
   archive:
     name: Archive audit
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -109,22 +126,16 @@ jobs:
           python-version: "3.12"
 
       - name: Install holiday calendar
-        run: python -m pip install "$(grep '^holidays==' requirements.txt)"
+        run: python -m pip install "$(grep '^holidays==' requirements.txt)" --constraint constraints.txt
 
-      # Read-only checkout of the data-history branch, as pages.yml makes. Only a
-      # missing branch is skipped (ls-remote exits 2); any other error fails.
+      # Read-only checkout of the data-history branch by the script pages.yml
+      # uses. Only a missing branch is skipped (ls-remote exits 2, and the
+      # script prints no directory); any other error fails.
       - name: Fetch archived end-of-day snapshots
         id: archive
         run: |
-          if git ls-remote --exit-code --heads origin data-history > /dev/null; then
-            git fetch --no-tags --depth=1 origin data-history
-            git worktree add --detach "$RUNNER_TEMP/data-history" FETCH_HEAD
-            echo "dir=$RUNNER_TEMP/data-history/history" >> "$GITHUB_OUTPUT"
-          else
-            status=$?
-            if [[ $status -ne 2 ]]; then exit "$status"; fi
-            echo "No data-history branch; skipping the real-archive check"
-          fi
+          dir=$(bash scripts/fetch_history.sh "$RUNNER_TEMP/data-history")
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
 
       - name: Audit the archive against the current schema and end-of-day rule
         if: steps.archive.outputs.dir != ''

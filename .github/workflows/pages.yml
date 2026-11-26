@@ -11,14 +11,21 @@ permissions:
   contents: read
 
 # Concurrency is set per job, not per workflow: a workflow-level group would
-# cancel the whole run, including an archive push already in progress. Build
-# and deploy use separate groups so an older run's deploy cannot cancel a newer
-# run's build; a newer build or deploy still cancels an older one.
+# cancel the whole run, including an archive push already in progress. Refresh,
+# build and deploy use separate groups so an older run's job cannot cancel a
+# newer run's later job; a newer refresh, build or deploy still cancels an
+# older one. The archive never cancels: its group waits instead.
+#
+# refresh runs the tests and the updater and uploads the snapshot. build (site
+# and Pages artifact) and archive (data-history) each need only refresh, so a
+# failed history fetch or Pages step never costs the day's close, and a failed
+# test or updater run stops both. deploy needs build.
 jobs:
-  build:
+  refresh:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     concurrency:
-      group: github-pages-build
+      group: github-pages-refresh
       cancel-in-progress: true
     steps:
       - name: Check out repository
@@ -29,9 +36,12 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            constraints.txt
 
       - name: Install data dependencies
-        run: python -m pip install --requirement requirements.txt
+        run: python -m pip install --requirement requirements.txt --constraint constraints.txt
 
       - name: Run updater tests
         run: python -m unittest discover -s tests -v
@@ -39,7 +49,7 @@ jobs:
       - name: Refresh borsapy market snapshot
         run: python scripts/update_data.py
 
-      - name: Upload snapshot for the history archive
+      - name: Upload snapshot for the site and the history archive
         uses: actions/upload-artifact@v7
         with:
           name: market-snapshot
@@ -47,16 +57,29 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-      # Optional: without a data-history branch the site ships with no
-      # history. Snapshots this run archives appear in the next deploy.
+  build:
+    runs-on: ubuntu-latest
+    needs: refresh
+    timeout-minutes: 10
+    concurrency:
+      group: github-pages-build
+      cancel-in-progress: true
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Download refreshed snapshot
+        uses: actions/download-artifact@v8
+        with:
+          name: market-snapshot
+          path: data
+
+      # Without a data-history branch the site ships with no history, and
+      # snapshots this run archives appear in the next deploy. Any other
+      # failure to read origin fails the run, so a site with its history
+      # missing is never deployed.
       - name: Fetch archived end-of-day snapshots
-        run: |
-          if git ls-remote --exit-code --heads origin data-history > /dev/null; then
-            git fetch --no-tags --depth=1 origin data-history
-            git worktree add --detach "$RUNNER_TEMP/data-history" FETCH_HEAD
-          else
-            echo "No data-history branch; building without history"
-          fi
+        run: bash scripts/fetch_history.sh "$RUNNER_TEMP/data-history"
 
       - name: Prepare static site
         env:
@@ -64,10 +87,10 @@ jobs:
         run: bash scripts/build_site.sh
 
       - name: Configure GitHub Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       - name: Upload GitHub Pages artifact
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@v5
         with:
           path: _site
 
@@ -77,6 +100,7 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     needs: build
+    timeout-minutes: 15
     concurrency:
       group: github-pages-deploy
       cancel-in-progress: true
@@ -86,13 +110,15 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
 
   # Keeps one end-of-day snapshot per trading day on the data-history branch.
-  # Independent of deploy, so a failed archive never blocks or undoes it.
+  # Independent of build and deploy, so a failed archive never blocks or undoes
+  # the deploy, and a failed history fetch or Pages step never skips the archive.
   archive:
     runs-on: ubuntu-latest
-    needs: build
+    needs: refresh
+    timeout-minutes: 10
     concurrency:
       group: data-history
       cancel-in-progress: false
@@ -108,7 +134,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install holiday calendar
-        run: python -m pip install "$(grep '^holidays==' requirements.txt)"
+        run: python -m pip install "$(grep '^holidays==' requirements.txt)" --constraint constraints.txt
 
       - name: Download snapshot
         uses: actions/download-artifact@v8
