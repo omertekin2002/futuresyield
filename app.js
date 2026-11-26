@@ -743,7 +743,7 @@ function renderMarketIdentity(market) {
   const closeOf = state.renderedDate ? ` · close of ${formatDay(state.renderedDate)}` : "";
 
   document.body.dataset.market = market.key;
-  document.title = `Vade — ${market.pair} Futures Curve${closeOf}`;
+  document.title = `Vade | ${market.pair} Futures Curve${closeOf}`;
   elements.metaDescription.content =
     `The latest ${market.pair} spot reference and VİOP futures curve, ` +
     "refreshed hourly during VİOP trading hours on weekdays.";
