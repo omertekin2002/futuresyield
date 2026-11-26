@@ -607,8 +607,10 @@ function projectedSpot(spot, dailyFactor, days) {
     : null;
 }
 
-// Each recounted market's futures clock as its snapshot was published, before
-// any expired contract was dropped (see recountSnapshot).
+// Each market's futures clock as its snapshot was published: read when the
+// snapshot is loaded (validateSnapshot), where its generated_at is known, and
+// kept by a recounted copy even after the contract that held it has expired
+// (see recountSnapshot).
 const publishedFuturesClocks = new WeakMap();
 
 // A snapshot's days left, and everything built on them, are fixed for its
@@ -1159,16 +1161,19 @@ const SPOT_BAR_MS = 15 * 60 * 1000;
 
 // The futures' last trade, as the updater's futures_clock reads it: the
 // newest trade time among the market's priced contracts, or NaN without one.
-function futuresClock(contracts) {
+// A time equal to the snapshot's generated_at is the stand-in older snapshots
+// wrote for a quote without one (see lastTrades), not a trade.
+function futuresClock(contracts, generatedAt) {
+  const standIn = Date.parse(generatedAt);
   const times = (contracts ?? [])
     .filter((contract) => hasNumber(contract.last) && typeof contract.updated_at === "string")
     .map((contract) => Date.parse(contract.updated_at))
-    .filter((time) => !Number.isNaN(time));
+    .filter((time) => !Number.isNaN(time) && time !== standIn);
   return times.length ? Math.max(...times) : NaN;
 }
 
-// A market's futures clock: the published one for a recounted copy, otherwise
-// read from its contracts.
+// A market's futures clock: the one recorded when its snapshot was loaded,
+// otherwise read from its contracts.
 function marketFuturesClock(market) {
   return publishedFuturesClocks.has(market)
     ? publishedFuturesClocks.get(market)
@@ -3542,6 +3547,11 @@ function validateSnapshot(data) {
       )
     );
   if (!marketsAreValid) throw new Error("Invalid multi-market snapshot");
+  Object.values(data.markets).forEach((market) => {
+    if (Array.isArray(market?.contracts)) {
+      publishedFuturesClocks.set(market, futuresClock(market.contracts, data.generated_at));
+    }
+  });
   return data;
 }
 

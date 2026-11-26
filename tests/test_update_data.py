@@ -99,6 +99,8 @@ class YieldCalculationTests(unittest.TestCase):
         self.assertIsNone(compounded_yield_percent(factor, 365))
         self.assertAlmostEqual(compounded_yield_percent(factor, 30), (8.0**30 - 1) * 100)
         self.assertAlmostEqual(compounded_yield_percent(factor, 1), 700.0)
+        # Just below that, factor ** 365 is finite but times 100 is not.
+        self.assertIsNone(compounded_yield_percent(daily_yield_factor(6.95 * 47.0, 47.0, 1), 365))
 
     def test_converts_ounce_gold_and_usdtry_to_try_per_gram(self):
         expected = 4_027.445 * 47.18152 / 31.1034768

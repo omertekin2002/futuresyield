@@ -204,9 +204,11 @@ def compounded_yield_percent(factor: float | None, period_days: int) -> float | 
     if factor is None or factor <= 0 or period_days <= 0:
         return None
     try:
-        return (factor**period_days - 1) * 100
+        percent = (factor**period_days - 1) * 100
     except OverflowError:
         return None
+    # Just under the overflow, the multiplication by 100 can still reach inf.
+    return percent if math.isfinite(percent) else None
 
 
 def projected_spot(

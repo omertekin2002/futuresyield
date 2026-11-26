@@ -2740,19 +2740,37 @@ class DashboardSmokeTests(unittest.TestCase):
         self.page.locator('.market-options [data-market="EURTRY"]').click()
         expect(note).to_be_hidden()
 
+    def test_a_stand_in_trade_time_does_not_set_the_futures_clock(self):
+        # Snapshots written before updated_at could be null filled a missing
+        # trade time with generated_at, here 23:30, after the 23:15 spot. That
+        # is no trade, so the spot still came 5 h 6 min after the last one.
+        day = "2026-10-05"
+        close = self.late_spot_close(day)
+        contract = next(
+            c for c in close["markets"]["USDTRY"]["contracts"] if c.get("last") is not None
+        )
+        contract["updated_at"] = close["generated_at"]
+        self.serve_close(day, close)
+        self.open_day(day, "&market=USDTRY")
+        expect(self.page.locator("#spot-note")).to_have_text(
+            "Spot at 23:15 TRT, 5 h 6 min after the futures' last trade at 18:09. "
+            "Premiums and yields include the spot's move in between."
+        )
+
     def test_live_spot_the_updater_could_not_match_says_how_long(self):
         live = copy.deepcopy(self.snapshot)
-        # The futures last traded at 14:06:12; no bar held that trade.
+        # The futures last traded at 13:49; the fixture's 14:06:12 times are
+        # generated_at stand-ins, not trades. No bar held that trade.
         live["markets"]["USDTRY"]["spot"]["updated_at"] = "2026-10-07T16:00:00+03:00"
         self.serve_snapshot(re.compile(r"/data/market\.json"), live)
         self.open_dashboard("?market=USDTRY")
         expect(self.page.locator("#spot-note")).to_have_text(
-            "Spot at 16:00 TRT, 1 h 54 min after the futures' last trade at 14:06. "
+            "Spot at 16:00 TRT, 2 h 11 min after the futures' last trade at 13:49. "
             "Premiums and yields include the spot's move in between."
         )
         _, _, table = self.download_csv()
         for row in self.csv_rows(table):
-            self.assertEqual(row["spot_after_futures_minutes"], "114")
+            self.assertEqual(row["spot_after_futures_minutes"], "131")
 
     def test_spot_within_a_bar_or_without_trade_times_is_not_flagged(self):
         day = "2026-10-05"
@@ -7820,18 +7838,22 @@ class RealArchiveSmokeTests(unittest.TestCase):
                 self.assertEqual(views[True], views[False])
 
     @staticmethod
-    def spot_lag_minutes(market):
+    def spot_lag_minutes(market, generated_at):
         """The page's rule for a spot taken after its futures' last trade:
         whole minutes from the newest priced trade to an unmatched spot taken
-        more than 15 minutes after it, else None."""
+        more than 15 minutes after it, else None. A trade time equal to
+        generated_at is an older snapshot's stand-in, not a trade."""
         spot = market.get("spot") or {}
         if spot.get("aligned_to") is not None or not isinstance(spot.get("updated_at"), str):
             return None
+        stand_in = datetime.fromisoformat(generated_at)
         trades = [
-            datetime.fromisoformat(contract["updated_at"])
+            time
             for contract in market["contracts"]
             if isinstance(contract.get("last"), (int, float))
             and isinstance(contract.get("updated_at"), str)
+            for time in [datetime.fromisoformat(contract["updated_at"])]
+            if time != stand_in
         ]
         if not trades:
             return None
@@ -7879,7 +7901,11 @@ class RealArchiveSmokeTests(unittest.TestCase):
                         None,
                     )
                     priced = listed is not None and isinstance(listed.get("last"), (int, float))
-                    minutes = self.spot_lag_minutes(market) if priced else None
+                    minutes = (
+                        self.spot_lag_minutes(market, self.days[day]["generated_at"])
+                        if priced
+                        else None
+                    )
                     if minutes is None:
                         self.assertIsNone(tag, day)
                     else:
