@@ -3643,20 +3643,21 @@ function shareUrl() {
   return url.href;
 }
 
-// Label the link for the current view. The button waits while the view is
-// still changing, and a copy made for another view is cleared.
+// Label the link for the current view. The button shows only on an archived
+// close, whose link is the one worth copying; the live view's address is the
+// browser's own. It waits while the view is still changing, and a copy made
+// for another view is cleared.
 function renderShareLink() {
   const date = state.renderedDate;
   const pending = shareLinkPending();
-  elements.shareLink.hidden = !state.snapshot;
+  elements.shareLink.hidden = !state.snapshot || !date;
   elements.shareButton.setAttribute("aria-disabled", String(pending));
-  elements.shareButton.textContent = date
-    ? `Copy link to the close of ${formatDay(date)}`
-    : "Copy live link";
-  elements.shareNote.hidden = !date;
-  elements.shareNote.textContent = date
-    ? `This link always shows the stored values of the close of ${formatDay(date)}.`
-    : "";
+  // The View menu beside it names the close, so the button stays short; the
+  // note, which the button points to, says so for assistive technology.
+  if (date) {
+    elements.shareNote.textContent =
+      `This link always shows the stored values of the close of ${formatDay(date)}.`;
+  }
   if (state.sharedHref !== null && (pending || shareUrl() !== state.sharedHref)) {
     state.sharedHref = null;
     elements.shareStatus.textContent = "";
@@ -3665,7 +3666,7 @@ function renderShareLink() {
   }
 }
 
-// Copy the link to the view on screen without changing the view, the address
+// Copy the link to the archived close on screen without changing the view, the address
 // or the browser's history. Without the Clipboard API, or when it refuses,
 // the link is shown selected in a field to copy by hand. A copy that settles
 // after the view changed, or after a later copy, says nothing, so no message
@@ -3693,9 +3694,7 @@ async function copyShareLink() {
     return;
   }
   if (!current()) return;
-  elements.shareStatus.textContent = date
-    ? `Copied a link to the close of ${formatDay(date)}.`
-    : "Copied a live link. It will show newer data when opened later.";
+  elements.shareStatus.textContent = `Copied a link to the close of ${formatDay(date)}.`;
 }
 
 function hideNotice() {

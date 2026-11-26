@@ -75,57 +75,75 @@
       </div>
       <header class="site-header">
         <a class="wordmark" href="./" aria-label="Vade home">VADE</a>
-        <div class="service-band">
-          <div class="header-actions">
-            <div class="share-link" id="share-link" hidden>
-              <button
-                class="share-button"
-                id="share-button"
-                type="button"
-                aria-describedby="share-note"
-              >
-                Copy live link
-              </button>
-              <p class="share-note" id="share-note" hidden></p>
-              <p class="share-status" id="share-status" role="status"></p>
-              <div class="share-fallback" id="share-fallback" hidden>
-                <label for="share-field">Copy this link by hand</label>
-                <input id="share-field" type="text" readonly spellcheck="false" />
-              </div>
-            </div>
-            <div class="history-control" id="history-control" hidden>
-              <label for="history-select">View</label>
-              <select id="history-select">
-                <option value="">Live</option>
-              </select>
-            </div>
-          </div>
-          <div class="service-tools">
-            <div class="history-coverage" id="history-coverage" hidden></div>
-            <span
-              class="data-state"
-              id="data-state"
-              role="status"
-              aria-live="polite"
-            >
-              <span class="status-dot" aria-hidden="true"></span>
-              Loading market data
-            </span>
-          </div>
-        </div>
         <button class="refresh-button" id="refresh-button" type="button">
           <span aria-hidden="true">↻</span> Refresh
         </button>
       </header>
+      <!-- The view on screen, in one strip under the top bar: which close,
+           its link, a comparison, the archive's coverage and the data
+           status. -->
+      <div class="view-panel" id="view-panel">
+        <div class="view-panel-controls">
+          <div class="history-control" id="history-control" hidden>
+            <label for="history-select">View</label>
+            <span class="select-box">
+              <select id="history-select">
+                <option value="">Live</option>
+              </select>
+            </span>
+          </div>
+          <div class="compare-control" id="compare-control" hidden>
+            <label for="compare-select">Compare with</label>
+            <span class="select-box">
+              <select id="compare-select" aria-describedby="compare-hint">
+                <option value="">None</option>
+              </select>
+            </span>
+            <small class="sr-only" id="compare-hint">
+              Overlays an earlier close on both curves.
+            </small>
+          </div>
+        </div>
+        <div class="service-tools">
+          <div class="history-coverage" id="history-coverage" hidden></div>
+          <span
+            class="data-state"
+            id="data-state"
+            role="status"
+            aria-live="polite"
+          >
+            <span class="status-dot" aria-hidden="true"></span>
+            Loading market data
+          </span>
+        </div>
+      </div>
       <div class="history-banner" id="history-banner" hidden>
         <p>
           <strong>Past close</strong> You are viewing the end-of-day snapshot
           of <span id="history-banner-date">—</span>. These are not live
           prices.
         </p>
-        <button class="live-button" id="live-button" type="button">
-          Back to live
-        </button>
+        <div class="history-banner-actions">
+          <div class="share-link" id="share-link" hidden>
+            <button
+              class="share-button"
+              id="share-button"
+              type="button"
+              aria-describedby="share-note"
+            >
+              Copy link
+            </button>
+            <p class="share-note sr-only" id="share-note"></p>
+            <p class="share-status" id="share-status" role="status"></p>
+            <div class="share-fallback" id="share-fallback" hidden>
+              <label for="share-field">Copy this link by hand</label>
+              <input id="share-field" type="text" readonly spellcheck="false" />
+            </div>
+          </div>
+          <button class="live-button" id="live-button" type="button">
+            Back to live
+          </button>
+        </div>
       </div>
       <p class="history-notice" id="history-notice" role="status" hidden></p>
       <p class="days-note" id="days-note" role="status" hidden></p>
@@ -198,16 +216,6 @@
             </div>
           </div>
           <div class="catalog-main">
-            <div class="compare-control" id="compare-control" hidden>
-              <label for="compare-select">Compare with</label>
-              <select id="compare-select" aria-describedby="compare-hint">
-                <option value="">None</option>
-              </select>
-              <small id="compare-hint">
-                Overlays an earlier close on both curves.
-              </small>
-            </div>
-
             <div class="selection-line" id="selection-line" hidden>
               <p>
                 <strong>Selected:</strong>

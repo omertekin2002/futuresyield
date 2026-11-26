@@ -185,9 +185,7 @@ PRINT_VISIBLE = (
     "#carry-footnote", "#contracts .table-footnote", "footer .disclaimer",
     '.market-options [aria-pressed="true"]',
 )
-# The Copy link control: what it says on a live view, with and without
-# archived closes to point to, and after copying.
-SHARE_LIVE_COPIED = "Copied a live link. It will show newer data when opened later."
+# The Copy link control: what it says when the clipboard refuses.
 SHARE_FALLBACK_STATUS = (
     "The link could not be copied automatically. It is selected below; copy it from there."
 )
@@ -4398,7 +4396,7 @@ class DashboardSmokeTests(unittest.TestCase):
                     coverage.locator("summary").click()
                     expect(coverage.locator("ul")).to_be_visible()
                     self.assert_no_sideways_scroll()
-                    band = self.page.locator(".service-band").bounding_box()
+                    band = self.page.locator("#view-panel").bounding_box()
                     box = coverage.bounding_box()
                     self.assertLessEqual(box["x"] + box["width"], band["x"] + band["width"] + 0.5)
                     # The open list stays on screen, wherever the line sits.
@@ -4887,18 +4885,14 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assertEqual(self.url_params(), {"market": "EURTRY"})
         self.take_index_errors(1)
 
-    def test_copy_link_while_a_link_waits_copies_the_live_view(self):
+    def test_copy_link_is_hidden_while_a_link_waits_on_the_live_view(self):
         day, compare = self.PENDING_DAY, self.PENDING_COMPARE
         self.open_with_unreadable_index(
             f"?date={day}&compare={compare}&market=USDTRY&maturity=2028-01",
-            reopen=True, permissions=CLIPBOARD_PERMISSIONS,
+            reopen=True,
         )
         self.assert_waiting_live(date=day, compare=compare)
         self.assert_share_live()
-        copied = self.copy_link(SHARE_LIVE_COPIED)
-        self.assertEqual(self.query(copied), {"market": "USDTRY", "maturity": "2028-01"})
-        # Copying leaves the waiting dates in the address.
-        self.assert_waiting_live(date=day, compare=compare)
         self.take_index_errors(1)
 
     @unittest.skipIf(Axe is None, "axe-playwright-python is not installed")
@@ -6861,54 +6855,35 @@ class DashboardSmokeTests(unittest.TestCase):
         return dict(parse_qsl(parts.query))
 
     def assert_share_live(self):
-        expect(self.share_button()).to_have_text("Copy live link")
-        expect(self.share_button()).to_have_attribute("aria-disabled", "false")
-        expect(self.page.locator("#share-note")).to_be_hidden()
+        """The live view offers no link to copy: its address is the browser's."""
+        expect(self.page.locator("#share-link")).to_be_hidden()
 
     def assert_share_close(self, day):
         label = HISTORY_LABELS[day]
-        expect(self.share_button()).to_have_text(f"Copy link to the close of {label}")
+        expect(self.share_button()).to_be_visible()
+        expect(self.share_button()).to_have_text("Copy link")
         expect(self.share_button()).to_have_attribute("aria-disabled", "false")
-        expect(self.page.locator("#share-note")).to_have_text(
+        # The button's description names the close for assistive technology.
+        expect(self.share_button()).to_have_accessible_description(
             f"This link always shows the stored values of the close of {label}."
         )
 
-    def test_copy_live_link_keeps_the_view_but_never_a_date(self):
-        self.open_with_clipboard()
+    def test_copy_link_is_hidden_on_the_live_view(self):
         self.open_dashboard("?market=USDTRY&maturity=2028-01&period=annualized#dashboard-content")
         self.assert_selected("Jan 2028")
-        self.assert_share_live()
-        url, entries = self.page.url, self.entries()
-
-        copied = self.copy_link(SHARE_LIVE_COPIED)
-        self.assertEqual(
-            self.query(copied),
-            {"market": "USDTRY", "maturity": "2028-01", "period": "annualized"},
-        )
-        self.assertTrue(copied.startswith(self.base_url))
-        # Copying changes nothing: not the view, the address or the history.
-        self.assertEqual(self.page.url, url)
-        self.assertEqual(self.entries(), entries)
-        self.assert_selected("Jan 2028")
         self.assert_live()
-
-        # The next copy follows the market and comparison on screen.
+        self.assert_share_live()
+        # Not for another market or a comparison either.
         self.page.locator('.market-options [data-market="EURTRY"]').click()
         self.assert_market("EURTRY")
-        expect(self.page.locator("#share-status")).to_have_text("")
         self.choose_compare("2026-09-30")
-        copied = self.copy_link(SHARE_LIVE_COPIED)
-        self.assertEqual(
-            self.query(copied),
-            {"market": "EURTRY", "compare": "2026-09-30", "period": "annualized"},
-        )
-
-        # The copied link opens the same live view in a fresh page.
-        self.page.goto(copied)
+        self.assert_share_live()
+        # Choosing a close in the View menu brings it; back to live hides it.
+        self.page.locator("#history-select").select_option("2026-10-06")
+        self.assert_historical("2026-10-06")
+        self.assert_share_close("2026-10-06")
+        self.page.locator("#history-select").select_option("")
         self.assert_live()
-        self.assert_market("EURTRY")
-        self.assert_comparing("2026-09-30")
-        self.assert_period("annualized")
         self.assert_share_live()
 
     def test_copy_link_to_a_close_carries_its_date_and_view(self):
@@ -6936,19 +6911,18 @@ class DashboardSmokeTests(unittest.TestCase):
         self.assert_market("USDTRY", self.history[day])
         self.assert_share_close(day)
 
-        # Back to live, the button and its note say the link will change.
+        # Back to live, the button goes.
         self.page.locator("#live-button").click()
         self.assert_live()
         self.assert_share_live()
-        copied = self.copy_link(SHARE_LIVE_COPIED)
-        self.assertNotIn("date", self.query(copied))
 
     def test_copy_link_waits_for_a_move_still_loading(self):
         day = "2026-10-05"
         held = []
         self.open_with_clipboard()
         self.page.route(re.compile(rf"/data/history/{day}\.json$"), lambda route: held.append(route))
-        self.open_dashboard("?market=USDTRY&period=monthly")
+        # From another close, so the button is on screen while the move loads.
+        self.open_day("2026-10-06", "&market=USDTRY&period=monthly")
         self.page.evaluate("() => navigator.clipboard.writeText('untouched')")
         entries = self.entries()
 
@@ -7028,15 +7002,12 @@ class DashboardSmokeTests(unittest.TestCase):
                 expect(self.page.locator("#share-status")).to_have_text("")
                 self.page.evaluate("() => { window.__settleCopy = null; }")
 
-    def test_copy_link_without_history_copies_the_live_link(self):
-        self.open_with_clipboard()
+    def test_copy_link_is_hidden_without_history(self):
         self.open_dashboard("?market=EURTRY&period=monthly", base_url=self.no_history_url)
+        self.assert_live()
         self.assert_share_live()
-        copied = self.copy_link(SHARE_LIVE_COPIED)
-        self.assertEqual(self.query(copied), {"market": "EURTRY", "period": "monthly"})
-        self.assertTrue(copied.startswith(self.no_history_url))
 
-    def test_copy_live_link_stays_available_after_a_later_history_index_read(self):
+    def test_copy_link_stays_hidden_on_live_after_a_later_history_index_read(self):
         control = self.route_history_index()
         control["mode"] = "500"
         self.page.clock.install(time=FIXTURE_DAY_TIME)
@@ -7050,19 +7021,21 @@ class DashboardSmokeTests(unittest.TestCase):
         self.take_index_errors(1)
 
     def test_copy_link_is_keyboard_operable(self):
+        day = "2026-10-06"
         self.open_with_clipboard()
-        self.open_dashboard("?market=USDTRY")
+        self.open_day(day, "&market=USDTRY")
         self.tab_to("#share-button")
         self.page.keyboard.press("Enter")
-        expect(self.page.locator("#share-status")).to_have_text(SHARE_LIVE_COPIED)
-        self.assertNotIn("date", self.query(
+        expect(self.page.locator("#share-status")).to_have_text(
+            f"Copied a link to the close of {HISTORY_LABELS[day]}."
+        )
+        self.assertEqual(self.query(
             self.page.evaluate("() => navigator.clipboard.readText()")
-        ))
+        )["date"], day)
 
     @unittest.skipIf(Axe is None, "axe-playwright-python is not installed")
     def test_accessibility_and_layout_of_copy_link(self):
         views = (
-            ("live", "?market=USDTRY"),
             ("archived", "?date=2026-10-06&market=XAUTRY"),
             ("comparison", "?date=2026-10-06&compare=2026-09-30&market=USDTRY"
                            "&maturity=2026-12&period=annualized"),
@@ -7085,7 +7058,7 @@ class DashboardSmokeTests(unittest.TestCase):
         self.page.add_init_script(
             "navigator.clipboard.writeText = () => Promise.reject(new Error('Denied'));"
         )
-        self.page.goto(self.base_url + views[2][1])
+        self.page.goto(self.base_url + views[1][1])
         expect(self.share_button()).to_have_attribute("aria-disabled", "false")
         self.share_button().click()
         expect(self.page.locator("#share-fallback")).to_be_visible()
@@ -7582,14 +7555,13 @@ class DashboardSmokeTests(unittest.TestCase):
         )
 
     def test_every_major_flow_keeps_to_the_content_security_policy(self):
-        # The live view, a History chart, Copy link, the CSV and print, then
-        # an archived close compared with an older one, its History, Copy
-        # link, CSV and print. tearDown checks the same for every other test.
+        # The live view, a History chart, the CSV and print, then an archived
+        # close compared with an older one, its History, Copy link, CSV and
+        # print. tearDown checks the same for every other test.
         self.open_with_clipboard()
         self.open_dashboard("?market=USDTRY&maturity=2028-01")
         self.load_history(len(HISTORY_FIXTURE))
         expect(self.page.locator("#history-chart")).to_be_visible()
-        self.copy_link(SHARE_LIVE_COPIED)
         self.download_csv()
         self.print_media()
         self.page.emulate_media(media="screen")

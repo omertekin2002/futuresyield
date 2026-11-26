@@ -26,9 +26,8 @@ redeployed by GitHub Actions every hour during VİOP trading hours on weekdays,
 - One exact contract's archived closes as a **History** table in the inspector,
   loaded on demand, with every missing value and capture gap shown as such,
   and a small chart of its yield on those closes whose points open their day
-- A **Copy link** button that says whether the link it copies will change:
-  a live link that opens the newest data, or a link pinned to the archived
-  close on screen
+- A **Copy link** button on an archived close, whose link always opens that
+  close
 - A **Download CSV** of the contract board, with the compared close when one is on
 - A **Print** layout, from the button beside it or the browser's own print
   command: a header names the market, the live snapshot time or archived
@@ -318,12 +317,13 @@ end-of-day snapshot per VİOP trading day on a separate `data-history` branch.
 
 ### Browsing past closes
 
-When the site has archived days, a **View** menu appears next to the data
-status. It lists **Live** and every archived close, newest first. Choosing a
-close renders the whole dashboard (spot, curves, yields, carry and the contract
-board) from that day's snapshot, for every market.
+When the site has archived days, a **View** menu appears in the strip under
+the top bar, beside **Compare with** and the data status. It lists **Live** and
+every archived close, newest first. Choosing a close renders the whole
+dashboard (spot, curves, yields, carry and the contract board) from that day's
+snapshot, for every market.
 
-- **Coverage.** Beside the menu, a line says how deep the archive is, for
+- **Coverage.** Beside the menus, a line says how deep the archive is, for
   example "19 closes since 26 Oct 2026 · 1 weekday not captured". It counts
   the closes the history index lists and the weekdays strictly between the
   earliest and latest of them that have no close; weekdays after the latest
@@ -393,8 +393,8 @@ board) from that day's snapshot, for every market.
 
 ### Comparing two closes
 
-A **Compare with** menu above the curves overlays an earlier archived close on
-both the price and the yield curve, for every market. It offers **None** (the
+A **Compare with** menu in the strip under the top bar overlays an earlier
+archived close on both the price and the yield curve, for every market. It offers **None** (the
 default), quick picks for **1 week**, **1 month** and **3 months** ago, and
 every archived close that is earlier than the day on screen. The live view
 counts as its market date.
@@ -454,17 +454,14 @@ be overwritten.
 
 ### Sharing a view
 
-The **Copy link** button beside the data status copies the address of the view
-on screen.
+The **Copy link** button sits in the purple past-close banner, beside **Back
+to live**, so it appears only on an archived close. It copies the address of
+the close on screen: `?date=` for that close along with the market,
+comparison, maturity and yield period, so it always opens the same stored
+end-of-day values, since archived closes are written once and never change. On
+the live view there is no button; the browser's own address opens the newest
+snapshot, so its prices, days left and yields will differ from what you saw.
 
-- **Live link.** On the live view the button reads **Copy live link**. The
-  link carries the market, comparison, maturity and yield period, but never a
-  `?date=`, so it opens whatever the newest snapshot is when it is followed:
-  prices, days left and yields will differ from what you saw.
-- **Link to a close.** On an archived close the button reads **Copy link to
-  the close of …**. The link adds `?date=` for that close, so it always opens
-  the same stored end-of-day values, since archived closes are written once
-  and never change.
 - **Nothing else changes.** Copying leaves the view, the address bar and the
   browser history as they are. While another view or a comparison is still
   loading, the button waits, so it never copies an address the page has not
