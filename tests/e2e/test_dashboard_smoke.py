@@ -3524,6 +3524,21 @@ class DashboardSmokeTests(unittest.TestCase):
     def history_header(self):
         return self.page.locator("#inspector-history-head th").all_text_contents()
 
+    def wait_for_scroll_to_settle(self):
+        """Wait until the page's scroll position holds still for a few frames."""
+        self.page.evaluate(
+            """() => new Promise((done) => {
+                let last = null, still = 0;
+                const tick = () => {
+                    const now = `${scrollX},${scrollY}`;
+                    still = now === last ? still + 1 : 0;
+                    last = now;
+                    if (still >= 5) done(); else requestAnimationFrame(tick);
+                };
+                requestAnimationFrame(tick);
+            })"""
+        )
+
     def load_history(self, closes):
         button = self.page.locator("#history-load")
         expect(button).to_be_visible()
@@ -5446,6 +5461,13 @@ class DashboardSmokeTests(unittest.TestCase):
                     )
                 self.open_dashboard("?market=USDTRY&maturity=2026-12")
                 self.load_history(len(HISTORY_FIXTURE))
+                # Hit-test and tap only once the page has stopped scrolling and
+                # the chart is on screen: elementFromPoint finds nothing off
+                # screen, and a smooth scroll still running moves the points
+                # between measuring and tapping.
+                self.wait_for_scroll_to_settle()
+                self.page.locator("#history-chart-svg").scroll_into_view_if_needed()
+                self.wait_for_scroll_to_settle()
                 hits = self.page.evaluate(
                     """() => [...document.querySelectorAll('#history-chart-svg .history-point')]
                         .map((node) => {

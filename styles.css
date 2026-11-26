@@ -102,14 +102,28 @@ button:hover {
   /* The frame's top border adds black above the header but none below it,
      so the bottom padding is larger by the border's width, to centre the
      header's contents in the whole black band. */
-  padding: 12px 16px 20px;
+  padding: 8px 16px 16px;
   background: var(--ink);
+  /* At fractional zoom the frame's border and the header can round to
+     different device pixels and leave a hairline of page between them;
+     this black overlap reaching 1px past the top and sides covers it,
+     and nothing below. */
+  box-shadow: 0 -1px 0 1px var(--ink);
   color: var(--paper);
 }
 .wordmark {
+  padding-inline-end: 20px;
+  border-inline-end: 1px solid var(--paper);
   color: var(--paper);
   font: 900 36px/1 var(--display);
   text-decoration: none;
+}
+/* What the site is, beside the wordmark and set off from it by its rule:
+   small serif type kept to a narrow column, so it wraps beside VADE. */
+.tagline {
+  max-width: 190px;
+  margin: 0;
+  font: 14px/1.25 var(--serif);
 }
 .site-header :is(a, button):focus-visible {
   outline: 3px solid var(--sky);
@@ -1550,7 +1564,8 @@ footer p {
   }
   .site-header {
     gap: 16px;
-    padding-bottom: 16px;
+    padding-top: 8px;
+    padding-bottom: 12px;
   }
   .catalog-layout {
     grid-template-columns: 180px minmax(0, 1fr);
@@ -1594,11 +1609,21 @@ footer p {
     display: grid;
     grid-template-columns: max-content 1fr;
     gap: 12px;
-    padding: 12px 12px 16px;
+    padding: 8px 12px 12px;
   }
   .refresh-button {
     grid-area: 1 / 2;
     padding: 8px;
+  }
+  /* On a phone the tagline takes its own line under the wordmark, so the
+     rule between them goes. */
+  .wordmark {
+    padding-inline-end: 0;
+    border-inline-end: 0;
+  }
+  .tagline {
+    grid-column: 1 / -1;
+    max-width: none;
   }
   .view-panel select {
     min-height: 36px;
