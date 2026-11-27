@@ -3,8 +3,14 @@ name: CI
 on:
   pull_request:
   push:
-    branches-ignore: [main]
   workflow_dispatch:
+  # Once a weekday after the end-of-day archive: pages.yml's 23:20 TRT
+  # (20:20 UTC) run appends the day's close to data-history, and this run
+  # checks the real archive with the smoke and audit jobs. 21:50 UTC is
+  # 00:50 TRT, Tuesday to Saturday. GitHub may start it late; any time before
+  # the next session still catches a close the page can't open.
+  schedule:
+    - cron: "50 21 * * 1-5"
 
 permissions:
   contents: read
