@@ -1,7 +1,8 @@
 """Run the updater end to end against recorded borsapy responses.
 
 Only ``scripts.update_data.bp`` is replaced (with ``BorsapyReplay``), plus
-``time.sleep``, ``print`` and ``sys.argv`` around ``main``. Every ``fetch_*``
+``scripts.update_data.time`` (with a ``FakeClock``, so waits take no real
+time), ``print``, and ``sys.argv`` around ``main``. Every ``fetch_*``
 function, contract discovery and normalization run for real. ``main`` takes no
 clock argument, so its tests bind ``now`` to the capture time on the real
 ``build_snapshot``; that keeps the recorded contracts from expiring as the
@@ -29,9 +30,9 @@ from scripts.snapshot_schema import validate_snapshot
 from scripts.update_data import TROY_OUNCE_GRAMS, iso_timestamp
 
 try:  # `python -m unittest discover -s tests` puts tests/ on sys.path.
-    from borsapy_replay import BorsapyReplay
+    from borsapy_replay import BorsapyReplay, FakeClock
 except ImportError:  # `python -m unittest tests.test_update_data_replay`
-    from tests.borsapy_replay import BorsapyReplay
+    from tests.borsapy_replay import BorsapyReplay, FakeClock
 
 
 # The recording was captured at 22:28:40 Istanbul time on 20 Nov 2026.
@@ -45,6 +46,7 @@ MARKET_KEYS = ["USDTRY", "EURTRY", "XAUTRY"]
 class ReplayTestCase(unittest.TestCase):
     def setUp(self):
         self.replay = BorsapyReplay()
+        self.clock = FakeClock()
         self.printed: list[str] = []
         self.network_attempts: list[object] = []
 
@@ -66,6 +68,7 @@ class ReplayTestCase(unittest.TestCase):
     def build(self, now: datetime = NOW) -> dict:
         with (
             patch("scripts.update_data.bp", self.replay.module()),
+            patch("scripts.update_data.time", self.clock),
             patch("builtins.print", side_effect=self.record_print),
         ):
             snapshot = update_data.build_snapshot(now=now)
@@ -85,7 +88,7 @@ class ReplayTestCase(unittest.TestCase):
                 "scripts.update_data.build_snapshot",
                 partial(update_data.build_snapshot, now=now),
             ),
-            patch("scripts.update_data.time.sleep"),
+            patch("scripts.update_data.time", self.clock),
             patch("builtins.print", side_effect=self.record_print),
         ):
             update_data.main()
@@ -201,6 +204,43 @@ class HappyPathTests(ReplayTestCase):
         march = self.contract(snapshot, "USDTRY", "USDTRYH2027")
         self.assertEqual(march["last"], 56.16)
         self.assertIsNone(march["updated_at"])
+
+    def test_trade_times_sent_after_the_price_are_kept(self):
+        """The replay sends each recorded ``timestamp`` after the price, as TradingView does.
+
+        ``wait_for_quote`` returns every quote without its time, and the cache
+        gets it on the second poll. The 9 quotes recorded without a time never
+        get one, so the pass waits out its grace period for them.
+        """
+        self.assertEqual(self.replay.timestamp_polls_default, 2)
+        snapshot = self.build()
+
+        untimed = [
+            symbol for symbol, quote in self.replay.quotes.items()
+            if quote["timestamp"] is None
+        ]
+        self.assertEqual(len(untimed), 9)
+        for market in MARKET_KEYS:
+            for item in snapshot["markets"][market]["contracts"]:
+                recorded = self.replay.quotes[item["symbol"]]["timestamp"]
+                with self.subTest(symbol=item["symbol"]):
+                    self.assertEqual(item["updated_at"], iso_timestamp(recorded))
+        self.assertAlmostEqual(sum(self.clock.sleeps), update_data.QUOTE_TIME_GRACE_SECONDS)
+        self.assertIn(
+            "Warning: 9 of 23 streaming quotes had no last-trade time after 2.0s",
+            self.printed,
+        )
+
+    def test_trade_times_sent_with_the_price_cost_no_wait(self):
+        """Derived: every recorded time delivered with its price, and none missing."""
+        self.replay.timestamp_polls_default = 0
+        for quote in self.replay.quotes.values():
+            if quote["timestamp"] is None:
+                quote["timestamp"] = datetime(2026, 11, 20, 18, 0, tzinfo=ISTANBUL).timestamp()
+        self.build()
+
+        self.assertEqual(self.clock.sleeps, [])
+        self.assertFalse(any("last-trade time" in line for line in self.printed))
 
     def test_quote_without_change_falls_back_to_table_volume_tl(self):
         """Derived: ``change`` and ``change_percent`` removed from USDTRYZ2026's quote."""
@@ -469,6 +509,41 @@ class SpotAlignmentTests(ReplayTestCase):
             self.printed,
         )
         self.assertIn("aligned_to", snapshot["markets"]["USDTRY"]["spot"])
+
+    def test_late_trade_times_still_align_the_spot(self):
+        """Derived: every EUR/TRY time reaches the cache only on the tenth poll."""
+        for symbol in self.recorded_symbols("EURTRY"):
+            self.replay.timestamp_polls[symbol] = 10
+        snapshot = self.build()
+
+        eur = snapshot["markets"]["EURTRY"]["spot"]
+        self.assertEqual(eur["aligned_to"], "2026-11-20T15:35:00+03:00")
+        self.assertEqual(eur["last"], 55.59368)
+        self.assertEqual(
+            self.contract(snapshot, "EURTRY", "EURTRYX2026")["updated_at"],
+            "2026-11-20T15:35:00+03:00",
+        )
+        self.assertFalse(any("keeping the latest spot" in line for line in self.printed))
+
+    def test_trade_times_after_the_grace_period_stay_unknown(self):
+        """Derived: every EUR/TRY time would reach the cache only after 5 seconds."""
+        for symbol in self.recorded_symbols("EURTRY"):
+            self.replay.timestamp_polls[symbol] = 101
+        snapshot = self.build()
+
+        for item in snapshot["markets"]["EURTRY"]["contracts"]:
+            with self.subTest(symbol=item["symbol"]):
+                self.assertIsNone(item["updated_at"])
+        self.assertLessEqual(sum(self.clock.sleeps), update_data.QUOTE_TIME_GRACE_SECONDS + 1e-9)
+        self.assertNotIn("aligned_to", snapshot["markets"]["EURTRY"]["spot"])
+        self.assertIn(
+            "Warning: EUR/TRY futures have no last-trade time; keeping the latest spot",
+            self.printed,
+        )
+        self.assertIn(
+            "Warning: 11 of 23 streaming quotes had no last-trade time after 2.0s",
+            self.printed,
+        )
 
     def test_fallback_spot_without_a_frame_is_never_aligned(self):
         """Derived: the USD history's ``Close`` renamed, so USD/TRY uses ``.current``."""

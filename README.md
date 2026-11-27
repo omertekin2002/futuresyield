@@ -117,7 +117,9 @@ days to maturity, a `status` that matches `last`, sorted contracts without
 duplicate symbols, and at least one priced contract per market. A contract's
 `updated_at` is the time of its last trade, as an ISO timestamp with an offset,
 or null when the quote carried no time; the updater never fills in the
-snapshot time. A spot matched to the futures' last trade (below) carries
+snapshot time. TradingView sends that time a moment after the price, so the
+updater waits up to 2 seconds per stream connection for the quotes still
+missing it, and a time TradingView never sends stays unknown. A spot matched to the futures' last trade (below) carries
 `aligned_to`, an ISO timestamp, and `latest`, a positive `last` with an ISO
 `updated_at`; both are optional but come together, so earlier closes still
 validate. The strings

@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from scripts import update_data
 from scripts.update_data import (
     MARKETS,
     TROY_OUNCE_GRAMS,
@@ -28,6 +29,11 @@ from scripts.update_data import (
     symbol_from_table_code,
 )
 from scripts.snapshot_schema import validate_snapshot
+
+try:  # `python -m unittest discover -s tests` puts tests/ on sys.path.
+    from borsapy_replay import FakeClock
+except ImportError:  # `python -m unittest tests.test_update_data`
+    from tests.borsapy_replay import FakeClock
 
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "market.json"
@@ -470,7 +476,7 @@ class StreamQuoteTests(unittest.TestCase):
                 pass
 
             def wait_for_quote(self, symbol, timeout):
-                return {"last": 48.25}
+                return {"last": 48.25, "timestamp": 1795187340}
 
             def get_quote(self, symbol):
                 return None
@@ -491,6 +497,159 @@ class StreamQuoteTests(unittest.TestCase):
         mock_print.assert_called_once_with(
             "Warning: TradingView stream cleanup failed (pass 1): "
             "'NoneType' object has no attribute 'close_frame'"
+        )
+
+
+
+class SplitDeliveryStream:
+    """TradingView sends ``lp_time`` a moment after the price.
+
+    ``wait_for_quote`` returns each quote without its time. ``get_quote``
+    returns ``cached`` (default: the quote with its time) once it has been
+    polled ``polls`` times for that symbol, and the quote without it before.
+    ``polls=None`` never delivers the time.
+    """
+
+    def __init__(self, quotes, polls=1, cached=None):
+        self.quotes = quotes
+        self.polls = polls
+        self.cached = cached or {}
+        self.calls = {}
+        self.disconnected = False
+
+    def connect(self, timeout):
+        pass
+
+    def subscribe(self, symbol):
+        pass
+
+    def wait_for_quote(self, symbol, timeout):
+        return {**self.quotes[symbol], "timestamp": None}
+
+    def get_quote(self, symbol):
+        assert not self.disconnected, "polled a disconnected stream"
+        self.calls[symbol] = self.calls.get(symbol, 0) + 1
+        if symbol in self.cached:
+            return self.cached[symbol]
+        if self.polls is not None and self.calls[symbol] >= self.polls:
+            return dict(self.quotes[symbol])
+        return {**self.quotes[symbol], "timestamp": None}
+
+    def disconnect(self):
+        self.disconnected = True
+
+
+class TradeTimeGraceTests(unittest.TestCase):
+    QUOTES = {
+        "USDTRYZ2026": {"last": 52.26, "bid": 52.24, "timestamp": 1795187340},
+        "EURTRYZ2026": {"last": 60.1, "bid": 60.05, "timestamp": 1795178100},
+    }
+
+    def fetch(self, stream, symbols=None):
+        self.clock = FakeClock()
+        self.printed = []
+        with (
+            patch("scripts.update_data.bp.TradingViewStream", return_value=stream),
+            patch("scripts.update_data.time", self.clock),
+            patch(
+                "builtins.print",
+                side_effect=lambda *args: self.printed.append(" ".join(map(str, args))),
+            ),
+        ):
+            return fetch_stream_quotes(symbols or list(self.QUOTES), timeout=0.01)
+
+    def waited(self):
+        return sum(self.clock.sleeps)
+
+    def test_a_time_that_arrives_during_the_grace_period_is_kept(self):
+        stream = SplitDeliveryStream(self.QUOTES, polls=4)
+        quotes = self.fetch(stream)
+
+        for symbol, recorded in self.QUOTES.items():
+            self.assertEqual(quotes[symbol]["timestamp"], recorded["timestamp"])
+            self.assertEqual(quotes[symbol]["last"], recorded["last"])
+        # Polled every 50 ms until the fourth poll had it.
+        self.assertEqual(self.clock.sleeps, [0.05, 0.05, 0.05])
+        self.assertEqual(self.printed, [])
+
+    def test_a_time_that_never_arrives_stays_null_within_the_bound(self):
+        stream = SplitDeliveryStream(
+            self.QUOTES, polls=None, cached={"EURTRYZ2026": dict(self.QUOTES["EURTRYZ2026"])}
+        )
+        quotes = self.fetch(stream)
+
+        self.assertIsNone(quotes["USDTRYZ2026"]["timestamp"])
+        self.assertEqual(quotes["USDTRYZ2026"]["last"], 52.26)
+        self.assertEqual(quotes["EURTRYZ2026"]["timestamp"], 1795178100)
+        self.assertAlmostEqual(self.waited(), update_data.QUOTE_TIME_GRACE_SECONDS)
+        self.assertLessEqual(self.waited(), 2.0 + 1e-9)
+        self.assertTrue(stream.disconnected)
+        self.assertEqual(
+            self.printed,
+            ["Warning: 1 of 2 streaming quotes had no last-trade time after 2.0s"],
+        )
+
+    def test_quotes_that_already_have_a_time_cost_no_wait(self):
+        class TimedStream(SplitDeliveryStream):
+            def wait_for_quote(self, symbol, timeout):
+                return dict(self.quotes[symbol])
+
+        stream = TimedStream(self.QUOTES)
+        quotes = self.fetch(stream)
+
+        self.assertEqual(self.clock.sleeps, [])
+        self.assertEqual(stream.calls, {symbol: 1 for symbol in self.QUOTES})
+        self.assertEqual(quotes, self.QUOTES)
+        self.assertEqual(self.printed, [])
+
+    def test_the_refresh_keeps_the_cache_s_newer_fields(self):
+        newer = {"last": 52.27, "bid": 52.25, "timestamp": 1795187400}
+        stream = SplitDeliveryStream(self.QUOTES, cached={"USDTRYZ2026": newer})
+        quotes = self.fetch(stream)
+
+        self.assertEqual(quotes["USDTRYZ2026"], newer)
+
+    def test_a_cached_quote_without_a_price_keeps_the_received_one(self):
+        for cached in (None, {"timestamp": 1795187340}, {"last": None, "timestamp": 1}):
+            with self.subTest(cached=cached):
+                stream = SplitDeliveryStream(
+                    {"USDTRYZ2026": self.QUOTES["USDTRYZ2026"]},
+                    cached={"USDTRYZ2026": cached},
+                )
+                quotes = self.fetch(stream, ["USDTRYZ2026"])
+
+                self.assertEqual(
+                    quotes["USDTRYZ2026"], {**self.QUOTES["USDTRYZ2026"], "timestamp": None}
+                )
+                self.assertAlmostEqual(self.waited(), 2.0)
+
+    def test_a_cached_quote_without_a_time_never_drops_a_known_one(self):
+        class TimedStream(SplitDeliveryStream):
+            def wait_for_quote(self, symbol, timeout):
+                return dict(self.quotes[symbol])
+
+        stream = TimedStream(
+            self.QUOTES,
+            cached={"USDTRYZ2026": {"last": 52.27, "timestamp": None}},
+        )
+        quotes = self.fetch(stream)
+
+        self.assertEqual(quotes["USDTRYZ2026"], self.QUOTES["USDTRYZ2026"])
+        self.assertEqual(self.printed, [])
+
+    def test_a_failing_cache_keeps_the_received_quotes(self):
+        class BrokenCacheStream(SplitDeliveryStream):
+            def get_quote(self, symbol):
+                raise RuntimeError("cache gone")
+
+        stream = BrokenCacheStream(self.QUOTES)
+        quotes = self.fetch(stream)
+
+        self.assertEqual(set(quotes), set(self.QUOTES))
+        self.assertTrue(stream.disconnected)
+        self.assertIn(
+            "Warning: could not wait for last-trade times (pass 1): cache gone",
+            self.printed,
         )
 
 

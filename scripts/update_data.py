@@ -632,6 +632,57 @@ def discover_contracts(
     )
 
 
+# TradingView sends a quote's last-trade time (``lp_time``) in its own packet a
+# moment after the price, but ``wait_for_quote`` returns on the price. Each
+# stream pass waits at most this long, in all, for the times still missing.
+QUOTE_TIME_GRACE_SECONDS = 2.0
+QUOTE_TIME_POLL_SECONDS = 0.05
+
+
+def refresh_from_stream(
+    stream: Any, quotes: dict[str, dict[str, Any]], symbol: str
+) -> None:
+    """Replace a received quote with the stream's cached one, if it still has a price.
+
+    A refreshed quote that lost a time the received one had is ignored, so a
+    known trade time is never dropped.
+    """
+    refreshed = stream.get_quote(symbol)
+    if not refreshed or finite_number(refreshed.get("last")) is None:
+        return
+    if refreshed.get("timestamp") is None and quotes[symbol].get("timestamp") is not None:
+        return
+    quotes[symbol] = refreshed
+
+
+def await_trade_times(
+    stream: Any, quotes: dict[str, dict[str, Any]], symbols: list[str]
+) -> None:
+    """Give quotes received without a trade time a bounded wait for it.
+
+    Only TradingView's own ``lp_time`` is ever kept: a quote whose time doesn't
+    reach the stream's cache within the grace period keeps ``timestamp: None``.
+    """
+    missing = [symbol for symbol in symbols if quotes[symbol].get("timestamp") is None]
+    if missing:
+        deadline = time.monotonic() + QUOTE_TIME_GRACE_SECONDS
+        while True:
+            for symbol in missing:
+                refresh_from_stream(stream, quotes, symbol)
+            missing = [
+                symbol for symbol in missing if quotes[symbol].get("timestamp") is None
+            ]
+            remaining = deadline - time.monotonic()
+            if not missing or remaining <= 0:
+                break
+            time.sleep(min(QUOTE_TIME_POLL_SECONDS, remaining))
+    # The cache holds every field received so far, which may be newer than
+    # the packet wait_for_quote returned on.
+    for symbol in symbols:
+        if symbol not in missing:
+            refresh_from_stream(stream, quotes, symbol)
+
+
 def fetch_stream_quotes(symbols: list[str], timeout: float = 10.0) -> dict[str, dict[str, Any]]:
     """Fetch every contract concurrently, reconnecting once for missing quotes."""
     quotes: dict[str, dict[str, Any]] = {}
@@ -672,12 +723,27 @@ def fetch_stream_quotes(symbols: list[str], timeout: float = 10.0) -> dict[str, 
                 if late_quote and finite_number(late_quote.get("last")) is not None:
                     quotes[symbol] = late_quote
             try:
+                await_trade_times(
+                    stream, quotes, [symbol for symbol in pending if symbol in quotes]
+                )
+            except Exception as exc:
+                print(
+                    f"Warning: could not wait for last-trade times "
+                    f"(pass {pass_number}): {exc}"
+                )
+            try:
                 stream.disconnect()
             except Exception as exc:
                 print(
                     f"Warning: TradingView stream cleanup failed "
                     f"(pass {pass_number}): {exc}"
                 )
+    untimed = sum(1 for quote in quotes.values() if quote.get("timestamp") is None)
+    if untimed:
+        print(
+            f"Warning: {untimed} of {len(quotes)} streaming quotes had no "
+            f"last-trade time after {QUOTE_TIME_GRACE_SECONDS:.1f}s"
+        )
     return quotes
 
 

@@ -26,7 +26,11 @@ Quirks in the real data that the tests rely on:
 - `bp.VIOP().futures` uses the 0.10.2 remap: `volume_tl` holds the absolute
   price change and `volume_qty` the TRY turnover.
 - Several quotes (for example `USDTRYH2027`, `EURTRYZ2026`) arrived with
-  `timestamp: None`. Some quotes carry `ask` as an integer.
+  `timestamp: None`: TradingView sends a quote's time (`lp_time`) in its own
+  packet a moment after the price, and `wait_for_quote` had already returned.
+  The replay keeps that split: `wait_for_quote` returns every quote without
+  its time, and the recorded `timestamp` reaches the stream's cache a couple
+  of `get_quote` polls later. Some quotes carry `ask` as an integer.
 - The daily history includes Mon 25 May, after the 180-day target.
 
 Every other quirk and drift case (a missing `bid`, malformed numbers, an
