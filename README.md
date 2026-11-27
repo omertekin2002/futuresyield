@@ -117,7 +117,9 @@ days to maturity, a `status` that matches `last`, sorted contracts without
 duplicate symbols, and at least one priced contract per market. A contract's
 `updated_at` is the time of its last trade, as an ISO timestamp with an offset,
 or null when the quote carried no time; the updater never fills in the
-snapshot time. A spot matched to the futures' last trade (below) carries
+snapshot time. TradingView sends that time a moment after the price, so the
+updater waits up to 2 seconds per stream connection for the quotes still
+missing it, and a time TradingView never sends stays unknown. A spot matched to the futures' last trade (below) carries
 `aligned_to`, an ISO timestamp, and `latest`, a positive `last` with an ISO
 `updated_at`; both are optional but come together, so earlier closes still
 validate. The strings
@@ -834,8 +836,10 @@ comparison changes, and hides with the selection.
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs on every pull request, on pushes to branches
-other than `main`, and on demand. It never deploys. It runs the updater tests
+`.github/workflows/ci.yml` runs on every pull request, on every push (`main`
+included), on demand, and once a weekday at 21:50 UTC (00:50 TRT), after the
+23:20 TRT Pages run has archived the day's close. So a direct commit to `main`
+or a new close that breaks the page fails CI the same day. It never deploys. It runs the updater tests
 offline on Python 3.10 and 3.12, checks `app.js` syntax with `node --check`,
 checks that `data/market.json` parses, validates it and
 `tests/fixtures/market.json` with `scripts/snapshot_schema.py`, and assembles
@@ -844,8 +848,9 @@ is missing, and lints both workflows with a pinned, checksum-verified
 `actionlint` release. `tests/test_workflows.py` checks the workflows' design:
 every job has a timeout, `archive` doesn't wait on the Pages build, write
 permissions stay per job, every action is on its Node 24 major, and every
-`data-history` fetch goes through `scripts/fetch_history.sh`, and every
-`pip install` passes `--constraint constraints.txt`.
+`data-history` fetch goes through `scripts/fetch_history.sh`, every
+`pip install` passes `--constraint constraints.txt`, and CI keeps running on
+pushes to `main` and on its weekday schedule with no write permission.
 A separate `smoke` job installs `requirements-dev.txt` and Chromium and runs
 `python -m unittest tests/e2e/test_dashboard_smoke.py -v`, including the
 accessibility audit.
