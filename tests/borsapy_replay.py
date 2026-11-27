@@ -44,6 +44,21 @@ def frame_from_recording(recording: dict[str, Any]) -> pd.DataFrame:
     return pd.DataFrame(recording["data"], columns=recording["columns"], index=index)
 
 
+class FakeClock:
+    """Stands in for ``scripts.update_data.time``: ``sleep`` only moves the clock."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
 class UnrecordedCall(LookupError):
     """The updater asked borsapy for something the recording doesn't hold."""
 
@@ -72,6 +87,13 @@ class BorsapyReplay:
         self.stream_timeouts: set[str] = set()
         # Symbols whose wait_for_quote raises the given error instead.
         self.quote_errors: dict[str, Exception] = {}
+        # TradingView sends a quote's trade time (lp_time) in a packet after
+        # its price, and wait_for_quote returns on the price. A recorded
+        # ``timestamp`` reaches the stream's cache on this many get_quote calls
+        # after that: 0 delivers it with the price, None never delivers it.
+        # ``timestamp_polls`` overrides the default per symbol.
+        self.timestamp_polls_default: int | None = 2
+        self.timestamp_polls: dict[str, int | None] = {}
 
         self.unrecorded: list[str] = []
         self.streams_opened = 0
@@ -147,6 +169,7 @@ class BorsapyReplay:
                 replay.streams_opened += 1
                 self.connected = False
                 self.subscribed: set[str] = set()
+                self.polls: dict[str, int] = {}
 
             def connect(self, timeout: float = 10.0) -> bool:
                 if replay.stream_connect_error is not None:
@@ -166,7 +189,15 @@ class BorsapyReplay:
                 ):
                     return None
                 quote = replay.quotes.get(symbol)
-                return copy.deepcopy(quote) if quote is not None else None
+                if quote is None:
+                    return None
+                quote = copy.deepcopy(quote)
+                needed = replay.timestamp_polls.get(symbol, replay.timestamp_polls_default)
+                if "timestamp" in quote and (
+                    needed is None or self.polls.get(symbol, 0) < needed
+                ):
+                    quote["timestamp"] = None
+                return quote
 
             def wait_for_quote(self, symbol: str, timeout: float = 5.0) -> dict[str, Any]:
                 symbol = symbol.upper()
@@ -178,7 +209,10 @@ class BorsapyReplay:
                 return quote
 
             def get_quote(self, symbol: str) -> dict[str, Any] | None:
-                return self._received(symbol.upper())
+                symbol = symbol.upper()
+                if self.connected:
+                    self.polls[symbol] = self.polls.get(symbol, 0) + 1
+                return self._received(symbol)
 
             def disconnect(self) -> None:
                 self.connected = False
